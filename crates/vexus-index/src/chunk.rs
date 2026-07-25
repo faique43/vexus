@@ -18,8 +18,10 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
     // 1. Module preamble: lines not covered by any non-module symbol.
     let mut covered = vec![false; lines.len()];
     for s in idx.symbols.iter().skip(1) {
-        for l in (s.start_line as usize - 1)..(s.end_line as usize).min(lines.len()) {
-            covered[l] = true;
+        let start = (s.start_line as usize - 1).min(covered.len());
+        let end = (s.end_line as usize).min(lines.len());
+        if start < end {
+            covered[start..end].fill(true);
         }
     }
     let preamble: String = lines.iter().enumerate()
@@ -79,10 +81,9 @@ fn split_oversized(
     let mut first = true;
     let flush = |chunks: &mut Vec<NewChunk>, buf: &mut String, from: u32, to: u32, first: bool| {
         if buf.trim().is_empty() { return }
-        let content = if first || sig.is_none() {
-            std::mem::take(buf)
-        } else {
-            format!("{}\n{}", sig.unwrap(), std::mem::take(buf))
+        let content = match sig {
+            Some(s) if !first => format!("{}\n{}", s, std::mem::take(buf)),
+            _ => std::mem::take(buf),
         };
         chunks.push(NewChunk { symbol: Some(sym_index), start_line: from, end_line: to, content });
     };
