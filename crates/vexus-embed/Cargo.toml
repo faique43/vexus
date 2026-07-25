@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
+ureq.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
