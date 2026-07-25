@@ -16,13 +16,9 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
         let mut conn = Connection::open(path)?;
-        if !Self::version_ok(&conn)? {
+        if !Self::version_ok(&conn) {
             drop(conn);
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(e.into());
-                }
-            }
+            Self::remove_db_files(path)?;
             conn = Connection::open(path)?;
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -31,14 +27,38 @@ impl Store {
         Ok(Self { conn })
     }
 
-    fn version_ok(conn: &Connection) -> Result<bool> {
-        let has_meta: i64 = conn.query_row(
+    /// Delete the DB file plus its WAL/SHM sidecars, ignoring "not found" errors.
+    fn remove_db_files(path: &Path) -> Result<()> {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        let mut shm = path.as_os_str().to_owned();
+        shm.push("-shm");
+        for p in [path.as_os_str().to_owned(), wal, shm] {
+            if let Err(e) = std::fs::remove_file(Path::new(&p)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The index is a disposable cache: any error probing the schema (corrupt
+    /// or truncated DB file, unreadable `meta` table, etc.) is treated as
+    /// "not ok" so `open` falls through to delete-and-rebuild rather than
+    /// propagating the error and leaving the store permanently unusable.
+    fn version_ok(conn: &Connection) -> bool {
+        let has_meta: Result<i64, rusqlite::Error> = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE name = 'meta'",
             [],
             |r| r.get(0),
-        )?;
+        );
+        let has_meta = match has_meta {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
         if has_meta == 0 {
-            return Ok(true); // fresh file, nothing to mismatch
+            return true; // fresh file, nothing to mismatch
         }
         let v: Option<String> = conn
             .query_row(
@@ -47,7 +67,7 @@ impl Store {
                 |r| r.get(0),
             )
             .ok();
-        Ok(v.as_deref() == Some(SCHEMA_VERSION))
+        v.as_deref() == Some(SCHEMA_VERSION)
     }
 
     fn init_if_empty(conn: &Connection) -> Result<()> {
@@ -218,6 +238,31 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(n, 1, "missing table {t}");
+        }
+    }
+
+    #[test]
+    fn corrupt_db_is_deleted_and_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        std::fs::write(&db, b"not a database at all").unwrap();
+
+        // Also drop stale WAL/SHM sidecars to verify they get cleaned up too.
+        std::fs::write(dir.path().join("index.db-wal"), b"stale wal").unwrap();
+        std::fs::write(dir.path().join("index.db-shm"), b"stale shm").unwrap();
+
+        let store = Store::open(&db).expect("corrupt DB must self-heal, not fail forever");
+        assert_eq!(
+            store.meta("schema_version").unwrap().unwrap(),
+            SCHEMA_VERSION
+        );
+        let c = store.counts().unwrap();
+        assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
+
+        // The stale sidecar content must be gone — WAL mode may recreate its
+        // own valid file, but never with the old garbage bytes.
+        if let Ok(wal) = std::fs::read(dir.path().join("index.db-wal")) {
+            assert_ne!(wal, b"stale wal");
         }
     }
 
