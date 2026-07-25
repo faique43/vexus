@@ -2,6 +2,50 @@ use vexus_core::model::{estimate_tokens, FileIndex, NewChunk, SymbolKind};
 
 const MAX_TOKENS: u32 = 512;
 
+/// Lines (1-based) whose trimmed text marks doc/comment/decorator/attribute content.
+fn is_annotation_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with('#')
+        || t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with('*')
+        || t.starts_with('@')
+}
+
+/// Extend `start` upward over contiguous annotation lines not covered by another symbol.
+fn extend_start(start: u32, covered_by_other: &[bool], lines: &[&str]) -> u32 {
+    let mut s = start;
+    while s > 1 {
+        let prev = (s - 2) as usize; // 0-based index of line s-1
+        if prev >= covered_by_other.len()
+            || prev >= lines.len()
+            || covered_by_other[prev]
+            || lines[prev].trim().is_empty()
+            || !is_annotation_line(lines[prev])
+        {
+            break;
+        }
+        s -= 1;
+    }
+    s
+}
+
+fn cap_content(content: String) -> String {
+    if estimate_tokens(&content) <= MAX_TOKENS {
+        return content;
+    }
+    let mut out = String::new();
+    for line in content.lines() {
+        if estimate_tokens(&out) + estimate_tokens(line) > MAX_TOKENS - 4 {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("… (truncated)\n");
+    out
+}
+
 pub fn build_chunks(idx: &mut FileIndex, source: &str) {
     let lines: Vec<&str> = source.lines().collect();
     let slice = |start: u32, end: u32| -> String {
@@ -17,7 +61,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
 
     let mut chunks = Vec::new();
 
-    // 1. Module preamble: lines not covered by any non-module symbol.
+    // 1. Build `covered` bitmap from non-module symbol ranges.
     let mut covered = vec![false; lines.len()];
     for s in idx.symbols.iter().skip(1) {
         let start = (s.start_line as usize - 1).min(covered.len());
@@ -26,29 +70,61 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             covered[start..end].fill(true);
         }
     }
-    let preamble: String = lines
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !covered[*i])
-        .map(|(_, l)| format!("{l}\n"))
-        .collect();
-    if !preamble.trim().is_empty() {
-        chunks.push(NewChunk {
-            symbol: Some(0),
-            start_line: 1,
-            end_line: lines.len() as u32,
-            content: preamble,
-        });
+
+    // 2. Doc extension for ALL leaf/container symbols first, so `covered` is final
+    //    before the preamble is computed. Extended lines are marked covered.
+    let mut ext_starts: Vec<u32> = vec![0; idx.symbols.len()];
+    for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
+        if !matches!(
+            sym.kind,
+            SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Enum
+                | SymbolKind::Trait
+                | SymbolKind::Interface
+        ) {
+            continue;
+        }
+        let ext_start = extend_start(sym.start_line, &covered, &lines);
+        ext_starts[i] = ext_start;
+        let start = (ext_start as usize - 1).min(covered.len());
+        let end = ((sym.start_line as usize).saturating_sub(1)).min(covered.len());
+        if start < end {
+            covered[start..end].fill(true);
+        }
     }
 
+    // 3. Module preamble: one chunk per contiguous run of uncovered, non-blank lines.
+    let mut run_start: Option<usize> = None;
+    for i in 0..=lines.len() {
+        let uncovered_nonblank = i < lines.len() && !covered[i] && !lines[i].trim().is_empty();
+        if uncovered_nonblank {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        } else if let Some(rs) = run_start.take() {
+            let run_text: String = lines[rs..i].iter().map(|l| format!("{l}\n")).collect();
+            chunks.push(NewChunk {
+                symbol: Some(0),
+                start_line: (rs + 1) as u32,
+                end_line: i as u32,
+                content: cap_content(run_text),
+            });
+        }
+    }
+
+    // 4. Symbol chunks (leaf bodies / container skeletons), using the doc-extended start.
     for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
         match sym.kind {
             SymbolKind::Function | SymbolKind::Method => {
-                let content = slice(sym.start_line, sym.end_line);
+                let ext_start = ext_starts[i];
+                let content = slice(ext_start, sym.end_line);
                 if estimate_tokens(&content) <= MAX_TOKENS {
                     chunks.push(NewChunk {
                         symbol: Some(i),
-                        start_line: sym.start_line,
+                        start_line: ext_start,
                         end_line: sym.end_line,
                         content,
                     });
@@ -57,7 +133,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                         &mut chunks,
                         i,
                         sym.sig.as_deref(),
-                        sym.start_line,
+                        ext_start,
                         sym.end_line,
                         &lines,
                     );
@@ -68,8 +144,12 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             | SymbolKind::Enum
             | SymbolKind::Trait
             | SymbolKind::Interface => {
-                // Skeleton: own sig + direct children sigs.
+                let ext_start = ext_starts[i];
+                // Skeleton: doc lines (if extended) + own sig + direct children sigs.
                 let mut content = String::new();
+                if ext_start < sym.start_line {
+                    content.push_str(&slice(ext_start, sym.start_line - 1));
+                }
                 if let Some(sig) = &sym.sig {
                     content.push_str(sig);
                     content.push('\n');
@@ -84,9 +164,9 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                 if !content.trim().is_empty() {
                     chunks.push(NewChunk {
                         symbol: Some(i),
-                        start_line: sym.start_line,
+                        start_line: ext_start,
                         end_line: sym.end_line,
-                        content,
+                        content: cap_content(content),
                     });
                 }
             }
@@ -192,6 +272,116 @@ mod tests {
 
         let a = idx.chunks.iter().find(|c| c.symbol == Some(2)).unwrap();
         assert_eq!(a.content, "    def a(self):\n        pass\n");
+    }
+
+    #[test]
+    fn doc_comments_extend_leaf_and_container_chunks() {
+        let source = "\
+import x
+
+# helper docs line 3
+# more docs line 4
+def helped():
+    pass
+
+@decorator
+def decorated():
+    pass
+";
+        let mut idx = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 10,
+                    parent: None,
+                    arity: None,
+                },
+                f("helped", SymbolKind::Function, 5, 6, Some(0)),
+                f("decorated", SymbolKind::Function, 9, 10, Some(0)),
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, source);
+
+        let helped = idx.chunks.iter().find(|c| c.symbol == Some(1)).unwrap();
+        assert_eq!(helped.start_line, 3); // extended over both comment lines
+        assert!(helped.content.starts_with("# helper docs line 3"));
+
+        let dec = idx.chunks.iter().find(|c| c.symbol == Some(2)).unwrap();
+        assert_eq!(dec.start_line, 8); // extended over @decorator
+        assert!(dec.content.starts_with("@decorator"));
+
+        // preamble must NOT contain the claimed doc lines
+        let pre: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(0)).collect();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].content, "import x\n");
+        assert_eq!((pre[0].start_line, pre[0].end_line), (1, 1));
+    }
+
+    #[test]
+    fn preamble_split_into_contiguous_runs_with_true_ranges() {
+        let source =
+            "import a\n\ndef f1():\n    pass\n\nCONST = 1\nOTHER = 2\n\ndef f2():\n    pass\n";
+        //            1         2  3          4        5  6          7          8  9          10
+        let mut idx = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 10,
+                    parent: None,
+                    arity: None,
+                },
+                f("f1", SymbolKind::Function, 3, 4, Some(0)),
+                f("f2", SymbolKind::Function, 9, 10, Some(0)),
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, source);
+
+        let pre: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(0)).collect();
+        assert_eq!(pre.len(), 2);
+        assert_eq!((pre[0].start_line, pre[0].end_line), (1, 1));
+        assert_eq!(pre[0].content, "import a\n");
+        assert_eq!((pre[1].start_line, pre[1].end_line), (6, 7));
+        assert_eq!(pre[1].content, "CONST = 1\nOTHER = 2\n");
+    }
+
+    #[test]
+    fn container_and_preamble_chunks_are_capped() {
+        // 600 one-line consts ≈ >512 tokens of preamble
+        let source: String = (0..600).map(|i| format!("CONST_{i:04} = {i}\n")).collect();
+        let mut idx = FileIndex {
+            symbols: vec![NewSymbol {
+                name: "m".into(),
+                qualname: "m".into(),
+                kind: SymbolKind::Module,
+                sig: None,
+                start_line: 1,
+                end_line: 600,
+                parent: None,
+                arity: None,
+            }],
+            edges: vec![],
+            chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, &source);
+        for c in &idx.chunks {
+            assert!(vexus_core::model::estimate_tokens(&c.content) <= 512 + 8);
+        }
+        assert!(idx
+            .chunks
+            .iter()
+            .any(|c| c.content.ends_with("… (truncated)\n")));
     }
 
     #[test]
