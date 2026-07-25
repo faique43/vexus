@@ -81,7 +81,9 @@ impl Store {
     pub fn file_hash(&self, path: &str) -> Result<Option<[u8; 32]>> {
         let v: Option<Vec<u8>> = self
             .conn
-            .query_row("SELECT hash FROM files WHERE path = ?1", [path], |r| r.get(0))
+            .query_row("SELECT hash FROM files WHERE path = ?1", [path], |r| {
+                r.get(0)
+            })
             .map(Some)
             .or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -130,7 +132,13 @@ impl Store {
             ids.push(tx.last_insert_rowid());
         }
         for e in &idx.edges {
-            let src_id = *ids.get(e.src).ok_or_else(|| anyhow!("edge src index {} out of range (batch has {} symbols)", e.src, ids.len()))?;
+            let src_id = *ids.get(e.src).ok_or_else(|| {
+                anyhow!(
+                    "edge src index {} out of range (batch has {} symbols)",
+                    e.src,
+                    ids.len()
+                )
+            })?;
             tx.execute(
                 "INSERT INTO edges (src_id, kind, dst_name, dst_arity, dst_id, confidence)
                  VALUES (?1, ?2, ?3, ?4, NULL, 'name_only')",
@@ -139,7 +147,13 @@ impl Store {
         }
         for c in &idx.chunks {
             let symbol_id = match c.symbol {
-                Some(i) => Some(*ids.get(i).ok_or_else(|| anyhow!("chunk symbol index {} out of range (batch has {} symbols)", i, ids.len()))?),
+                Some(i) => Some(*ids.get(i).ok_or_else(|| {
+                    anyhow!(
+                        "chunk symbol index {} out of range (batch has {} symbols)",
+                        i,
+                        ids.len()
+                    )
+                })?),
                 None => None,
             };
             let content_hash = blake3::hash(c.content.as_bytes());
@@ -157,7 +171,9 @@ impl Store {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<bool> {
-        let n = self.conn.execute("DELETE FROM files WHERE path = ?1", [path])?;
+        let n = self
+            .conn
+            .execute("DELETE FROM files WHERE path = ?1", [path])?;
         Ok(n > 0)
     }
 
@@ -168,9 +184,7 @@ impl Store {
     }
 
     pub fn counts(&self) -> Result<crate::model::Counts> {
-        let one = |sql: &str| -> Result<i64> {
-            Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
-        };
+        let one = |sql: &str| -> Result<i64> { Ok(self.conn.query_row(sql, [], |r| r.get(0))?) };
         Ok(crate::model::Counts {
             files: one("SELECT count(*) FROM files")?,
             symbols: one("SELECT count(*) FROM symbols")?,
@@ -189,7 +203,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("index.db");
         let store = Store::open(&db).unwrap();
-        assert_eq!(store.meta("schema_version").unwrap().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            store.meta("schema_version").unwrap().unwrap(),
+            SCHEMA_VERSION
+        );
         // core tables exist
         for t in ["files", "symbols", "edges", "chunks", "embed_cache"] {
             let n: i64 = store
@@ -212,25 +229,56 @@ mod tests {
             let store = Store::open(&db).unwrap();
             store
                 .conn
-                .execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'", [])
+                .execute(
+                    "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+                    [],
+                )
                 .unwrap();
         }
         let store = Store::open(&db).unwrap();
-        assert_eq!(store.meta("schema_version").unwrap().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            store.meta("schema_version").unwrap().unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     fn sample_index() -> crate::model::FileIndex {
         use crate::model::*;
         FileIndex {
             symbols: vec![
-                NewSymbol { name: "mod".into(), qualname: "app".into(), kind: SymbolKind::Module,
-                    sig: None, start_line: 1, end_line: 10, parent: None, arity: None },
-                NewSymbol { name: "greet".into(), qualname: "app.greet".into(), kind: SymbolKind::Function,
-                    sig: Some("def greet(name)".into()), start_line: 3, end_line: 5, parent: Some(0), arity: Some(1) },
+                NewSymbol {
+                    name: "mod".into(),
+                    qualname: "app".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 10,
+                    parent: None,
+                    arity: None,
+                },
+                NewSymbol {
+                    name: "greet".into(),
+                    qualname: "app.greet".into(),
+                    kind: SymbolKind::Function,
+                    sig: Some("def greet(name)".into()),
+                    start_line: 3,
+                    end_line: 5,
+                    parent: Some(0),
+                    arity: Some(1),
+                },
             ],
-            edges: vec![NewEdge { src: 1, kind: EdgeKind::Calls, dst_name: "format".into(), dst_arity: Some(1) }],
-            chunks: vec![NewChunk { symbol: Some(1), start_line: 3, end_line: 5,
-                content: "def greet(name):\n    return f\"hi {name}\"\n".into() }],
+            edges: vec![NewEdge {
+                src: 1,
+                kind: EdgeKind::Calls,
+                dst_name: "format".into(),
+                dst_arity: Some(1),
+            }],
+            chunks: vec![NewChunk {
+                symbol: Some(1),
+                start_line: 3,
+                end_line: 5,
+                content: "def greet(name):\n    return f\"hi {name}\"\n".into(),
+            }],
         }
     }
 
@@ -241,21 +289,30 @@ mod tests {
         let hash = [7u8; 32];
 
         assert!(store.file_hash("app.py").unwrap().is_none());
-        store.replace_file("app.py", "python", &hash, &sample_index()).unwrap();
+        store
+            .replace_file("app.py", "python", &hash, &sample_index())
+            .unwrap();
         assert_eq!(store.file_hash("app.py").unwrap(), Some(hash));
 
         let c = store.counts().unwrap();
         assert_eq!((c.files, c.symbols, c.edges, c.chunks), (1, 2, 1, 1));
 
         // parent_id got remapped from batch index to rowid
-        let parent_ok: i64 = store.conn.query_row(
-            "SELECT count(*) FROM symbols s JOIN symbols p ON s.parent_id = p.id
+        let parent_ok: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM symbols s JOIN symbols p ON s.parent_id = p.id
              WHERE s.qualname = 'app.greet' AND p.qualname = 'app'",
-            [], |r| r.get(0)).unwrap();
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(parent_ok, 1);
 
         // replacing again does not duplicate
-        store.replace_file("app.py", "python", &[8u8; 32], &sample_index()).unwrap();
+        store
+            .replace_file("app.py", "python", &[8u8; 32], &sample_index())
+            .unwrap();
         let c = store.counts().unwrap();
         assert_eq!((c.files, c.symbols, c.edges, c.chunks), (1, 2, 1, 1));
 
@@ -274,18 +331,32 @@ mod tests {
         // Create a malformed index with out-of-range edge src
         use crate::model::*;
         let bad_index = FileIndex {
-            symbols: vec![
-                NewSymbol { name: "func".into(), qualname: "app.func".into(), kind: SymbolKind::Function,
-                    sig: None, start_line: 1, end_line: 5, parent: None, arity: None },
-            ],
-            edges: vec![NewEdge { src: 99, kind: EdgeKind::Calls, dst_name: "other".into(), dst_arity: None }],
+            symbols: vec![NewSymbol {
+                name: "func".into(),
+                qualname: "app.func".into(),
+                kind: SymbolKind::Function,
+                sig: None,
+                start_line: 1,
+                end_line: 5,
+                parent: None,
+                arity: None,
+            }],
+            edges: vec![NewEdge {
+                src: 99,
+                kind: EdgeKind::Calls,
+                dst_name: "other".into(),
+                dst_arity: None,
+            }],
             chunks: vec![],
         };
 
         // Should return Err, not panic
         let result = store.replace_file("bad.py", "python", &hash, &bad_index);
         assert!(result.is_err(), "malformed index should return Err");
-        assert!(result.unwrap_err().to_string().contains("edge src index"), "error should mention src index");
+        assert!(
+            result.unwrap_err().to_string().contains("edge src index"),
+            "error should mention src index"
+        );
 
         // Store should be unchanged (counts all 0)
         let c = store.counts().unwrap();
@@ -301,10 +372,16 @@ mod tests {
         // Create a malformed index with out-of-range parent
         use crate::model::*;
         let bad_index = FileIndex {
-            symbols: vec![
-                NewSymbol { name: "child".into(), qualname: "app.child".into(), kind: SymbolKind::Function,
-                    sig: None, start_line: 1, end_line: 5, parent: Some(99), arity: None },
-            ],
+            symbols: vec![NewSymbol {
+                name: "child".into(),
+                qualname: "app.child".into(),
+                kind: SymbolKind::Function,
+                sig: None,
+                start_line: 1,
+                end_line: 5,
+                parent: Some(99),
+                arity: None,
+            }],
             edges: vec![],
             chunks: vec![],
         };
@@ -312,7 +389,13 @@ mod tests {
         // Should return Err, not panic
         let result = store.replace_file("bad2.py", "python", &hash, &bad_index);
         assert!(result.is_err(), "malformed index should return Err");
-        assert!(result.unwrap_err().to_string().contains("symbol parent index"), "error should mention parent index");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("symbol parent index"),
+            "error should mention parent index"
+        );
 
         // Store should be unchanged (counts all 0)
         let c = store.counts().unwrap();
@@ -328,18 +411,35 @@ mod tests {
         // Create a malformed index with out-of-range chunk symbol
         use crate::model::*;
         let bad_index = FileIndex {
-            symbols: vec![
-                NewSymbol { name: "func".into(), qualname: "app.func".into(), kind: SymbolKind::Function,
-                    sig: None, start_line: 1, end_line: 5, parent: None, arity: None },
-            ],
+            symbols: vec![NewSymbol {
+                name: "func".into(),
+                qualname: "app.func".into(),
+                kind: SymbolKind::Function,
+                sig: None,
+                start_line: 1,
+                end_line: 5,
+                parent: None,
+                arity: None,
+            }],
             edges: vec![],
-            chunks: vec![NewChunk { symbol: Some(99), start_line: 1, end_line: 5, content: "code".into() }],
+            chunks: vec![NewChunk {
+                symbol: Some(99),
+                start_line: 1,
+                end_line: 5,
+                content: "code".into(),
+            }],
         };
 
         // Should return Err, not panic
         let result = store.replace_file("bad3.py", "python", &hash, &bad_index);
         assert!(result.is_err(), "malformed index should return Err");
-        assert!(result.unwrap_err().to_string().contains("chunk symbol index"), "error should mention symbol index");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("chunk symbol index"),
+            "error should mention symbol index"
+        );
 
         // Store should be unchanged (counts all 0)
         let c = store.counts().unwrap();

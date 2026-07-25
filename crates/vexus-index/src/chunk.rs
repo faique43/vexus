@@ -7,7 +7,9 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
     let slice = |start: u32, end: u32| -> String {
         let s = (start.max(1) - 1) as usize;
         let e = (end as usize).min(lines.len());
-        if s >= e { return String::new() }
+        if s >= e {
+            return String::new();
+        }
         let mut out = lines[s..e].join("\n");
         out.push('\n');
         out
@@ -24,13 +26,19 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             covered[start..end].fill(true);
         }
     }
-    let preamble: String = lines.iter().enumerate()
+    let preamble: String = lines
+        .iter()
+        .enumerate()
         .filter(|(i, _)| !covered[*i])
         .map(|(_, l)| format!("{l}\n"))
         .collect();
     if !preamble.trim().is_empty() {
-        chunks.push(NewChunk { symbol: Some(0), start_line: 1,
-            end_line: lines.len() as u32, content: preamble });
+        chunks.push(NewChunk {
+            symbol: Some(0),
+            start_line: 1,
+            end_line: lines.len() as u32,
+            content: preamble,
+        });
     }
 
     for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
@@ -38,17 +46,34 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             SymbolKind::Function | SymbolKind::Method => {
                 let content = slice(sym.start_line, sym.end_line);
                 if estimate_tokens(&content) <= MAX_TOKENS {
-                    chunks.push(NewChunk { symbol: Some(i), start_line: sym.start_line,
-                        end_line: sym.end_line, content });
+                    chunks.push(NewChunk {
+                        symbol: Some(i),
+                        start_line: sym.start_line,
+                        end_line: sym.end_line,
+                        content,
+                    });
                 } else {
-                    split_oversized(&mut chunks, i, sym.sig.as_deref(), sym.start_line, sym.end_line, &lines);
+                    split_oversized(
+                        &mut chunks,
+                        i,
+                        sym.sig.as_deref(),
+                        sym.start_line,
+                        sym.end_line,
+                        &lines,
+                    );
                 }
             }
-            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Enum
-            | SymbolKind::Trait | SymbolKind::Interface => {
+            SymbolKind::Class
+            | SymbolKind::Struct
+            | SymbolKind::Enum
+            | SymbolKind::Trait
+            | SymbolKind::Interface => {
                 // Skeleton: own sig + direct children sigs.
                 let mut content = String::new();
-                if let Some(sig) = &sym.sig { content.push_str(sig); content.push('\n'); }
+                if let Some(sig) = &sym.sig {
+                    content.push_str(sig);
+                    content.push('\n');
+                }
                 for child in idx.symbols.iter().filter(|c| c.parent == Some(i)) {
                     if let Some(sig) = &child.sig {
                         content.push_str("    ");
@@ -57,8 +82,12 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                     }
                 }
                 if !content.trim().is_empty() {
-                    chunks.push(NewChunk { symbol: Some(i), start_line: sym.start_line,
-                        end_line: sym.end_line, content });
+                    chunks.push(NewChunk {
+                        symbol: Some(i),
+                        start_line: sym.start_line,
+                        end_line: sym.end_line,
+                        content,
+                    });
                 }
             }
             _ => {}
@@ -80,12 +109,19 @@ fn split_oversized(
     let mut buf = String::new();
     let mut first = true;
     let flush = |chunks: &mut Vec<NewChunk>, buf: &mut String, from: u32, to: u32, first: bool| {
-        if buf.trim().is_empty() { return }
+        if buf.trim().is_empty() {
+            return;
+        }
         let content = match sig {
             Some(s) if !first => format!("{}\n{}", s, std::mem::take(buf)),
             _ => std::mem::take(buf),
         };
-        chunks.push(NewChunk { symbol: Some(sym_index), start_line: from, end_line: to, content });
+        chunks.push(NewChunk {
+            symbol: Some(sym_index),
+            start_line: from,
+            end_line: to,
+            content,
+        });
     };
     for ln in start_line..=end {
         let line = lines[(ln - 1) as usize];
@@ -105,9 +141,16 @@ mod tests {
     use vexus_core::model::*;
 
     fn f(name: &str, kind: SymbolKind, start: u32, end: u32, parent: Option<usize>) -> NewSymbol {
-        NewSymbol { name: name.into(), qualname: format!("m.{name}"), kind,
-            sig: Some(format!("sig-of-{name}")), start_line: start, end_line: end,
-            parent, arity: None }
+        NewSymbol {
+            name: name.into(),
+            qualname: format!("m.{name}"),
+            kind,
+            sig: Some(format!("sig-of-{name}")),
+            start_line: start,
+            end_line: end,
+            parent,
+            arity: None,
+        }
     }
 
     #[test]
@@ -116,13 +159,22 @@ mod tests {
         //            line1      2  3           4               5       6               7
         let mut idx = FileIndex {
             symbols: vec![
-                NewSymbol { name: "m".into(), qualname: "m".into(), kind: SymbolKind::Module,
-                    sig: None, start_line: 1, end_line: 7, parent: None, arity: None },
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 7,
+                    parent: None,
+                    arity: None,
+                },
                 f("C", SymbolKind::Class, 3, 7, Some(0)),
                 f("a", SymbolKind::Method, 4, 5, Some(1)),
                 f("b", SymbolKind::Method, 6, 7, Some(1)),
             ],
-            edges: vec![], chunks: vec![],
+            edges: vec![],
+            chunks: vec![],
         };
         crate::chunk::build_chunks(&mut idx, source);
 
@@ -150,19 +202,36 @@ mod tests {
         let total_lines = source.lines().count() as u32;
         let mut idx = FileIndex {
             symbols: vec![
-                NewSymbol { name: "m".into(), qualname: "m".into(), kind: SymbolKind::Module,
-                    sig: None, start_line: 1, end_line: total_lines, parent: None, arity: None },
-                NewSymbol { name: "big".into(), qualname: "m.big".into(), kind: SymbolKind::Function,
-                    sig: Some("fn big() {".into()), start_line: 1, end_line: total_lines,
-                    parent: Some(0), arity: Some(0) },
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: total_lines,
+                    parent: None,
+                    arity: None,
+                },
+                NewSymbol {
+                    name: "big".into(),
+                    qualname: "m.big".into(),
+                    kind: SymbolKind::Function,
+                    sig: Some("fn big() {".into()),
+                    start_line: 1,
+                    end_line: total_lines,
+                    parent: Some(0),
+                    arity: Some(0),
+                },
             ],
-            edges: vec![], chunks: vec![],
+            edges: vec![],
+            chunks: vec![],
         };
         crate::chunk::build_chunks(&mut idx, &source);
         let pieces: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(1)).collect();
         assert!(pieces.len() >= 2);
         for p in &pieces {
-            assert!(vexus_core::model::estimate_tokens(&p.content) <= 512 + 16); // sig prefix slack
+            assert!(vexus_core::model::estimate_tokens(&p.content) <= 512 + 16);
+            // sig prefix slack
         }
         for p in &pieces[1..] {
             assert!(p.content.starts_with("fn big() {"));
@@ -172,7 +241,9 @@ mod tests {
     #[test]
     fn oversized_followed_by_function_respects_end_line() {
         // Oversized function followed by another function
-        let big_body: String = (0..300).map(|i| format!("    big_line_{i:04};\n")).collect();
+        let big_body: String = (0..300)
+            .map(|i| format!("    big_line_{i:04};\n"))
+            .collect();
         let source = format!("fn big() {{\n{big_body}}}\n\ndef small():\n    pass\n");
         let total_lines = source.lines().count() as u32;
         let big_end = big_body.lines().count() as u32 + 2; // +2 for fn big() { and }
@@ -181,14 +252,36 @@ mod tests {
 
         let mut idx = FileIndex {
             symbols: vec![
-                NewSymbol { name: "m".into(), qualname: "m".into(), kind: SymbolKind::Module,
-                    sig: None, start_line: 1, end_line: total_lines, parent: None, arity: None },
-                NewSymbol { name: "big".into(), qualname: "m.big".into(), kind: SymbolKind::Function,
-                    sig: Some("fn big() {".into()), start_line: 1, end_line: big_end,
-                    parent: Some(0), arity: Some(0) },
-                f("small", SymbolKind::Function, small_start, small_end, Some(0)),
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: total_lines,
+                    parent: None,
+                    arity: None,
+                },
+                NewSymbol {
+                    name: "big".into(),
+                    qualname: "m.big".into(),
+                    kind: SymbolKind::Function,
+                    sig: Some("fn big() {".into()),
+                    start_line: 1,
+                    end_line: big_end,
+                    parent: Some(0),
+                    arity: Some(0),
+                },
+                f(
+                    "small",
+                    SymbolKind::Function,
+                    small_start,
+                    small_end,
+                    Some(0),
+                ),
             ],
-            edges: vec![], chunks: vec![],
+            edges: vec![],
+            chunks: vec![],
         };
         crate::chunk::build_chunks(&mut idx, &source);
 
@@ -196,9 +289,20 @@ mod tests {
         let big_chunks: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(1)).collect();
         assert!(!big_chunks.is_empty());
         for chunk in &big_chunks {
-            assert!(chunk.end_line <= big_end, "oversized chunk end_line {} exceeds symbol end_line {}", chunk.end_line, big_end);
-            assert!(!chunk.content.contains("small"), "oversized chunk contains next function");
-            assert!(!chunk.content.contains("pass"), "oversized chunk contains small's body");
+            assert!(
+                chunk.end_line <= big_end,
+                "oversized chunk end_line {} exceeds symbol end_line {}",
+                chunk.end_line,
+                big_end
+            );
+            assert!(
+                !chunk.content.contains("small"),
+                "oversized chunk contains next function"
+            );
+            assert!(
+                !chunk.content.contains("pass"),
+                "oversized chunk contains small's body"
+            );
         }
 
         // Verify second function has its own chunk

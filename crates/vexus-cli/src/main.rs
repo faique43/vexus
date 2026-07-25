@@ -6,7 +6,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "vexus", version, about = "Local code intelligence for coding agents")]
+#[command(
+    name = "vexus",
+    version,
+    about = "Local code intelligence for coding agents"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -47,7 +51,11 @@ fn main() -> Result<()> {
             let r = pipeline::index_repo(&root, &mut store)?;
             println!(
                 "indexed: {}  unchanged: {}  skipped: {}  removed: {}  failed: {}",
-                r.indexed, r.skipped_unchanged, r.skipped_unsupported, r.removed, r.failed.len()
+                r.indexed,
+                r.skipped_unchanged,
+                r.skipped_unsupported,
+                r.removed,
+                r.failed.len()
             );
             for f in &r.failed {
                 eprintln!("failed: {f}");
@@ -75,7 +83,10 @@ fn main() -> Result<()> {
             let store = vexus_core::Store::open(&db_path(&root))?;
             for h in store.search_keyword(&query, limit)? {
                 let qual = h.qualname.unwrap_or_else(|| "(preamble)".into());
-                println!("{}  {}:{}-{}  {:.2}\n    {}", qual, h.path, h.start_line, h.end_line, h.score, h.excerpt);
+                println!(
+                    "{}  {}:{}-{}  {:.2}\n    {}",
+                    qual, h.path, h.start_line, h.end_line, h.score, h.excerpt
+                );
             }
         }
     }

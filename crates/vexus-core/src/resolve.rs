@@ -38,10 +38,16 @@ impl Store {
             let mut stmt = self.conn.prepare(&sql)?;
             let p: Vec<&dyn rusqlite::ToSql> =
                 params.iter().map(|s| *s as &dyn rusqlite::ToSql).collect();
-            let rows: Vec<EdgeRow> = stmt.query_map(p.as_slice(), |r| {
-                Ok(EdgeRow { id: r.get(0)?, src_file: r.get(1)?, dst_name: r.get(2)?, dst_arity: r.get(3)? })
-            })?
-            .collect::<Result<_, _>>()?;
+            let rows: Vec<EdgeRow> = stmt
+                .query_map(p.as_slice(), |r| {
+                    Ok(EdgeRow {
+                        id: r.get(0)?,
+                        src_file: r.get(1)?,
+                        dst_name: r.get(2)?,
+                        dst_arity: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
             rows
         };
 
@@ -55,17 +61,24 @@ impl Store {
                     "SELECT id, file_id, qualname, arity FROM symbols WHERE name = ?1
                      ORDER BY (file_id = ?2) DESC, id ASC",
                 )?;
-                let rows: Vec<(i64, i64, String, Option<u32>)> = stmt.query_map(rusqlite::params![last, e.src_file], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })?
-                .collect::<Result<_, _>>()?;
+                let rows: Vec<(i64, i64, String, Option<u32>)> = stmt
+                    .query_map(rusqlite::params![last, e.src_file], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })?
+                    .collect::<Result<_, _>>()?;
                 rows
             };
 
-            let hit = cands.iter().find(|c| c.2 == e.dst_name).map(|c| (c.0, Confidence::Exact))
+            let hit = cands
+                .iter()
+                .find(|c| c.2 == e.dst_name)
+                .map(|c| (c.0, Confidence::Exact))
                 .or_else(|| {
                     e.dst_arity.and_then(|a| {
-                        cands.iter().find(|c| c.3 == Some(a)).map(|c| (c.0, Confidence::NameArity))
+                        cands
+                            .iter()
+                            .find(|c| c.3 == Some(a))
+                            .map(|c| (c.0, Confidence::NameArity))
                     })
                 })
                 .or_else(|| cands.first().map(|c| (c.0, Confidence::NameOnly)));
@@ -99,14 +112,24 @@ mod tests {
         let dir = Box::leak(Box::new(dir));
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         for (i, (path, idx)) in files.iter().enumerate() {
-            store.replace_file(path, "python", &[i as u8; 32], idx).unwrap();
+            store
+                .replace_file(path, "python", &[i as u8; 32], idx)
+                .unwrap();
         }
         store
     }
 
     fn sym(name: &str, qual: &str, kind: SymbolKind, arity: Option<u32>) -> NewSymbol {
-        NewSymbol { name: name.into(), qualname: qual.into(), kind, sig: None,
-            start_line: 1, end_line: 2, parent: None, arity }
+        NewSymbol {
+            name: name.into(),
+            qualname: qual.into(),
+            kind,
+            sig: None,
+            start_line: 1,
+            end_line: 2,
+            parent: None,
+            arity,
+        }
     }
 
     #[test]
@@ -114,10 +137,30 @@ mod tests {
         let callers = FileIndex {
             symbols: vec![sym("caller", "a.caller", SymbolKind::Function, Some(0))],
             edges: vec![
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "b.target".into(), dst_arity: Some(2) },
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "target".into(), dst_arity: Some(1) },
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "target".into(), dst_arity: Some(9) },
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "missing".into(), dst_arity: None },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "b.target".into(),
+                    dst_arity: Some(2),
+                },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "target".into(),
+                    dst_arity: Some(1),
+                },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "target".into(),
+                    dst_arity: Some(9),
+                },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "missing".into(),
+                    dst_arity: None,
+                },
             ],
             chunks: vec![],
         };
@@ -126,23 +169,42 @@ mod tests {
                 sym("target", "b.target", SymbolKind::Function, Some(2)),
                 sym("target", "c.target", SymbolKind::Function, Some(1)),
             ],
-            edges: vec![], chunks: vec![],
+            edges: vec![],
+            chunks: vec![],
         };
         let mut store = store_with(&[("a.py", callers), ("b.py", callees)]);
         let n = store.resolve_all_edges().unwrap();
         assert_eq!(n, 3); // 'missing' stays unresolved
 
-        let rows: Vec<(String, Option<String>, String)> = store.conn
-            .prepare("SELECT e.dst_name, s.qualname, e.confidence
-                      FROM edges e LEFT JOIN symbols s ON e.dst_id = s.id ORDER BY e.id")
+        let rows: Vec<(String, Option<String>, String)> = store
+            .conn
+            .prepare(
+                "SELECT e.dst_name, s.qualname, e.confidence
+                      FROM edges e LEFT JOIN symbols s ON e.dst_id = s.id ORDER BY e.id",
+            )
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap().collect::<Result<_, _>>().unwrap();
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
 
-        assert_eq!(rows[0], ("b.target".into(), Some("b.target".into()), "exact".into()));
-        assert_eq!(rows[1], ("target".into(), Some("c.target".into()), "name_arity".into()));
+        assert_eq!(
+            rows[0],
+            ("b.target".into(), Some("b.target".into()), "exact".into())
+        );
+        assert_eq!(
+            rows[1],
+            (
+                "target".into(),
+                Some("c.target".into()),
+                "name_arity".into()
+            )
+        );
         // arity 9 matches nothing exactly → name_only, tie → lowest id (b.target)
-        assert_eq!(rows[2], ("target".into(), Some("b.target".into()), "name_only".into()));
+        assert_eq!(
+            rows[2],
+            ("target".into(), Some("b.target".into()), "name_only".into())
+        );
         assert_eq!(rows[3], ("missing".into(), None, "name_only".into()));
     }
 
@@ -150,7 +212,12 @@ mod tests {
     fn incremental_reresolve_by_name() {
         let callers = FileIndex {
             symbols: vec![sym("caller", "a.caller", SymbolKind::Function, Some(0))],
-            edges: vec![NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "late".into(), dst_arity: Some(0) }],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Calls,
+                dst_name: "late".into(),
+                dst_arity: Some(0),
+            }],
             chunks: vec![],
         };
         let mut store = store_with(&[("a.py", callers)]);
@@ -158,14 +225,23 @@ mod tests {
         // target arrives later (new file indexed)
         let newfile = FileIndex {
             symbols: vec![sym("late", "z.late", SymbolKind::Function, Some(0))],
-            edges: vec![], chunks: vec![],
+            edges: vec![],
+            chunks: vec![],
         };
-        store.replace_file("z.py", "python", &[9u8; 32], &newfile).unwrap();
+        store
+            .replace_file("z.py", "python", &[9u8; 32], &newfile)
+            .unwrap();
         let n = store.resolve_edges_for_names(&["late".into()]).unwrap();
         assert_eq!(n, 1);
-        let q: Option<String> = store.conn.query_row(
-            "SELECT s.qualname FROM edges e JOIN symbols s ON e.dst_id = s.id
-             WHERE e.dst_name = 'late'", [], |r| r.get(0)).unwrap();
+        let q: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT s.qualname FROM edges e JOIN symbols s ON e.dst_id = s.id
+             WHERE e.dst_name = 'late'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(q.as_deref(), Some("z.late"));
     }
 
@@ -179,12 +255,27 @@ mod tests {
             symbols: vec![sym("caller", "a.caller", SymbolKind::Function, Some(0))],
             edges: vec![
                 // Edge that should match _data (exact unqualified name)
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "_data".into(), dst_arity: None },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "_data".into(),
+                    dst_arity: None,
+                },
                 // Edge that should match _data (qualified suffix)
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "mod._data".into(), dst_arity: None },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "mod._data".into(),
+                    dst_arity: None,
+                },
                 // This edge should NOT match _data, but vulnerable LIKE pattern would:
                 // Pattern '%.._data' matches 'mod.adata' because _ is wildcard in LIKE
-                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "mod.aData".into(), dst_arity: None },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Calls,
+                    dst_name: "mod.aData".into(),
+                    dst_arity: None,
+                },
             ],
             chunks: vec![],
         };
@@ -193,9 +284,12 @@ mod tests {
         // Add symbol with underscore prefix in name
         let defs = FileIndex {
             symbols: vec![sym("_data", "lib._data", SymbolKind::Function, None)],
-            edges: vec![], chunks: vec![],
+            edges: vec![],
+            chunks: vec![],
         };
-        store.replace_file("lib.py", "python", &[2u8; 32], &defs).unwrap();
+        store
+            .replace_file("lib.py", "python", &[2u8; 32], &defs)
+            .unwrap();
 
         // Resolve by name - should only match edges ending with literal '._data',
         // NOT edges with 'mod.aData' even though the buggy LIKE pattern would select it

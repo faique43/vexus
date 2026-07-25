@@ -21,12 +21,18 @@ fn sanitize_fts(query: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
         .map(|t| format!("\"{t}\""))
         .collect();
-    if terms.is_empty() { None } else { Some(terms.join(" OR ")) }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
 }
 
 impl Store {
     pub fn search_keyword(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
-        let Some(fts) = sanitize_fts(query) else { return Ok(vec![]) };
+        let Some(fts) = sanitize_fts(query) else {
+            return Ok(vec![]);
+        };
         let mut stmt = self.conn.prepare(
             "SELECT c.id, f.path, s.qualname, c.start_line, c.end_line,
                     -bm25(fts_chunks) AS score, c.content
@@ -42,8 +48,13 @@ impl Store {
                 let content: String = r.get(6)?;
                 let excerpt: String = content.replace('\n', " ").chars().take(120).collect();
                 Ok(SearchHit {
-                    chunk_id: r.get(0)?, path: r.get(1)?, qualname: r.get(2)?,
-                    start_line: r.get(3)?, end_line: r.get(4)?, score: r.get(5)?, excerpt,
+                    chunk_id: r.get(0)?,
+                    path: r.get(1)?,
+                    qualname: r.get(2)?,
+                    start_line: r.get(3)?,
+                    end_line: r.get(4)?,
+                    score: r.get(5)?,
+                    excerpt,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -61,18 +72,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         let idx = FileIndex {
-            symbols: vec![NewSymbol { name: "retry".into(), qualname: "up.retry".into(),
-                kind: SymbolKind::Function, sig: None, start_line: 1, end_line: 3,
-                parent: None, arity: Some(1) }],
+            symbols: vec![NewSymbol {
+                name: "retry".into(),
+                qualname: "up.retry".into(),
+                kind: SymbolKind::Function,
+                sig: None,
+                start_line: 1,
+                end_line: 3,
+                parent: None,
+                arity: Some(1),
+            }],
             edges: vec![],
             chunks: vec![
-                NewChunk { symbol: Some(0), start_line: 1, end_line: 3,
-                    content: "def retry(delay):\n    backoff = delay * 2\n    return backoff\n".into() },
-                NewChunk { symbol: None, start_line: 5, end_line: 6,
-                    content: "unrelated logging helper\n".into() },
+                NewChunk {
+                    symbol: Some(0),
+                    start_line: 1,
+                    end_line: 3,
+                    content: "def retry(delay):\n    backoff = delay * 2\n    return backoff\n"
+                        .into(),
+                },
+                NewChunk {
+                    symbol: None,
+                    start_line: 5,
+                    end_line: 6,
+                    content: "unrelated logging helper\n".into(),
+                },
             ],
         };
-        store.replace_file("up.py", "python", &[1u8; 32], &idx).unwrap();
+        store
+            .replace_file("up.py", "python", &[1u8; 32], &idx)
+            .unwrap();
 
         let hits = store.search_keyword("retry backoff", 10).unwrap();
         assert_eq!(hits.len(), 1);

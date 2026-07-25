@@ -2,36 +2,63 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
-    Module, Class, Struct, Enum, Trait, Interface, Function, Method, Type, Const,
+    Module,
+    Class,
+    Struct,
+    Enum,
+    Trait,
+    Interface,
+    Function,
+    Method,
+    Type,
+    Const,
 }
 
 impl SymbolKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Module => "module", Self::Class => "class", Self::Struct => "struct",
-            Self::Enum => "enum", Self::Trait => "trait", Self::Interface => "interface",
-            Self::Function => "function", Self::Method => "method",
-            Self::Type => "type", Self::Const => "const",
+            Self::Module => "module",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Trait => "trait",
+            Self::Interface => "interface",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Type => "type",
+            Self::Const => "const",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeKind { Calls, Imports }
+pub enum EdgeKind {
+    Calls,
+    Imports,
+}
 
 impl EdgeKind {
     pub fn as_str(self) -> &'static str {
-        match self { Self::Calls => "calls", Self::Imports => "imports" }
+        match self {
+            Self::Calls => "calls",
+            Self::Imports => "imports",
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Confidence { Exact, NameArity, NameOnly }
+pub enum Confidence {
+    Exact,
+    NameArity,
+    NameOnly,
+}
 
 impl Confidence {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Exact => "exact", Self::NameArity => "name_arity", Self::NameOnly => "name_only",
+            Self::Exact => "exact",
+            Self::NameArity => "name_arity",
+            Self::NameOnly => "name_only",
         }
     }
 }
