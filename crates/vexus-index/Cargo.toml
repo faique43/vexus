@@ -5,7 +5,6 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 vexus-core = { path = "../vexus-core" }
 tree-sitter = "0.24"
 tree-sitter-python = "0.23"
