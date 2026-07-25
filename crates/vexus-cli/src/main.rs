@@ -101,29 +101,42 @@ fn main() -> Result<()> {
                 eprintln!("failed: {f}");
             }
 
-            match make_embedder() {
-                Some(embedder) => {
-                    store.set_model(embedder.id(), embedder.dim())?;
-                    // Degrade, never die: structural indexing above already
-                    // succeeded and was reported, so an embedding failure
-                    // (e.g. a flaky ONNX run) must not abort the command.
-                    match pipeline::embed_pending(&mut store, embedder.as_ref()) {
-                        Ok(er) => {
-                            println!("embedded: {} (cache hits: {})", er.embedded, er.from_cache)
-                        }
-                        Err(e) => {
-                            eprintln!("vexus: embedding failed ({e:#}); index is structural-only");
-                            println!("embeddings: skipped (embed error, see stderr)");
+            if !store.vec_available() {
+                // No point building/loading an embedder (or reporting a
+                // fake "embedded: 0") when sqlite-vec itself isn't loaded —
+                // every embedding would be discarded on the way into the
+                // store, so structural-only is the honest outcome here.
+                println!("embeddings: skipped (sqlite-vec unavailable)");
+            } else {
+                match make_embedder() {
+                    Some(embedder) => {
+                        store.set_model(embedder.id(), embedder.dim())?;
+                        // Degrade, never die: structural indexing above already
+                        // succeeded and was reported, so an embedding failure
+                        // (e.g. a flaky ONNX run) must not abort the command.
+                        match pipeline::embed_pending(&mut store, embedder.as_ref()) {
+                            Ok(er) => {
+                                println!(
+                                    "embedded: {} (cache hits: {})",
+                                    er.embedded, er.from_cache
+                                )
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "vexus: embedding failed ({e:#}); index is structural-only"
+                                );
+                                println!("embeddings: skipped (embed error, see stderr)");
+                            }
                         }
                     }
-                }
-                None => {
-                    let reason = if std::env::var("VEXUS_EMBEDDER").as_deref() == Ok("none") {
-                        "VEXUS_EMBEDDER=none"
-                    } else {
-                        "unavailable, see stderr"
-                    };
-                    println!("embeddings: skipped ({reason})");
+                    None => {
+                        let reason = if std::env::var("VEXUS_EMBEDDER").as_deref() == Ok("none") {
+                            "VEXUS_EMBEDDER=none"
+                        } else {
+                            "unavailable, see stderr"
+                        };
+                        println!("embeddings: skipped ({reason})");
+                    }
                 }
             }
         }

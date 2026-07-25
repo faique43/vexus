@@ -79,6 +79,15 @@ impl Store {
         self.vec_available
     }
 
+    /// Test-only hook to exercise the `!vec_available` degrade branches.
+    /// sqlite-vec is statically linked in this workspace, so `vec_available`
+    /// is always true in practice; this lets tests simulate the extension
+    /// being missing without needing a differently-built binary.
+    #[cfg(test)]
+    pub(crate) fn force_vec_unavailable(&mut self) {
+        self.vec_available = false;
+    }
+
     fn vec_table_exists(conn: &Connection) -> Result<bool> {
         let n: i64 = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE name = 'vec_chunks'",
@@ -228,10 +237,15 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Count of chunks lacking a `vec_chunks` row. 0 when vec is unavailable.
+    /// Count of chunks lacking a `vec_chunks` row. When vec is unavailable,
+    /// no chunk can ever have an embedding, so the true backlog is every
+    /// chunk in the index — NOT 0 (0 would misreport a structural-only
+    /// index as fully embedded).
     pub fn embed_backlog(&self) -> Result<i64> {
         if !self.vec_available {
-            return Ok(0);
+            return Ok(self
+                .conn
+                .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?);
         }
         let n: i64 = if Self::vec_table_exists(&self.conn)? {
             self.conn.query_row(
@@ -857,6 +871,53 @@ mod tests {
                 .unwrap()
                 .len(),
             0
+        );
+    }
+
+    /// All the `!vec_available` degrade branches are unreachable via a real
+    /// `Store::open` (sqlite-vec is statically linked, so it's always
+    /// available in this workspace's binaries). `force_vec_unavailable`
+    /// exists purely so this test can exercise them.
+    #[test]
+    fn vec_unavailable_degrades_every_vec_path_instead_of_lying() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+        let chunk_count = store.counts().unwrap().chunks;
+        assert!(chunk_count > 0, "fixture must produce at least one chunk");
+
+        store.force_vec_unavailable();
+
+        // The true backlog is every chunk, never 0 — 0 would lie that a
+        // structural-only index is fully embedded.
+        assert_eq!(store.embed_backlog().unwrap(), chunk_count);
+
+        // Nothing is ever reported as embeddable or embedded.
+        assert!(store.chunks_missing_embedding(100).unwrap().is_empty());
+        assert!(store
+            .knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5)
+            .unwrap()
+            .is_empty());
+
+        // put_embeddings silently no-ops rather than erroring.
+        store
+            .put_embeddings(&[(1, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        assert_eq!(store.embed_backlog().unwrap(), chunk_count);
+
+        // search_hybrid falls back to keyword-only: passing a query vector
+        // changes nothing, since knn_chunks always returns empty.
+        let with_vec = store
+            .search_hybrid("greet", Some(&[1.0, 0.0, 0.0, 0.0]), 10)
+            .unwrap();
+        let keyword_only = store.search_hybrid("greet", None, 10).unwrap();
+        assert_eq!(with_vec.len(), keyword_only.len());
+        assert_eq!(
+            with_vec.iter().map(|h| h.chunk_id).collect::<Vec<_>>(),
+            keyword_only.iter().map(|h| h.chunk_id).collect::<Vec<_>>()
         );
     }
 }
