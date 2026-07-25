@@ -161,8 +161,10 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn conn_ref(&self) -> &rusqlite::Connection {
-        &self.conn
+    pub fn file_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT path FROM files")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn counts(&self) -> Result<crate::model::Counts> {

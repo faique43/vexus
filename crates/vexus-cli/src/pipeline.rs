@@ -80,11 +80,7 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
     }
 
     // Remove DB entries for files gone from disk.
-    let db_paths: Vec<String> = {
-        let mut stmt = store.conn_ref().prepare("SELECT path FROM files")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
+    let db_paths = store.file_paths()?;
     for p in db_paths {
         if !seen.contains(&p) {
             store.remove_file(&p)?;
@@ -131,6 +127,32 @@ mod tests {
         std::fs::remove_file(root.join("src/util.py")).unwrap();
         let r = index_repo(root, &mut store).unwrap();
         assert_eq!((r.indexed, r.removed), (1, 1));
+        assert_eq!(store.counts().unwrap().files, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_goes_to_failed_and_others_still_index() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/app.py", "def run():\n    return 1\n");
+        write(root, "src/secret.py", "def hidden():\n    return 2\n");
+
+        let secret_path = root.join("src/secret.py");
+        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        let result = index_repo(root, &mut store);
+
+        // Restore permissions before asserting/unwrapping so tempdir cleanup never fails.
+        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let r = result.unwrap();
+        assert_eq!(r.failed.len(), 1, "failed: {:?}", r.failed);
+        assert!(r.failed[0].contains("secret.py"), "failed: {:?}", r.failed);
+        assert_eq!(r.indexed, 1);
         assert_eq!(store.counts().unwrap().files, 1);
     }
 }
