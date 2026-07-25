@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod format;
 pub mod server;
 pub mod state;
+pub mod tools;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};

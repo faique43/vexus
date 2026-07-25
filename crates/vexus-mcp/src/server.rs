@@ -13,10 +13,41 @@
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::state::AppState;
+use crate::tools::{open, search};
+
+/// Params for the `search` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchParams {
+    /// Free-text query — words, a symbol name, or a short question.
+    query: String,
+    /// Max results to return (default 10).
+    #[schemars(description = "Max results to return (default 10).")]
+    limit: Option<u32>,
+    /// Token budget for the rendered result list (default 4000, capped at 20000).
+    #[schemars(
+        description = "Token budget for the rendered result list (default 4000, capped at 20000)."
+    )]
+    budget_tokens: Option<u32>,
+}
+
+/// Params for the `open` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct OpenParams {
+    /// A symbol qualname/name (e.g. `app.util.slug`) or a `path:start-end` line range (e.g. `src/app.py:10-40`).
+    target: String,
+    /// Token budget for the rendered source (default 6000, capped at 20000).
+    #[schemars(
+        description = "Token budget for the rendered source (default 6000, capped at 20000)."
+    )]
+    budget_tokens: Option<u32>,
+}
 
 /// Steering layer 1 (see plan doc §5): shipped verbatim per the Task 3 brief.
 const INSTRUCTIONS: &str =
@@ -65,6 +96,36 @@ impl VexusServer {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => format!("status error: {e:#}"),
             Err(e) => format!("status error: tool task panicked ({e})"),
+        }
+    }
+
+    #[tool(
+        description = "Hybrid semantic+keyword search over the code index. Returns ranked symbol locations with excerpts. Cheaper than explore; use explore when you want the actual source."
+    )]
+    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
+        let state = self.state.clone();
+        match tokio::task::spawn_blocking(move || {
+            search::search_text(&state, &params.query, params.limit, params.budget_tokens)
+        })
+        .await
+        {
+            Ok(text) => text,
+            Err(e) => format!("search error: tool task panicked ({e})"),
+        }
+    }
+
+    #[tool(
+        description = "Fetch the verbatim source of a symbol (by qualname or name) or an exact file line range. Replaces reading whole files."
+    )]
+    async fn open(&self, Parameters(params): Parameters<OpenParams>) -> String {
+        let state = self.state.clone();
+        match tokio::task::spawn_blocking(move || {
+            open::open_text(&state, &params.target, params.budget_tokens)
+        })
+        .await
+        {
+            Ok(text) => text,
+            Err(e) => format!("open error: tool task panicked ({e})"),
         }
     }
 }
