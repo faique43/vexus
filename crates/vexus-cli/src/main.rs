@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use vexus_embed::Embedder;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +43,45 @@ fn open_store(root: &Path) -> Result<vexus_core::Store> {
     Ok(store)
 }
 
+/// The user's home directory, without pulling in a `dirs`-style crate:
+/// `HOME` on Unix, falling back to `USERPROFILE` on Windows. `None` if
+/// neither is set (e.g. a stripped-down container).
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Selects the embedder for this run from `VEXUS_EMBEDDER`:
+/// - `mock` → deterministic `MockEmbedder` (tests/CI, no model download)
+/// - `none` → structural-only, no embeddings
+/// - unset  → download/load the default ONNX model; any failure degrades to
+///   `None` (structural-only) rather than failing the whole command.
+fn make_embedder() -> Option<Box<dyn Embedder>> {
+    match std::env::var("VEXUS_EMBEDDER").as_deref() {
+        Ok("mock") => Some(Box::new(vexus_embed::MockEmbedder)),
+        Ok("none") => None,
+        _ => {
+            let Some(home) = home_dir() else {
+                eprintln!(
+                    "vexus: embeddings unavailable (no HOME/USERPROFILE); running structural-only"
+                );
+                return None;
+            };
+            let models = home.join(".vexus/models");
+            match vexus_embed::download::ensure_model(&vexus_embed::JINA_CODE_V2, &models)
+                .and_then(|dir| vexus_embed::OnnxEmbedder::load(&dir, &vexus_embed::JINA_CODE_V2))
+            {
+                Ok(e) => Some(Box::new(e)),
+                Err(e) => {
+                    eprintln!("vexus: embeddings unavailable ({e:#}); running structural-only");
+                    None
+                }
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -59,6 +99,22 @@ fn main() -> Result<()> {
             );
             for f in &r.failed {
                 eprintln!("failed: {f}");
+            }
+
+            match make_embedder() {
+                Some(embedder) => {
+                    store.set_model(embedder.id(), embedder.dim())?;
+                    let er = pipeline::embed_pending(&mut store, embedder.as_ref())?;
+                    println!("embedded: {} (cache hits: {})", er.embedded, er.from_cache);
+                }
+                None => {
+                    let reason = if std::env::var("VEXUS_EMBEDDER").as_deref() == Ok("none") {
+                        "VEXUS_EMBEDDER=none"
+                    } else {
+                        "unavailable, see stderr"
+                    };
+                    println!("embeddings: skipped ({reason})");
+                }
             }
         }
         Cmd::Status { path } => {
@@ -81,7 +137,13 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let store = vexus_core::Store::open(&db_path(&root))?;
-            for h in store.search_keyword(&query, limit)? {
+            let query_vec = make_embedder().and_then(|embedder| {
+                embedder
+                    .embed(&[query.as_str()])
+                    .ok()
+                    .and_then(|mut v| v.pop())
+            });
+            for h in store.search_hybrid(&query, query_vec.as_deref(), limit)? {
                 let qual = h.qualname.unwrap_or_else(|| "(preamble)".into());
                 println!(
                     "{}  {}:{}-{}  {:.2}\n    {}",

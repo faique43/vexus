@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use vexus_core::Store;
+use vexus_embed::Embedder;
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
@@ -96,6 +97,64 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
     Ok(report)
 }
 
+#[derive(Debug, Default)]
+pub struct EmbedReport {
+    pub embedded: usize,
+    pub from_cache: usize,
+}
+
+/// Embed every chunk missing a vector, in batches, reusing `embed_cache` hits
+/// (keyed by content hash) so unchanged content across re-indexes never pays
+/// for a fresh model call. A no-op (vec unavailable, or nothing missing)
+/// returns an empty report immediately.
+pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<EmbedReport> {
+    let mut report = EmbedReport {
+        embedded: 0,
+        from_cache: 0,
+    };
+    loop {
+        let backlog_before = store.embed_backlog()?;
+        let missing = store.chunks_missing_embedding(256)?;
+        if missing.is_empty() {
+            break;
+        }
+        let mut ready: Vec<(i64, Vec<f32>)> = Vec::new();
+        let mut to_embed: Vec<(i64, String, Vec<u8>)> = Vec::new();
+        for (id, content, hash) in missing {
+            match store.embed_cache_get(&hash)? {
+                Some(v) if v.len() == embedder.dim() => {
+                    ready.push((id, v));
+                    report.from_cache += 1;
+                }
+                _ => to_embed.push((id, content, hash)),
+            }
+        }
+        for batch in to_embed.chunks(32) {
+            let texts: Vec<&str> = batch.iter().map(|(_, c, _)| c.as_str()).collect();
+            let vecs = embedder.embed(&texts)?;
+            for ((id, _, hash), v) in batch.iter().zip(vecs) {
+                store.embed_cache_put(hash, &v)?;
+                ready.push((*id, v));
+                report.embedded += 1;
+            }
+        }
+        store.put_embeddings(&ready)?;
+
+        // Defensive: we just processed a non-empty batch of missing rows, so
+        // the total backlog must have shrunk. If it somehow didn't (e.g.
+        // put_embeddings silently no-oped), looping again would spin forever
+        // re-fetching the same rows.
+        let backlog_after = store.embed_backlog()?;
+        if backlog_after >= backlog_before {
+            bail!(
+                "embed_pending made no progress: backlog stayed at {backlog_after} \
+                 after processing a batch"
+            );
+        }
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +163,33 @@ mod tests {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn embed_pending_embeds_all_chunks_and_uses_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f1():\n    pass\n");
+        write(root, "b.py", "def f2():\n    pass\n");
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        index_repo(root, &mut store).unwrap();
+
+        let embedder = vexus_embed::MockEmbedder;
+        store.set_model(embedder.id(), embedder.dim()).unwrap();
+        let r = embed_pending(&mut store, &embedder).unwrap();
+        assert!(r.embedded >= 2);
+        assert_eq!(r.from_cache, 0);
+        assert_eq!(store.embed_backlog().unwrap(), 0);
+
+        // touch a file -> chunks re-created with same content -> cache hits, no re-embeds
+        write(root, "a.py", "def f1():\n    pass\n# comment\n");
+        index_repo(root, &mut store).unwrap();
+        let r = embed_pending(&mut store, &embedder).unwrap();
+        assert!(
+            r.from_cache >= 1,
+            "unchanged chunk content must hit embed_cache"
+        );
+        assert_eq!(store.embed_backlog().unwrap(), 0);
     }
 
     #[test]
