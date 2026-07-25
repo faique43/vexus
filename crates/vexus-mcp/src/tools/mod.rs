@@ -5,6 +5,7 @@
 //! wrappers (schemars param struct, `spawn_blocking`), following the same
 //! shape as the existing `status` tool.
 
+pub mod explore;
 pub mod graph;
 pub mod open;
 pub mod search;
@@ -13,6 +14,7 @@ use vexus_core::query::{Resolution, SymbolInfo};
 use vexus_core::Store;
 
 use crate::format::render_candidates;
+use crate::state::AppState;
 
 /// Hard ceiling on `budget_tokens` regardless of what a caller requests —
 /// a client-supplied budget of e.g. `u32::MAX` must not translate into an
@@ -51,6 +53,26 @@ pub(crate) fn resolve_or_text(store: &Store, target: &str) -> Result<SymbolInfo,
             )
         }),
     }
+}
+
+/// Shared embed-query step for every tool that feeds `search_hybrid`:
+/// embeds `query` via `state.embedder()` when one is available AND its
+/// model matches what the index was actually built with (checked against
+/// `meta` on the already-locked `store`) — the same guard `vexus-cli`'s
+/// `Cmd::Search` uses, since a mismatched vector would otherwise blow up
+/// `search_hybrid`'s KNN lookup against `vec_chunks`' declared width). No
+/// embedder, or a mismatch, returns `None` so the caller degrades to
+/// keyword-only search rather than failing.
+pub(crate) fn embed_query(state: &AppState, store: &Store, query: &str) -> Option<Vec<f32>> {
+    let embedder = state.embedder()?;
+    let indexed_id = store.meta("model_id").ok().flatten();
+    let indexed_dim = store.meta("model_dim").ok().flatten();
+    let same_model = indexed_id.as_deref() == Some(embedder.id())
+        && indexed_dim.as_deref() == Some(embedder.dim().to_string().as_str());
+    if !same_model {
+        return None;
+    }
+    embedder.embed(&[query]).ok().and_then(|mut v| v.pop())
 }
 
 #[cfg(test)]

@@ -6,12 +6,21 @@ use crate::Store;
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub chunk_id: i64,
+    /// The chunk's owning symbol, when it belongs to one (`None` for
+    /// preamble/module-level chunks with no enclosing symbol) — lets
+    /// `explore` walk the call/import graph from a search hit without a
+    /// separate symbol lookup.
+    pub symbol_id: Option<i64>,
     pub path: String,
     pub qualname: Option<String>,
     pub start_line: u32,
     pub end_line: u32,
     pub score: f64,
     pub excerpt: String,
+    /// Full chunk content, verbatim (unlike `excerpt`, which is truncated
+    /// for display in `search`'s result list) — what `explore` renders as
+    /// the entry chunk's source.
+    pub content: String,
 }
 
 /// Turn arbitrary user text into a safe FTS5 query: each alphanumeric term
@@ -38,7 +47,7 @@ impl Store {
             return Ok(vec![]);
         };
         let mut stmt = self.conn.prepare(
-            "SELECT c.id, f.path, s.qualname, c.start_line, c.end_line,
+            "SELECT c.id, c.symbol_id, f.path, s.qualname, c.start_line, c.end_line,
                     -bm25(fts_chunks) AS score, c.content
              FROM fts_chunks
              JOIN chunks c ON c.id = fts_chunks.rowid
@@ -49,16 +58,18 @@ impl Store {
         )?;
         let hits = stmt
             .query_map(rusqlite::params![fts, limit], |r| {
-                let content: String = r.get(6)?;
+                let content: String = r.get(7)?;
                 let excerpt: String = content.replace('\n', " ").chars().take(120).collect();
                 Ok(SearchHit {
                     chunk_id: r.get(0)?,
-                    path: r.get(1)?,
-                    qualname: r.get(2)?,
-                    start_line: r.get(3)?,
-                    end_line: r.get(4)?,
-                    score: r.get(5)?,
+                    symbol_id: r.get(1)?,
+                    path: r.get(2)?,
+                    qualname: r.get(3)?,
+                    start_line: r.get(4)?,
+                    end_line: r.get(5)?,
+                    score: r.get(6)?,
                     excerpt,
+                    content,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -96,23 +107,25 @@ impl Store {
     fn hydrate_hits(&self, ranked: &[(i64, f64)]) -> Result<Vec<SearchHit>> {
         let mut out = Vec::with_capacity(ranked.len());
         let mut stmt = self.conn.prepare_cached(
-            "SELECT c.id, f.path, s.qualname, c.start_line, c.end_line, c.content
+            "SELECT c.id, c.symbol_id, f.path, s.qualname, c.start_line, c.end_line, c.content
              FROM chunks c JOIN files f ON f.id = c.file_id
              LEFT JOIN symbols s ON s.id = c.symbol_id WHERE c.id = ?1",
         )?;
         for (chunk_id, score) in ranked {
             let hit = stmt
                 .query_row([chunk_id], |r| {
-                    let content: String = r.get(5)?;
+                    let content: String = r.get(6)?;
                     let excerpt: String = content.replace('\n', " ").chars().take(120).collect();
                     Ok(SearchHit {
                         chunk_id: r.get(0)?,
-                        path: r.get(1)?,
-                        qualname: r.get(2)?,
-                        start_line: r.get(3)?,
-                        end_line: r.get(4)?,
+                        symbol_id: r.get(1)?,
+                        path: r.get(2)?,
+                        qualname: r.get(3)?,
+                        start_line: r.get(4)?,
+                        end_line: r.get(5)?,
                         score: *score,
                         excerpt,
+                        content,
                     })
                 })
                 .optional()?;

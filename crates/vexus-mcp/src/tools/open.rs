@@ -40,14 +40,14 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
     }
     let items: Vec<BundleItem> = chunks
         .into_iter()
-        .map(|(start_line, end_line, content)| BundleItem {
+        .map(|(chunk_id, start_line, end_line, content)| BundleItem {
             path: info.path.clone(),
             qualname: Some(info.qualname.clone()),
             start_line,
             end_line,
             content,
             score: 1.0,
-            chunk_id: -1,
+            chunk_id,
         })
         .collect();
     let (selected, omitted) = pack(items, budget_tokens);

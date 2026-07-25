@@ -112,15 +112,20 @@ impl Store {
     }
 
     /// All chunks belonging to the symbol (by symbol_id), ordered by
-    /// start_line: (start_line, end_line, content). Empty for symbols with
-    /// no chunks (e.g. module).
-    pub fn symbol_source(&self, symbol_id: i64) -> Result<Vec<(u32, u32, String)>> {
+    /// start_line: (chunk_id, start_line, end_line, content). Empty for
+    /// symbols with no chunks (e.g. module). The chunk id lets callers build
+    /// a real `BundleItem::chunk_id` (rather than the `-1` non-chunk
+    /// placeholder) so `bundle::pack`'s dedupe can recognize the same chunk
+    /// reached both as a direct hit and as graph-expansion neighbor.
+    pub fn symbol_source(&self, symbol_id: i64) -> Result<Vec<(i64, u32, u32, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT start_line, end_line, content FROM chunks
+            "SELECT id, start_line, end_line, content FROM chunks
              WHERE symbol_id = ?1 ORDER BY start_line",
         )?;
         let rows = stmt
-            .query_map([symbol_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([symbol_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
@@ -511,9 +516,9 @@ mod tests {
         };
         let chunks = store.symbol_source(info.id).unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].0, 1);
-        assert_eq!(chunks[0].1, 2);
-        assert!(chunks[0].2.contains("def slug(text):"));
+        assert_eq!(chunks[0].1, 1);
+        assert_eq!(chunks[0].2, 2);
+        assert!(chunks[0].3.contains("def slug(text):"));
     }
 
     #[test]

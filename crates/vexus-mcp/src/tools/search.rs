@@ -5,18 +5,13 @@
 use vexus_core::model::estimate_tokens;
 
 use crate::state::AppState;
-use crate::tools::clamp_budget;
+use crate::tools::{clamp_budget, embed_query};
 
 const DEFAULT_LIMIT: u32 = 10;
 const DEFAULT_BUDGET_TOKENS: u32 = 4000;
 
-/// Pure inner implementation of the `search` tool. Embeds `query` via
-/// `state.embedder()` when one is available AND its model matches what the
-/// index was actually built with (checked against `meta` while the store is
-/// locked, the same model-mismatch guard `vexus-cli`'s `Cmd::Search` uses —
-/// a mismatched vector would otherwise blow up `search_hybrid`'s KNN lookup
-/// against `vec_chunks`' declared width). No embedder, or a mismatch,
-/// degrades to keyword-only search rather than failing.
+/// Pure inner implementation of the `search` tool. See `tools::embed_query`
+/// for how the query vector is (or isn't) produced.
 pub fn search_text(
     state: &AppState,
     query: &str,
@@ -26,30 +21,8 @@ pub fn search_text(
     let limit = limit.unwrap_or(DEFAULT_LIMIT);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let embedder = state.embedder();
-    let same_model = {
-        let store = state.store.lock().expect("store mutex poisoned");
-        match &embedder {
-            Some(e) => {
-                let indexed_id = store.meta("model_id").ok().flatten();
-                let indexed_dim = store.meta("model_dim").ok().flatten();
-                indexed_id.as_deref() == Some(e.id())
-                    && indexed_dim.as_deref() == Some(e.dim().to_string().as_str())
-            }
-            None => false,
-        }
-    };
-    // Do the (potentially expensive, real-embedder) embedding work outside
-    // the store lock so a slow embed doesn't block other tool calls.
-    let query_vec = if same_model {
-        embedder
-            .as_ref()
-            .and_then(|e| e.embed(&[query]).ok().and_then(|mut v| v.pop()))
-    } else {
-        None
-    };
-
     let store = state.store.lock().expect("store mutex poisoned");
+    let query_vec = embed_query(state, &store, query);
     let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
         Ok(hits) => hits,
         Err(e) => return format!("search error: {e:#}"),

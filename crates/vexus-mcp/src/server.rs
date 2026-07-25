@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::state::AppState;
-use crate::tools::{graph, open, search};
+use crate::tools::{explore, graph, open, search};
 
 /// Params for the `search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -60,6 +60,18 @@ struct CallGraphParams {
     /// Token budget for the rendered edge tree (default 4000, capped at 20000).
     #[schemars(
         description = "Token budget for the rendered edge tree (default 4000, capped at 20000)."
+    )]
+    budget_tokens: Option<u32>,
+}
+
+/// Params for the `explore` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExploreParams {
+    /// A natural-language question or a bag of symbol names.
+    question: String,
+    /// Token budget for the rendered bundle (default 8000, capped at 20000).
+    #[schemars(
+        description = "Token budget for the rendered bundle (default 8000, capped at 20000)."
     )]
     budget_tokens: Option<u32>,
 }
@@ -121,6 +133,21 @@ impl VexusServer {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => format!("status error: {e:#}"),
             Err(e) => format!("status error: tool task panicked ({e})"),
+        }
+    }
+
+    #[tool(
+        description = "Answer a question about this codebase in ONE call. Give it a natural-language question or a bag of symbol names; it finds the relevant code semantically, expands one hop through the call/import graph, and returns the verbatim source of everything relevant, token-budgeted and grouped by file. Start here for any 'how does X work / where is X handled / what happens when' question — it replaces a grep-and-read session."
+    )]
+    async fn explore(&self, Parameters(params): Parameters<ExploreParams>) -> String {
+        let state = self.state.clone();
+        match tokio::task::spawn_blocking(move || {
+            explore::explore_text(&state, &params.question, params.budget_tokens)
+        })
+        .await
+        {
+            Ok(text) => text,
+            Err(e) => format!("explore error: tool task panicked ({e})"),
         }
     }
 
