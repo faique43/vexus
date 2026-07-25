@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vexus-core", "crates/vexus-index", "crates/vexus-cli"]
+members = ["crates/vexus-core", "crates/vexus-index", "crates/vexus-cli", "crates/vexus-embed"]
 
 [workspace.package]
 edition = "2021"
@@ -9,7 +9,6 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 blake3 = "1"
 tempfile = "3"

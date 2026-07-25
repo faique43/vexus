@@ -780,6 +780,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vexus-embed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+]
+
+[[package]]
 name = "vexus-index"
 version = "0.1.0"
 dependencies = [
