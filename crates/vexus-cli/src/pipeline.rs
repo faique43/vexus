@@ -132,6 +132,18 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
         for batch in to_embed.chunks(32) {
             let texts: Vec<&str> = batch.iter().map(|(_, c, _)| c.as_str()).collect();
             let vecs = embedder.embed(&texts)?;
+            // `Embedder::embed` promises one vector per input text; a
+            // misbehaving implementation returning fewer would otherwise have
+            // `zip` silently drop the untranslated tail of the batch instead
+            // of failing loudly.
+            if vecs.len() != batch.len() {
+                bail!(
+                    "embedder {} returned {} vectors for {} texts",
+                    embedder.id(),
+                    vecs.len(),
+                    batch.len()
+                );
+            }
             for ((id, _, hash), v) in batch.iter().zip(vecs) {
                 store.embed_cache_put(hash, &v)?;
                 ready.push((*id, v));
@@ -147,8 +159,8 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
         let backlog_after = store.embed_backlog()?;
         if backlog_after >= backlog_before {
             bail!(
-                "embed_pending made no progress: backlog stayed at {backlog_after} \
-                 after processing a batch"
+                "embed_pending made no progress: backlog was {backlog_before}, \
+                 now {backlog_after}, after processing a batch"
             );
         }
     }

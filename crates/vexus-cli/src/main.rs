@@ -104,8 +104,18 @@ fn main() -> Result<()> {
             match make_embedder() {
                 Some(embedder) => {
                     store.set_model(embedder.id(), embedder.dim())?;
-                    let er = pipeline::embed_pending(&mut store, embedder.as_ref())?;
-                    println!("embedded: {} (cache hits: {})", er.embedded, er.from_cache);
+                    // Degrade, never die: structural indexing above already
+                    // succeeded and was reported, so an embedding failure
+                    // (e.g. a flaky ONNX run) must not abort the command.
+                    match pipeline::embed_pending(&mut store, embedder.as_ref()) {
+                        Ok(er) => {
+                            println!("embedded: {} (cache hits: {})", er.embedded, er.from_cache)
+                        }
+                        Err(e) => {
+                            eprintln!("vexus: embedding failed ({e:#}); index is structural-only");
+                            println!("embeddings: skipped (embed error, see stderr)");
+                        }
+                    }
                 }
                 None => {
                     let reason = if std::env::var("VEXUS_EMBEDDER").as_deref() == Ok("none") {
@@ -137,7 +147,23 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let store = vexus_core::Store::open(&db_path(&root))?;
+            // Only embed the query if the selected embedder is the same one
+            // the index was built with — a mismatch (different model, or a
+            // different dimension) would otherwise feed a vector into
+            // `search_hybrid`'s KNN lookup that doesn't match `vec_chunks`'
+            // declared width, which sqlite-vec rejects as a hard error.
+            // Falling back to keyword-only search here is exactly the
+            // "degrade, never die" behavior a query-embed failure gets below.
+            let indexed_model = (
+                store.meta("model_id").ok().flatten(),
+                store.meta("model_dim").ok().flatten(),
+            );
             let query_vec = make_embedder().and_then(|embedder| {
+                let same_model = indexed_model.0.as_deref() == Some(embedder.id())
+                    && indexed_model.1.as_deref() == Some(embedder.dim().to_string().as_str());
+                if !same_model {
+                    return None;
+                }
                 embedder
                     .embed(&[query.as_str()])
                     .ok()
