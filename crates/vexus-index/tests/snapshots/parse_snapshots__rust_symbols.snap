@@ -1,0 +1,12 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: symbol_lines(&idx)
+---
+- "module rust.sample [1-23] arity=None parent=None sig=None"
+- "const rust.sample.LIMIT [3-3] arity=None parent=Some(0) sig=Some(\"pub const LIMIT: usize = 10;\")"
+- "struct rust.sample.Cache [5-7] arity=None parent=Some(0) sig=Some(\"pub struct Cache {\")"
+- "function rust.sample.get [10-12] arity=Some(2) parent=Some(0) sig=Some(\"pub fn get(&self, key: &str) -> Option<&String> {\")"
+- "enum rust.sample.Mode [15-15] arity=None parent=Some(0) sig=Some(\"pub enum Mode { Fast, Slow }\")"
+- "trait rust.sample.Backend [17-19] arity=None parent=Some(0) sig=Some(\"pub trait Backend {\")"
+- "method rust.sample.Backend.load [18-18] arity=Some(2) parent=Some(5) sig=Some(\"fn load(&self, key: &str) -> String;\")"
+- "function rust.sample.lookup [21-23] arity=Some(2) parent=Some(0) sig=Some(\"fn lookup<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a String> {\")"

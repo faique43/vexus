@@ -30,6 +30,20 @@ static LANGS: &[Lang] = &[
         symbols_scm: include_str!("../queries/python.scm"),
         edges_scm: include_str!("../queries/python_edges.scm"),
     },
+    Lang {
+        name: "typescript",
+        extensions: &["ts", "tsx"],
+        grammar: || tree_sitter_typescript::LANGUAGE_TSX.into(),
+        symbols_scm: include_str!("../queries/typescript.scm"),
+        edges_scm: include_str!("../queries/typescript_edges.scm"),
+    },
+    Lang {
+        name: "rust",
+        extensions: &["rs"],
+        grammar: || tree_sitter_rust::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/rust.scm"),
+        edges_scm: include_str!("../queries/rust_edges.scm"),
+    },
 ];
 
 pub fn for_path(path: &Path) -> Option<&'static Lang> {

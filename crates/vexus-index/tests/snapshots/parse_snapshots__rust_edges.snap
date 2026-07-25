@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: edge_lines(&idx)
+---
+- "imports rust.sample -> std::collections::HashMap arity=None"
+- calls rust.sample.get -> lookup arity=Some(2)
+- calls rust.sample.lookup -> get arity=Some(1)

@@ -32,3 +32,27 @@ fn python_edges() {
     let idx = parse_fixture("python/sample.py");
     insta::assert_yaml_snapshot!(edge_lines(&idx));
 }
+
+#[test]
+fn typescript_symbols() {
+    let idx = parse_fixture("typescript/sample.ts");
+    insta::assert_yaml_snapshot!(symbol_lines(&idx));
+}
+
+#[test]
+fn typescript_edges() {
+    let idx = parse_fixture("typescript/sample.ts");
+    insta::assert_yaml_snapshot!(edge_lines(&idx));
+}
+
+#[test]
+fn rust_symbols() {
+    let idx = parse_fixture("rust/sample.rs");
+    insta::assert_yaml_snapshot!(symbol_lines(&idx));
+}
+
+#[test]
+fn rust_edges() {
+    let idx = parse_fixture("rust/sample.rs");
+    insta::assert_yaml_snapshot!(edge_lines(&idx));
+}

@@ -1,0 +1,9 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: edge_lines(&idx)
+---
+- imports typescript.sample -> path arity=None
+- calls typescript.sample.fetchUser -> withRetry arity=Some(2)
+- calls typescript.sample.fetchUser -> load arity=Some(1)
+- calls typescript.sample.load -> join arity=Some(2)
+- calls typescript.sample.Repo.find -> load arity=Some(1)
