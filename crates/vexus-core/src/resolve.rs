@@ -16,7 +16,7 @@ struct EdgeRow {
 /// mixed names (e.g. `std::collections::HashMap`, `./utils/helper`) resolve
 /// to their true last segment rather than falling back to Python-only `.`
 /// splitting.
-fn last_segment(name: &str) -> &str {
+pub(crate) fn last_segment(name: &str) -> &str {
     let cut = name
         .rfind("::")
         .map(|i| i + 2)
