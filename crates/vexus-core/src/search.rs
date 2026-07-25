@@ -1,4 +1,5 @@
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 
 use crate::Store;
 
@@ -100,20 +101,24 @@ impl Store {
              LEFT JOIN symbols s ON s.id = c.symbol_id WHERE c.id = ?1",
         )?;
         for (chunk_id, score) in ranked {
-            let hit = stmt.query_row([chunk_id], |r| {
-                let content: String = r.get(5)?;
-                let excerpt: String = content.replace('\n', " ").chars().take(120).collect();
-                Ok(SearchHit {
-                    chunk_id: r.get(0)?,
-                    path: r.get(1)?,
-                    qualname: r.get(2)?,
-                    start_line: r.get(3)?,
-                    end_line: r.get(4)?,
-                    score: *score,
-                    excerpt,
+            let hit = stmt
+                .query_row([chunk_id], |r| {
+                    let content: String = r.get(5)?;
+                    let excerpt: String = content.replace('\n', " ").chars().take(120).collect();
+                    Ok(SearchHit {
+                        chunk_id: r.get(0)?,
+                        path: r.get(1)?,
+                        qualname: r.get(2)?,
+                        start_line: r.get(3)?,
+                        end_line: r.get(4)?,
+                        score: *score,
+                        excerpt,
+                    })
                 })
-            })?;
-            out.push(hit);
+                .optional()?;
+            if let Some(hit) = hit {
+                out.push(hit);
+            }
         }
         Ok(out)
     }
@@ -240,5 +245,55 @@ mod tests {
         // None query_vec degrades to keyword-only: B disappears
         let kw = store.search_hybrid("banana", None, 10).unwrap();
         assert_eq!(kw.len(), 2);
+    }
+
+    #[test]
+    fn hydrate_skips_chunks_deleted_after_ranking() {
+        // Rank against a store, then delete the file (cascades chunks), then hydrate.
+        // search_hybrid re-ranks internally, so simulate by deleting between two calls:
+        // simplest deterministic version — delete a ranked chunk id directly via SQL,
+        // then assert search_hybrid returns the remaining hits instead of Err.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+        let idx = FileIndex {
+            symbols: vec![NewSymbol {
+                name: "m".into(),
+                qualname: "m".into(),
+                kind: SymbolKind::Module,
+                sig: None,
+                start_line: 1,
+                end_line: 3,
+                parent: None,
+                arity: None,
+            }],
+            edges: vec![],
+            chunks: vec![
+                NewChunk {
+                    symbol: Some(0),
+                    start_line: 1,
+                    end_line: 1,
+                    content: "banana one".into(),
+                },
+                NewChunk {
+                    symbol: Some(0),
+                    start_line: 2,
+                    end_line: 2,
+                    content: "banana two".into(),
+                },
+            ],
+        };
+        store
+            .replace_file("x.py", "python", &[1u8; 32], &idx)
+            .unwrap();
+        // delete one chunk row out from under FTS (external-content table keeps the
+        // fts row only via triggers; direct delete fires chunks_ad, so instead we
+        // delete AFTER capturing that both rank; emulate the race by removing the
+        // chunk row with triggers disabled):
+        store.conn_ref_for_tests().execute_batch(
+            "DROP TRIGGER chunks_ad; DELETE FROM chunks WHERE id = (SELECT min(id) FROM chunks);"
+        ).unwrap();
+        let hits = store.search_hybrid("banana", None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "surviving chunk still returned, no Err");
     }
 }

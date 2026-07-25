@@ -138,7 +138,7 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
             // of failing loudly.
             if vecs.len() != batch.len() {
                 bail!(
-                    "embedder {} returned {} vectors for {} texts",
+                    "embedder {} batch length mismatch: returned {} vectors for {} texts",
                     embedder.id(),
                     vecs.len(),
                     batch.len()
@@ -306,5 +306,34 @@ mod tests {
                 .any(|p| p == "src/secret.py"),
             "secret.py rows should survive a transient read failure"
         );
+    }
+
+    struct ShortBatchEmbedder;
+    impl vexus_embed::Embedder for ShortBatchEmbedder {
+        fn id(&self) -> &str {
+            "short"
+        }
+        fn dim(&self) -> usize {
+            4
+        }
+        fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .skip(1)
+                .map(|_| vec![1.0, 0.0, 0.0, 0.0])
+                .collect()) // one short
+        }
+    }
+
+    #[test]
+    fn embed_pending_errors_on_wrong_batch_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f1():\n    pass\ndef f2():\n    pass\n");
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        index_repo(root, &mut store).unwrap();
+        store.set_model("short", 4).unwrap();
+        let err = embed_pending(&mut store, &ShortBatchEmbedder).unwrap_err();
+        assert!(err.to_string().contains("batch"), "got: {err}");
     }
 }

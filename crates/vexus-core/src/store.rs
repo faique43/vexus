@@ -46,6 +46,7 @@ fn blob_to_f32s(b: &[u8]) -> Vec<f32> {
 pub struct Store {
     pub(crate) conn: Connection,
     vec_available: bool,
+    vec_table_cached: std::cell::Cell<Option<bool>>,
 }
 
 impl Store {
@@ -69,6 +70,7 @@ impl Store {
         Ok(Self {
             conn,
             vec_available,
+            vec_table_cached: std::cell::Cell::new(None),
         })
     }
 
@@ -88,7 +90,28 @@ impl Store {
         self.vec_available = false;
     }
 
-    fn vec_table_exists(conn: &Connection) -> Result<bool> {
+    /// Test-only escape hatch to access the connection directly for
+    /// simulating edge cases (e.g., deleting rows to trigger race conditions).
+    #[cfg(test)]
+    pub(crate) fn conn_ref_for_tests(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
+    pub fn vec_table_exists(&self) -> Result<bool> {
+        if let Some(cached) = self.vec_table_cached.get() {
+            return Ok(cached);
+        }
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'vec_chunks'",
+            [],
+            |r| r.get(0),
+        )?;
+        let exists = n > 0;
+        self.vec_table_cached.set(Some(exists));
+        Ok(exists)
+    }
+
+    fn vec_table_exists_uncached(conn: &Connection) -> Result<bool> {
         let n: i64 = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE name = 'vec_chunks'",
             [],
@@ -103,12 +126,13 @@ impl Store {
         if !self.vec_available {
             return Ok(());
         }
-        if Self::vec_table_exists(&self.conn)? {
+        if self.vec_table_exists()? {
             return Ok(());
         }
         self.conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
         ))?;
+        self.vec_table_cached.set(Some(true));
         Ok(())
     }
 
@@ -146,6 +170,7 @@ impl Store {
             [dim.to_string()],
         )?;
         tx.commit()?;
+        self.vec_table_cached.set(Some(vec_available));
         Ok(true)
     }
 
@@ -155,7 +180,7 @@ impl Store {
         if !self.vec_available {
             return Ok(vec![]);
         }
-        let sql = if Self::vec_table_exists(&self.conn)? {
+        let sql = if self.vec_table_exists()? {
             "SELECT c.id, c.content, c.content_hash FROM chunks c
              LEFT JOIN vec_chunks v ON v.chunk_id = c.id
              WHERE v.chunk_id IS NULL LIMIT ?1"
@@ -206,7 +231,7 @@ impl Store {
         if !self.vec_available || rows.is_empty() {
             return Ok(());
         }
-        if !Self::vec_table_exists(&self.conn)? {
+        if !self.vec_table_exists()? {
             self.ensure_vec_table(rows[0].1.len())?;
         }
         let tx = self.conn.transaction()?;
@@ -225,7 +250,7 @@ impl Store {
     /// `(chunk_id, distance)` nearest neighbors, ordered closest-first. Empty
     /// when vec is unavailable or `vec_chunks` doesn't exist yet.
     pub fn knn_chunks(&self, query: &[f32], k: u32) -> Result<Vec<(i64, f64)>> {
-        if !self.vec_available || !Self::vec_table_exists(&self.conn)? {
+        if !self.vec_available || !self.vec_table_exists()? {
             return Ok(vec![]);
         }
         let mut stmt = self.conn.prepare(
@@ -247,7 +272,7 @@ impl Store {
                 .conn
                 .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?);
         }
-        let n: i64 = if Self::vec_table_exists(&self.conn)? {
+        let n: i64 = if self.vec_table_exists()? {
             self.conn.query_row(
                 "SELECT count(*) FROM chunks c
                  LEFT JOIN vec_chunks v ON v.chunk_id = c.id
@@ -366,7 +391,7 @@ impl Store {
         // vec_chunks is a virtual table with no FK cascade, so its rows for
         // this file's chunks must be cleaned up explicitly before the old
         // file row (and its chunks, via ON DELETE CASCADE) disappears.
-        if vec_available && Self::vec_table_exists(&tx)? {
+        if vec_available && Self::vec_table_exists_uncached(&tx)? {
             tx.execute(
                 "DELETE FROM vec_chunks WHERE chunk_id IN (
                      SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1
@@ -446,7 +471,7 @@ impl Store {
         // Same reasoning as replace_file: vec_chunks has no FK cascade, so
         // clean it up before the chunks disappear, otherwise a stale
         // embedding row can later collide with a reused chunk rowid.
-        if vec_available && Self::vec_table_exists(&tx)? {
+        if vec_available && Self::vec_table_exists_uncached(&tx)? {
             tx.execute(
                 "DELETE FROM vec_chunks WHERE chunk_id IN (
                      SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1
@@ -918,6 +943,27 @@ mod tests {
         assert_eq!(
             with_vec.iter().map(|h| h.chunk_id).collect::<Vec<_>>(),
             keyword_only.iter().map(|h| h.chunk_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn vec_table_exists_is_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        assert!(!store.vec_table_exists().unwrap());
+        store.ensure_vec_table(4).unwrap();
+        assert!(store.vec_table_exists().unwrap());
+        store.set_model("mock", 4).unwrap();
+        assert!(store.vec_table_exists().unwrap());
+        // behavioral check that cache is used: drop the table behind the cache's back;
+        // the cached value is now (intentionally) stale — documents the invalidation contract
+        store
+            .conn_ref_for_tests()
+            .execute("DROP TABLE vec_chunks", [])
+            .unwrap();
+        assert!(
+            store.vec_table_exists().unwrap(),
+            "cache intentionally not invalidated by raw SQL"
         );
     }
 }
