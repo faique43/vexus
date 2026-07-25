@@ -4,7 +4,6 @@ expression: "chunk_lines(&parse_fixture(\"rust/sample.rs\"))"
 ---
 - "sym=Some(0) [1-1] tokens~7 :: use std::collections::HashMap;⏎"
 - "sym=Some(0) [9-9] tokens~3 :: impl Cache {⏎"
-- "sym=Some(0) [13-13] tokens~0 :: }⏎"
 - "sym=Some(1) [3-3] tokens~7 :: pub const LIMIT: usize = 10;⏎"
 - "sym=Some(2) [5-7] tokens~4 :: pub struct Cache {⏎"
 - "sym=Some(3) [10-12] tokens~22 ::     pub fn get(&self, key: &str) -> Option<&String> {⏎        lookup(&self.map, "

@@ -157,12 +157,17 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             }
         } else if let Some(rs) = run_start.take() {
             let run_text: String = lines[rs..i].iter().map(|l| format!("{l}\n")).collect();
-            chunks.push(NewChunk {
-                symbol: Some(0),
-                start_line: (rs + 1) as u32,
-                end_line: i as u32,
-                content: cap_content(run_text),
-            });
+            // Punctuation-only runs (a lone `}`, `);`, etc. left over between
+            // symbols) carry no searchable content and just pollute the
+            // index — skip them rather than emitting a chunk for them.
+            if run_text.chars().any(|c| c.is_alphanumeric()) {
+                chunks.push(NewChunk {
+                    symbol: Some(0),
+                    start_line: (rs + 1) as u32,
+                    end_line: i as u32,
+                    content: cap_content(run_text),
+                });
+            }
         }
     }
 
@@ -408,6 +413,40 @@ def decorated():
         let a = idx.chunks.iter().find(|c| c.symbol == Some(2)).unwrap();
         assert_eq!(a.start_line, 2);
         assert!(a.content.starts_with("    # doc for a"));
+    }
+
+    #[test]
+    fn punctuation_only_preamble_run_is_skipped() {
+        // A lone `}` line between two functions (e.g. leftover from an
+        // enclosing brace that isn't itself tracked as a symbol) must not
+        // become its own chunk — it has no alphanumeric content to search on.
+        let source = "fn a() {\n    pass\n}\n\n}\n\nfn b() {\n    pass\n}\n";
+        //             1              2      3  4  5  6              7      8      9
+        let mut idx = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 9,
+                    parent: None,
+                    arity: None,
+                },
+                f("a", SymbolKind::Function, 1, 3, Some(0)),
+                f("b", SymbolKind::Function, 7, 9, Some(0)),
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, source);
+
+        let pre: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(0)).collect();
+        assert!(
+            pre.is_empty(),
+            "lone '}}' preamble line must not produce a chunk: {pre:?}"
+        );
     }
 
     #[test]
