@@ -178,21 +178,40 @@ fn main() -> Result<()> {
             // declared width, which sqlite-vec rejects as a hard error.
             // Falling back to keyword-only search here is exactly the
             // "degrade, never die" behavior a query-embed failure gets below.
+            //
+            // Read the indexed model from `meta` BEFORE constructing an
+            // embedder: `make_embedder()`'s default path builds the full
+            // ONNX embedder (sha256 over a ~150MB file plus an ONNX Runtime
+            // session load), which is wasted work whenever `meta.model_id`
+            // already tells us it can't match. `VEXUS_EMBEDDER=mock`/`none`
+            // stay cheap either way, so only the default path needs gating.
             let indexed_model = (
                 store.meta("model_id").ok().flatten(),
                 store.meta("model_dim").ok().flatten(),
             );
-            let query_vec = make_embedder().and_then(|embedder| {
-                let same_model = indexed_model.0.as_deref() == Some(embedder.id())
-                    && indexed_model.1.as_deref() == Some(embedder.dim().to_string().as_str());
-                if !same_model {
-                    return None;
+            let embedder_env = std::env::var("VEXUS_EMBEDDER").ok();
+            let worth_building = match embedder_env.as_deref() {
+                Some("mock") | Some("none") => true,
+                _ => {
+                    indexed_model.0.is_none()
+                        || indexed_model.0.as_deref() == Some(vexus_embed::JINA_CODE_V2.id)
                 }
-                embedder
-                    .embed(&[query.as_str()])
-                    .ok()
-                    .and_then(|mut v| v.pop())
-            });
+            };
+            let query_vec = if worth_building {
+                make_embedder().and_then(|embedder| {
+                    let same_model = indexed_model.0.as_deref() == Some(embedder.id())
+                        && indexed_model.1.as_deref() == Some(embedder.dim().to_string().as_str());
+                    if !same_model {
+                        return None;
+                    }
+                    embedder
+                        .embed(&[query.as_str()])
+                        .ok()
+                        .and_then(|mut v| v.pop())
+                })
+            } else {
+                None
+            };
             for h in store.search_hybrid(&query, query_vec.as_deref(), limit)? {
                 let qual = h.qualname.unwrap_or_else(|| "(preamble)".into());
                 println!(
