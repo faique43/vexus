@@ -28,6 +28,21 @@ pub(crate) fn last_segment(name: &str) -> &str {
     &name[cut..]
 }
 
+/// SQL boolean expression matching `dst_expr` (a `dst_name`-shaped column
+/// reference, e.g. `e.dst_name`) against the already-bound parameter
+/// `param` (e.g. `?1`): either exactly equal, or a qualified suffix using
+/// any of the supported separators (`.` Python/JS, `::` Rust, `/` paths).
+/// Exact-length `substr` comparisons are used instead of `LIKE` so that
+/// `_`/`%` in the target name are never interpreted as wildcards.
+pub(crate) fn suffix_match_sql(dst_expr: &str, param: &str) -> String {
+    format!(
+        "({dst_expr} = {param}
+          OR substr({dst_expr}, -length({param}) - 1) = '.' || {param}
+          OR substr({dst_expr}, -length({param}) - 2) = '::' || {param}
+          OR substr({dst_expr}, -length({param}) - 1) = '/' || {param})"
+    )
+}
+
 impl Store {
     pub fn resolve_all_edges(&mut self) -> Result<u64> {
         self.resolve_where("1=1", &[])
@@ -41,13 +56,7 @@ impl Store {
             // `.name` (Python/JS), `::name` (Rust), or `/name` (paths).
             // Exact-length suffix comparisons are used instead of LIKE to
             // avoid `_`/`%` being interpreted as wildcards.
-            total += self.resolve_where(
-                "(e.dst_name = ?1
-                  OR substr(e.dst_name, -length(?1) - 1) = '.' || ?1
-                  OR substr(e.dst_name, -length(?1) - 2) = '::' || ?1
-                  OR substr(e.dst_name, -length(?1) - 1) = '/' || ?1)",
-                &[name],
-            )?;
+            total += self.resolve_where(&suffix_match_sql("e.dst_name", "?1"), &[name])?;
         }
         Ok(total)
     }
