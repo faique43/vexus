@@ -104,13 +104,16 @@ impl Store {
     }
 
     /// Record the active embedding model. On a change from the previously
-    /// recorded `model_id` (or if none was recorded yet), wipes the embed
-    /// cache and the vec table (dimensions may differ between models) and
-    /// recreates `vec_chunks` for the new dimension. Returns whether a wipe
-    /// happened.
+    /// recorded `model_id`/`model_dim` (or if none was recorded yet), wipes
+    /// the embed cache and the vec table (dimensions may differ between
+    /// models) and recreates `vec_chunks` for the new dimension. Returns
+    /// whether a wipe happened.
     pub fn set_model(&mut self, model_id: &str, dim: usize) -> Result<bool> {
-        let current = self.meta("model_id")?;
-        if current.as_deref() == Some(model_id) {
+        let current_id = self.meta("model_id")?;
+        let current_dim = self.meta("model_dim")?;
+        let unchanged = current_id.as_deref() == Some(model_id)
+            && current_dim.as_deref() == Some(&*dim.to_string());
+        if unchanged {
             self.ensure_vec_table(dim)?;
             return Ok(false);
         }
@@ -186,13 +189,16 @@ impl Store {
     }
 
     /// Upsert embeddings for chunks in one transaction. No-op when vec is
-    /// unavailable or `vec_chunks` doesn't exist yet.
+    /// unavailable. If `vec_chunks` doesn't exist yet (e.g. `set_model` was
+    /// never called), it's created using the dimension of the first row,
+    /// matching how `chunks_missing_embedding`/`embed_backlog` already treat
+    /// a missing table as "nothing embedded yet" rather than an error.
     pub fn put_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<()> {
         if !self.vec_available || rows.is_empty() {
             return Ok(());
         }
         if !Self::vec_table_exists(&self.conn)? {
-            return Ok(());
+            self.ensure_vec_table(rows[0].1.len())?;
         }
         let tx = self.conn.transaction()?;
         {
@@ -420,9 +426,23 @@ impl Store {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<bool> {
-        let n = self
-            .conn
-            .execute("DELETE FROM files WHERE path = ?1", [path])?;
+        let vec_available = self.vec_available;
+        let tx = self.conn.transaction()?;
+
+        // Same reasoning as replace_file: vec_chunks has no FK cascade, so
+        // clean it up before the chunks disappear, otherwise a stale
+        // embedding row can later collide with a reused chunk rowid.
+        if vec_available && Self::vec_table_exists(&tx)? {
+            tx.execute(
+                "DELETE FROM vec_chunks WHERE chunk_id IN (
+                     SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1
+                 )",
+                [path],
+            )?;
+        }
+
+        let n = tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
@@ -764,5 +784,79 @@ mod tests {
         assert_eq!(store.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap().len(), 0);
 
         assert!(!store.set_model("other-model", 4).unwrap()); // same model: no wipe
+    }
+
+    #[test]
+    fn remove_file_cleans_vec_rows_so_reused_chunk_ids_start_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+        let (chunk_id, _, _) = store.chunks_missing_embedding(100).unwrap()[0].clone();
+        store
+            .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        assert_eq!(store.embed_backlog().unwrap(), 0);
+
+        // Remove the file entirely: its vec row must go with it, otherwise a
+        // future chunk that reuses this rowid would inherit a stale embedding.
+        assert!(store.remove_file("a.py").unwrap());
+        assert_eq!(
+            store.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap().len(),
+            0,
+            "orphaned vec row must not survive remove_file"
+        );
+    }
+
+    #[test]
+    fn put_embeddings_self_heals_missing_vec_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        // No set_model call: vec_chunks doesn't exist yet.
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+        let (chunk_id, _, _) = store.chunks_missing_embedding(100).unwrap()[0].clone();
+
+        // Must not silently drop the embedding just because the table wasn't
+        // created yet — chunks_missing_embedding already reported it as
+        // outstanding work, so put_embeddings has to honor it.
+        store
+            .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        assert_eq!(store.embed_backlog().unwrap(), 0);
+        assert_eq!(
+            store.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap()[0].0,
+            chunk_id
+        );
+    }
+
+    #[test]
+    fn set_model_wipes_on_dimension_change_even_with_same_model_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        assert!(store.set_model("mock", 4).unwrap());
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+        let (chunk_id, _, hash) = store.chunks_missing_embedding(100).unwrap()[0].clone();
+        store.embed_cache_put(&hash, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        store
+            .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+
+        // Same model_id, different dim: must be treated as a real change.
+        assert!(store.set_model("mock", 8).unwrap());
+        assert!(store.embed_cache_get(&hash).unwrap().is_none());
+        assert_eq!(
+            store
+                .knn_chunks(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5)
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }
