@@ -1,6 +1,8 @@
 //! Vexus MCP server: exposes the Plan 1+2 index (structural + semantic) as
 //! MCP tools over stdio for `vexus serve`.
 
+pub mod bundle;
+pub mod format;
 pub mod server;
 pub mod state;
 
