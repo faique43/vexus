@@ -1,0 +1,11 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"typescript/sample.ts\"))"
+---
+- "sym=Some(0) [1-1] tokens~7 :: import { join } from \"path\";⏎"
+- "sym=Some(0) [3-3] tokens~6 :: export const LIMIT = 10;⏎"
+- "sym=Some(1) [5-7] tokens~26 :: export function fetchUser(id: string, retries: number) {⏎  return withRetry(() ="
+- "sym=Some(2) [9-11] tokens~14 :: function load(id: string) {⏎  return join(\"users\", id);⏎}⏎"
+- "sym=Some(3) [13-17] tokens~10 :: export class Repo {⏎    find(id: string) {⏎"
+- "sym=Some(4) [14-16] tokens~11 ::   find(id: string) {⏎    return load(id);⏎  }⏎"
+- "sym=Some(5) [19-21] tokens~5 :: interface Options {⏎"

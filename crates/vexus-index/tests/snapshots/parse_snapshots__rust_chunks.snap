@@ -1,0 +1,13 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"rust/sample.rs\"))"
+---
+- "sym=Some(0) [1-1] tokens~7 :: use std::collections::HashMap;⏎"
+- "sym=Some(0) [9-9] tokens~3 :: impl Cache {⏎"
+- "sym=Some(0) [13-13] tokens~0 :: }⏎"
+- "sym=Some(2) [5-7] tokens~4 :: pub struct Cache {⏎"
+- "sym=Some(3) [10-12] tokens~22 ::     pub fn get(&self, key: &str) -> Option<&String> {⏎        lookup(&self.map, "
+- "sym=Some(4) [15-15] tokens~7 :: pub enum Mode { Fast, Slow }⏎"
+- "sym=Some(5) [17-19] tokens~15 :: pub trait Backend {⏎    fn load(&self, key: &str) -> String;⏎"
+- "sym=Some(6) [18-18] tokens~10 ::     fn load(&self, key: &str) -> String;⏎"
+- "sym=Some(7) [21-23] tokens~25 :: fn lookup<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a String>"

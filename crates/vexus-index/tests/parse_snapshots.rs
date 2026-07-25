@@ -42,6 +42,26 @@ fn edge_lines(idx: &vexus_core::model::FileIndex) -> Vec<String> {
         .collect()
 }
 
+fn chunk_lines(idx: &vexus_core::model::FileIndex) -> Vec<String> {
+    idx.chunks
+        .iter()
+        .map(|c| {
+            format!(
+                "sym={:?} [{}-{}] tokens~{} :: {}",
+                c.symbol,
+                c.start_line,
+                c.end_line,
+                vexus_core::model::estimate_tokens(&c.content),
+                c.content
+                    .replace('\n', "⏎")
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn python_symbols() {
     let idx = parse_fixture("python/sample.py");
@@ -76,4 +96,19 @@ fn rust_symbols() {
 fn rust_edges() {
     let idx = parse_fixture("rust/sample.rs");
     insta::assert_yaml_snapshot!(edge_lines(&idx));
+}
+
+#[test]
+fn python_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("python/sample.py")));
+}
+
+#[test]
+fn typescript_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("typescript/sample.ts")));
+}
+
+#[test]
+fn rust_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("rust/sample.rs")));
 }
