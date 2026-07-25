@@ -14,8 +14,21 @@ fn symbol_lines(idx: &vexus_core::model::FileIndex) -> Vec<String> {
     )).collect()
 }
 
+fn edge_lines(idx: &vexus_core::model::FileIndex) -> Vec<String> {
+    idx.edges.iter().map(|e| format!(
+        "{} {} -> {} arity={:?}",
+        e.kind.as_str(), idx.symbols[e.src].qualname, e.dst_name, e.dst_arity
+    )).collect()
+}
+
 #[test]
 fn python_symbols() {
     let idx = parse_fixture("python/sample.py");
     insta::assert_yaml_snapshot!(symbol_lines(&idx));
+}
+
+#[test]
+fn python_edges() {
+    let idx = parse_fixture("python/sample.py");
+    insta::assert_yaml_snapshot!(edge_lines(&idx));
 }

@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: edge_lines(&idx)
+---
+- imports python.sample -> os arity=None
+- imports python.sample -> utils.text arity=None
+- calls python.sample.top_level -> helper arity=Some(1)
+- calls python.sample.helper -> slugify arity=Some(1)

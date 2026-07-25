@@ -1,7 +1,7 @@
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
 
-use vexus_core::model::{FileIndex, NewSymbol, SymbolKind};
+use vexus_core::model::{FileIndex, NewSymbol, SymbolKind, NewEdge, EdgeKind};
 
 use crate::lang::Lang;
 
@@ -60,7 +60,7 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
 
     for (node, name, kind_hint, params) in defs {
         // Walk up to the nearest enclosing def already in idx.symbols.
-        let parent = enclosing_symbol(&idx, node);
+        let parent = enclosing_symbol(&idx, node, true);
         let parent_kind = idx.symbols[parent].kind;
         let kind = match kind_hint {
             "function" if matches!(parent_kind, SymbolKind::Class | SymbolKind::Struct
@@ -85,17 +85,47 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
             parent: Some(parent), arity,
         });
     }
+
+    // Extract edges (calls and imports)
+    let equery = lang.edges_query();
+    let mut ecursor = QueryCursor::new();
+    let mut ematches = ecursor.matches(&equery, tree.root_node(), source.as_bytes());
+    while let Some(m) = ematches.next() {
+        let mut call_name = None;
+        let mut call_args = None;
+        let mut call_node = None;
+        let mut import_module = None;
+        for cap in m.captures {
+            let cap_name = &equery.capture_names()[cap.index as usize];
+            match *cap_name {
+                "call" => call_node = Some(cap.node),
+                "call.name" => call_name = Some(cap.node.utf8_text(source.as_bytes()).unwrap_or("").to_string()),
+                "call.args" => call_args = Some(cap.node),
+                "import.module" => import_module = Some(cap.node.utf8_text(source.as_bytes()).unwrap_or("").to_string()),
+                _ => {}
+            }
+        }
+        if let (Some(node), Some(name)) = (call_node, call_name) {
+            let src = enclosing_symbol(&idx, node, false);
+            let arity = call_args.map(|a| a.named_child_count() as u32);
+            idx.edges.push(NewEdge { src, kind: EdgeKind::Calls, dst_name: name, dst_arity: arity });
+        } else if let Some(module) = import_module {
+            idx.edges.push(NewEdge { src: 0, kind: EdgeKind::Imports, dst_name: module, dst_arity: None });
+        }
+    }
+
     idx
 }
 
 /// Index (into idx.symbols) of the innermost symbol whose line range strictly
 /// contains `node`, defaulting to the module symbol (0).
-fn enclosing_symbol(idx: &FileIndex, node: Node) -> usize {
+/// `is_def`: if true, a def does not enclose itself; if false, a call site can be enclosed by its def.
+fn enclosing_symbol(idx: &FileIndex, node: Node, is_def: bool) -> usize {
     let line = node.start_position().row as u32 + 1;
     let mut best = 0usize;
     for (i, s) in idx.symbols.iter().enumerate().skip(1) {
         let contains = s.start_line <= line && line <= s.end_line
-            && !(s.start_line == line); // a def does not enclose itself
+            && !(is_def && s.start_line == line); // if is_def, a def does not enclose itself
         if contains && (s.start_line > idx.symbols[best].start_line || best == 0) {
             best = i;
         }
