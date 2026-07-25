@@ -102,6 +102,7 @@ impl Store {
         idx: &crate::model::FileIndex,
     ) -> Result<i64> {
         use crate::model::estimate_tokens;
+        use anyhow::anyhow;
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
         tx.execute(
@@ -114,7 +115,10 @@ impl Store {
         // (parser guarantee), so the id map is complete when we need it.
         let mut ids: Vec<i64> = Vec::with_capacity(idx.symbols.len());
         for s in &idx.symbols {
-            let parent_id = s.parent.map(|i| ids[i]);
+            let parent_id = match s.parent {
+                Some(i) => Some(*ids.get(i).ok_or_else(|| anyhow!("symbol parent index {} out of range (batch has {} symbols inserted so far)", i, ids.len()))?),
+                None => None,
+            };
             tx.execute(
                 "INSERT INTO symbols (file_id, name, qualname, kind, sig, start_line, end_line, parent_id, arity)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -126,19 +130,24 @@ impl Store {
             ids.push(tx.last_insert_rowid());
         }
         for e in &idx.edges {
+            let src_id = *ids.get(e.src).ok_or_else(|| anyhow!("edge src index {} out of range (batch has {} symbols)", e.src, ids.len()))?;
             tx.execute(
                 "INSERT INTO edges (src_id, kind, dst_name, dst_arity, dst_id, confidence)
                  VALUES (?1, ?2, ?3, ?4, NULL, 'name_only')",
-                rusqlite::params![ids[e.src], e.kind.as_str(), e.dst_name, e.dst_arity],
+                rusqlite::params![src_id, e.kind.as_str(), e.dst_name, e.dst_arity],
             )?;
         }
         for c in &idx.chunks {
+            let symbol_id = match c.symbol {
+                Some(i) => Some(*ids.get(i).ok_or_else(|| anyhow!("chunk symbol index {} out of range (batch has {} symbols)", i, ids.len()))?),
+                None => None,
+            };
             let content_hash = blake3::hash(c.content.as_bytes());
             tx.execute(
                 "INSERT INTO chunks (file_id, symbol_id, start_line, end_line, content, content_hash, token_count)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
-                    file_id, c.symbol.map(|i| ids[i]), c.start_line, c.end_line,
+                    file_id, symbol_id, c.start_line, c.end_line,
                     c.content, content_hash.as_bytes().as_slice(), estimate_tokens(&c.content)
                 ],
             )?;
@@ -246,6 +255,87 @@ mod tests {
 
         // remove cleans everything through cascades
         assert!(store.remove_file("app.py").unwrap());
+        let c = store.counts().unwrap();
+        assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn malformed_index_out_of_range_src_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let hash = [9u8; 32];
+
+        // Create a malformed index with out-of-range edge src
+        use crate::model::*;
+        let bad_index = FileIndex {
+            symbols: vec![
+                NewSymbol { name: "func".into(), qualname: "app.func".into(), kind: SymbolKind::Function,
+                    sig: None, start_line: 1, end_line: 5, parent: None, arity: None },
+            ],
+            edges: vec![NewEdge { src: 99, kind: EdgeKind::Calls, dst_name: "other".into(), dst_arity: None }],
+            chunks: vec![],
+        };
+
+        // Should return Err, not panic
+        let result = store.replace_file("bad.py", "python", &hash, &bad_index);
+        assert!(result.is_err(), "malformed index should return Err");
+        assert!(result.unwrap_err().to_string().contains("edge src index"), "error should mention src index");
+
+        // Store should be unchanged (counts all 0)
+        let c = store.counts().unwrap();
+        assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn malformed_index_out_of_range_parent_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let hash = [10u8; 32];
+
+        // Create a malformed index with out-of-range parent
+        use crate::model::*;
+        let bad_index = FileIndex {
+            symbols: vec![
+                NewSymbol { name: "child".into(), qualname: "app.child".into(), kind: SymbolKind::Function,
+                    sig: None, start_line: 1, end_line: 5, parent: Some(99), arity: None },
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+
+        // Should return Err, not panic
+        let result = store.replace_file("bad2.py", "python", &hash, &bad_index);
+        assert!(result.is_err(), "malformed index should return Err");
+        assert!(result.unwrap_err().to_string().contains("symbol parent index"), "error should mention parent index");
+
+        // Store should be unchanged (counts all 0)
+        let c = store.counts().unwrap();
+        assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn malformed_index_out_of_range_symbol_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let hash = [11u8; 32];
+
+        // Create a malformed index with out-of-range chunk symbol
+        use crate::model::*;
+        let bad_index = FileIndex {
+            symbols: vec![
+                NewSymbol { name: "func".into(), qualname: "app.func".into(), kind: SymbolKind::Function,
+                    sig: None, start_line: 1, end_line: 5, parent: None, arity: None },
+            ],
+            edges: vec![],
+            chunks: vec![NewChunk { symbol: Some(99), start_line: 1, end_line: 5, content: "code".into() }],
+        };
+
+        // Should return Err, not panic
+        let result = store.replace_file("bad3.py", "python", &hash, &bad_index);
+        assert!(result.is_err(), "malformed index should return Err");
+        assert!(result.unwrap_err().to_string().contains("chunk symbol index"), "error should mention symbol index");
+
+        // Store should be unchanged (counts all 0)
         let c = store.counts().unwrap();
         assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
     }
