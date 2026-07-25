@@ -39,7 +39,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                     chunks.push(NewChunk { symbol: Some(i), start_line: sym.start_line,
                         end_line: sym.end_line, content });
                 } else {
-                    split_oversized(&mut chunks, i, sym.sig.as_deref(), sym.start_line, &lines);
+                    split_oversized(&mut chunks, i, sym.sig.as_deref(), sym.start_line, sym.end_line, &lines);
                 }
             }
             SymbolKind::Class | SymbolKind::Struct | SymbolKind::Enum
@@ -70,9 +70,10 @@ fn split_oversized(
     sym_index: usize,
     sig: Option<&str>,
     start_line: u32,
+    end_line: u32,
     lines: &[&str],
 ) {
-    let end = lines.len() as u32;
+    let end = end_line.min(lines.len() as u32);
     let mut piece_start = start_line;
     let mut buf = String::new();
     let mut first = true;
@@ -165,5 +166,43 @@ mod tests {
         for p in &pieces[1..] {
             assert!(p.content.starts_with("fn big() {"));
         }
+    }
+
+    #[test]
+    fn oversized_followed_by_function_respects_end_line() {
+        // Oversized function followed by another function
+        let big_body: String = (0..300).map(|i| format!("    big_line_{i:04};\n")).collect();
+        let source = format!("fn big() {{\n{big_body}}}\n\ndef small():\n    pass\n");
+        let total_lines = source.lines().count() as u32;
+        let big_end = big_body.lines().count() as u32 + 2; // +2 for fn big() { and }
+        let small_start = big_end + 2;
+        let small_end = total_lines;
+
+        let mut idx = FileIndex {
+            symbols: vec![
+                NewSymbol { name: "m".into(), qualname: "m".into(), kind: SymbolKind::Module,
+                    sig: None, start_line: 1, end_line: total_lines, parent: None, arity: None },
+                NewSymbol { name: "big".into(), qualname: "m.big".into(), kind: SymbolKind::Function,
+                    sig: Some("fn big() {".into()), start_line: 1, end_line: big_end,
+                    parent: Some(0), arity: Some(0) },
+                f("small", SymbolKind::Function, small_start, small_end, Some(0)),
+            ],
+            edges: vec![], chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, &source);
+
+        // Verify oversized chunks don't exceed their symbol's end_line
+        let big_chunks: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(1)).collect();
+        assert!(!big_chunks.is_empty());
+        for chunk in &big_chunks {
+            assert!(chunk.end_line <= big_end, "oversized chunk end_line {} exceeds symbol end_line {}", chunk.end_line, big_end);
+            assert!(!chunk.content.contains("small"), "oversized chunk contains next function");
+            assert!(!chunk.content.contains("pass"), "oversized chunk contains small's body");
+        }
+
+        // Verify second function has its own chunk
+        let small_chunks: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(2)).collect();
+        assert_eq!(small_chunks.len(), 1);
+        assert!(small_chunks[0].content.contains("pass"));
     }
 }
