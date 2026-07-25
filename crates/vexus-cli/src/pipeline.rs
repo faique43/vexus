@@ -50,6 +50,10 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
+                // The file still exists on disk (transient read failure, e.g.
+                // permissions) — mark it seen so the removal pass below doesn't
+                // delete its existing DB rows out from under it.
+                seen.insert(rel.clone());
                 report.failed.push(format!("{rel}: {e}"));
                 continue;
             }
@@ -154,5 +158,55 @@ mod tests {
         assert!(r.failed[0].contains("secret.py"), "failed: {:?}", r.failed);
         assert_eq!(r.indexed, 1);
         assert_eq!(store.counts().unwrap().files, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_read_failure_preserves_existing_index_rows() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/app.py", "def run():\n    return 1\n");
+        write(root, "src/secret.py", "def hidden():\n    return 2\n");
+
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+
+        // First run: file is readable, gets indexed successfully.
+        let r = index_repo(root, &mut store).unwrap();
+        assert_eq!(r.indexed, 2);
+        assert_eq!(r.removed, 0);
+        assert_eq!(store.counts().unwrap().files, 2);
+        assert!(store
+            .file_paths()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/secret.py"));
+
+        // Now make the file transiently unreadable (still present on disk) and re-index.
+        let secret_path = root.join("src/secret.py");
+        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = index_repo(root, &mut store);
+
+        // Restore permissions before asserting/unwrapping so tempdir cleanup never fails.
+        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let r = result.unwrap();
+        assert_eq!(r.failed.len(), 1, "failed: {:?}", r.failed);
+        assert!(r.failed[0].contains("secret.py"), "failed: {:?}", r.failed);
+
+        // The read failure must NOT be treated as "file gone from disk": its
+        // existing DB rows must survive, and removed must be 0.
+        assert_eq!(r.removed, 0, "transient read failure must not remove rows");
+        assert_eq!(store.counts().unwrap().files, 2);
+        assert!(
+            store
+                .file_paths()
+                .unwrap()
+                .iter()
+                .any(|p| p == "src/secret.py"),
+            "secret.py rows should survive a transient read failure"
+        );
     }
 }
