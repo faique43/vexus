@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use vexus_core::model::estimate_tokens;
 use vexus_core::query::Resolution;
 
 use crate::bundle::{pack, BundleItem};
@@ -18,7 +19,7 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
     if let Some((rel_path, start, end)) = parse_path_slice(target) {
-        return open_path_slice(&state.root, rel_path, start, end);
+        return open_path_slice(&state.root, rel_path, start, end, budget_tokens);
     }
 
     let store = state.store.lock().expect("store mutex poisoned");
@@ -118,7 +119,13 @@ fn escapes_root(root: &Path, rel: &str) -> bool {
     false
 }
 
-fn open_path_slice(root: &Path, rel_path: &str, start: u32, end: u32) -> String {
+fn open_path_slice(
+    root: &Path,
+    rel_path: &str,
+    start: u32,
+    end: u32,
+    budget_tokens: u32,
+) -> String {
     if escapes_root(root, rel_path) {
         return format!("\"{rel_path}\" escapes the repository root — refusing to read it.");
     }
@@ -142,18 +149,61 @@ fn open_path_slice(root: &Path, rel_path: &str, start: u32, end: u32) -> String 
         );
     }
     let end = end.clamp(start, total);
-    let slice = lines[(start - 1) as usize..end as usize].join("\n");
+    let requested = &lines[(start - 1) as usize..end as usize];
+    let requested_count = requested.len();
+    let (slice, kept) = truncate_to_budget(requested, budget_tokens);
+    let truncated = kept < requested_count;
+    let rendered_end = start + kept as u32 - 1;
 
     let item = BundleItem {
         path: rel_path.to_string(),
         qualname: None,
         start_line: start,
-        end_line: end,
+        end_line: rendered_end,
         content: slice,
         score: 1.0,
         chunk_id: -1,
     };
-    render_bundle(&[item], &[])
+    let mut out = render_bundle(&[item], &[]);
+    if truncated {
+        out.push_str(&format!(
+            "range truncated to {kept} of {requested_count} lines to fit budget_tokens; \
+             request a narrower range or raise budget_tokens\n"
+        ));
+    }
+    out
+}
+
+/// Fits `lines` under `budget_tokens` by keeping the longest whole-line
+/// prefix whose `estimate_tokens` cost is within budget (binary search over
+/// the prefix length, so a huge over-budget range doesn't cost O(n^2) to
+/// shrink one line at a time). Always keeps at least one line — a
+/// single line that alone exceeds budget is still returned as-is, since
+/// there's no narrower full-line unit to fall back to. Returns the joined
+/// (possibly truncated) content and how many lines it kept; the caller
+/// compares that against `lines.len()` to decide whether to note the cut.
+fn truncate_to_budget(lines: &[&str], budget_tokens: u32) -> (String, usize) {
+    let full = lines.join("\n");
+    if lines.len() <= 1 || estimate_tokens(&full) <= budget_tokens {
+        return (full, lines.len());
+    }
+
+    let fits = |n: usize| estimate_tokens(&lines[0..n].join("\n")) <= budget_tokens;
+    if !fits(1) {
+        return (lines[0].to_string(), 1);
+    }
+
+    let mut lo = 1usize;
+    let mut hi = lines.len();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (lines[0..lo].join("\n"), lo)
 }
 
 #[cfg(test)]
@@ -244,6 +294,39 @@ mod tests {
         assert!(!out.contains("line1"), "got: {out:?}");
         assert!(!out.contains("line4"), "got: {out:?}");
         assert!(out.contains("a.py:2-3"), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_path_slice_truncates_to_fit_a_small_budget_but_leaves_normal_ranges_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let content: String = (1..=500).map(|n| format!("line{n}\n")).collect();
+        write(root, "big.py", &content);
+
+        let state = indexed_state(root);
+
+        // A tiny budget can only fit a handful of "lineN" entries — the full
+        // 1-500 range would blow well past it, so the tail must be cut and a
+        // truncation note appended.
+        let out = open_text(&state, "big.py:1-500", Some(20));
+        assert!(out.contains("line1"), "got: {out:?}");
+        assert!(
+            !out.contains("line500"),
+            "expected truncation well before line500: {out:?}"
+        );
+        assert!(
+            out.contains("range truncated to") && out.contains("to fit budget_tokens"),
+            "expected a truncation note: {out:?}"
+        );
+
+        // A normal, budget-friendly range is unaffected — no truncation note.
+        let out2 = open_text(&state, "big.py:1-3", None);
+        assert!(out2.contains("line1"), "got: {out2:?}");
+        assert!(out2.contains("line3"), "got: {out2:?}");
+        assert!(
+            !out2.contains("range truncated to"),
+            "a range comfortably within budget must not be truncated: {out2:?}"
+        );
     }
 
     #[test]
