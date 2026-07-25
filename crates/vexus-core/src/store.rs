@@ -6,12 +6,51 @@ use rusqlite::Connection;
 pub const SCHEMA_VERSION: &str = "1";
 const SCHEMA: &str = include_str!("schema.sql");
 
+static VEC_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Signature of a SQLite extension entry point (what `sqlite3_auto_extension`
+/// actually expects). `sqlite_vec::sqlite3_vec_init` is declared with no
+/// arguments in the `sqlite-vec` crate (it's only ever called indirectly by
+/// SQLite through this pointer), so we transmute through this explicit type
+/// rather than relying on an inferred one.
+type VecExtensionEntryPoint = unsafe extern "C" fn(
+    db: *mut rusqlite::ffi::sqlite3,
+    pz_err_msg: *mut *mut std::os::raw::c_char,
+    p_api: *const rusqlite::ffi::sqlite3_api_routines,
+) -> std::os::raw::c_int;
+
+/// Register the sqlite-vec extension process-wide via `sqlite3_auto_extension`
+/// so every connection opened anywhere in this binary (including other tests
+/// in the same test binary) picks up `vec0`/`vec_version()`. Must run before
+/// any `Connection::open`; idempotent via `Once`.
+fn register_sqlite_vec() {
+    VEC_INIT.call_once(|| unsafe {
+        let init_fn: unsafe extern "C" fn() = sqlite_vec::sqlite3_vec_init;
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            unsafe extern "C" fn(),
+            VecExtensionEntryPoint,
+        >(init_fn)));
+    });
+}
+
+fn f32s_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn blob_to_f32s(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 pub struct Store {
     pub(crate) conn: Connection,
+    vec_available: bool,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        register_sqlite_vec();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -24,7 +63,183 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::init_if_empty(&conn)?;
-        Ok(Self { conn })
+        let vec_available = conn
+            .query_row("SELECT vec_version()", [], |_| Ok(()))
+            .is_ok();
+        Ok(Self {
+            conn,
+            vec_available,
+        })
+    }
+
+    /// Whether the sqlite-vec extension is loaded in this process. When
+    /// false, all vec-related methods become no-ops / empty results rather
+    /// than erroring, so callers can run without vector search support.
+    pub fn vec_available(&self) -> bool {
+        self.vec_available
+    }
+
+    fn vec_table_exists(conn: &Connection) -> Result<bool> {
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'vec_chunks'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Create the `vec_chunks` virtual table if it doesn't exist yet.
+    /// No-op when sqlite-vec isn't available or the table already exists.
+    pub fn ensure_vec_table(&mut self, dim: usize) -> Result<()> {
+        if !self.vec_available {
+            return Ok(());
+        }
+        if Self::vec_table_exists(&self.conn)? {
+            return Ok(());
+        }
+        self.conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
+        ))?;
+        Ok(())
+    }
+
+    /// Record the active embedding model. On a change from the previously
+    /// recorded `model_id` (or if none was recorded yet), wipes the embed
+    /// cache and the vec table (dimensions may differ between models) and
+    /// recreates `vec_chunks` for the new dimension. Returns whether a wipe
+    /// happened.
+    pub fn set_model(&mut self, model_id: &str, dim: usize) -> Result<bool> {
+        let current = self.meta("model_id")?;
+        if current.as_deref() == Some(model_id) {
+            self.ensure_vec_table(dim)?;
+            return Ok(false);
+        }
+        let vec_available = self.vec_available;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM embed_cache", [])?;
+        tx.execute("DROP TABLE IF EXISTS vec_chunks", [])?;
+        if vec_available {
+            tx.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
+            ))?;
+        }
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('model_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [model_id],
+        )?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('model_dim', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [dim.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// `(chunk_id, content, content_hash)` for chunks with no `vec_chunks`
+    /// row yet. Empty when vec is unavailable.
+    pub fn chunks_missing_embedding(&self, limit: u32) -> Result<Vec<(i64, String, Vec<u8>)>> {
+        if !self.vec_available {
+            return Ok(vec![]);
+        }
+        let sql = if Self::vec_table_exists(&self.conn)? {
+            "SELECT c.id, c.content, c.content_hash FROM chunks c
+             LEFT JOIN vec_chunks v ON v.chunk_id = c.id
+             WHERE v.chunk_id IS NULL LIMIT ?1"
+        } else {
+            "SELECT c.id, c.content, c.content_hash FROM chunks c LIMIT ?1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn embed_cache_get(&self, hash: &[u8]) -> Result<Option<Vec<f32>>> {
+        let v: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT embedding FROM embed_cache WHERE content_hash = ?1",
+                [hash],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        Ok(v.map(|b| blob_to_f32s(&b)))
+    }
+
+    pub fn embed_cache_put(&mut self, hash: &[u8], v: &[f32]) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO embed_cache (content_hash, embedding) VALUES (?1, ?2)",
+            rusqlite::params![hash, f32s_to_blob(v)],
+        )?;
+        Ok(())
+    }
+
+    /// Upsert embeddings for chunks in one transaction. No-op when vec is
+    /// unavailable or `vec_chunks` doesn't exist yet.
+    pub fn put_embeddings(&mut self, rows: &[(i64, Vec<f32>)]) -> Result<()> {
+        if !self.vec_available || rows.is_empty() {
+            return Ok(());
+        }
+        if !Self::vec_table_exists(&self.conn)? {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
+            )?;
+            for (chunk_id, v) in rows {
+                stmt.execute(rusqlite::params![chunk_id, f32s_to_blob(v)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `(chunk_id, distance)` nearest neighbors, ordered closest-first. Empty
+    /// when vec is unavailable or `vec_chunks` doesn't exist yet.
+    pub fn knn_chunks(&self, query: &[f32], k: u32) -> Result<Vec<(i64, f64)>> {
+        if !self.vec_available || !Self::vec_table_exists(&self.conn)? {
+            return Ok(vec![]);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_id, distance FROM vec_chunks WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![f32s_to_blob(query), k], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Count of chunks lacking a `vec_chunks` row. 0 when vec is unavailable.
+    pub fn embed_backlog(&self) -> Result<i64> {
+        if !self.vec_available {
+            return Ok(0);
+        }
+        let n: i64 = if Self::vec_table_exists(&self.conn)? {
+            self.conn.query_row(
+                "SELECT count(*) FROM chunks c
+                 LEFT JOIN vec_chunks v ON v.chunk_id = c.id
+                 WHERE v.chunk_id IS NULL",
+                [],
+                |r| r.get(0),
+            )?
+        } else {
+            self.conn
+                .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?
+        };
+        Ok(n)
     }
 
     /// Delete the DB file plus its WAL/SHM sidecars, ignoring "not found" errors.
@@ -125,7 +340,21 @@ impl Store {
     ) -> Result<i64> {
         use crate::model::estimate_tokens;
         use anyhow::anyhow;
+        let vec_available = self.vec_available;
         let tx = self.conn.transaction()?;
+
+        // vec_chunks is a virtual table with no FK cascade, so its rows for
+        // this file's chunks must be cleaned up explicitly before the old
+        // file row (and its chunks, via ON DELETE CASCADE) disappears.
+        if vec_available && Self::vec_table_exists(&tx)? {
+            tx.execute(
+                "DELETE FROM vec_chunks WHERE chunk_id IN (
+                     SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1
+                 )",
+                [path],
+            )?;
+        }
+
         tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
         tx.execute(
             "INSERT INTO files (path, lang, hash, indexed_at) VALUES (?1, ?2, ?3, unixepoch())",
@@ -489,5 +718,51 @@ mod tests {
         // Store should be unchanged (counts all 0)
         let c = store.counts().unwrap();
         assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn vec_roundtrip_knn_and_model_wipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        assert!(
+            store.vec_available(),
+            "sqlite-vec should be statically linked"
+        );
+
+        assert!(store.set_model("mock", 4).unwrap()); // first set counts as change
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+
+        let missing = store.chunks_missing_embedding(100).unwrap();
+        assert_eq!(missing.len(), 1);
+        let (chunk_id, _content, hash) = missing[0].clone();
+
+        store.embed_cache_put(&hash, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(
+            store.embed_cache_get(&hash).unwrap().unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0]
+        );
+
+        store
+            .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        assert_eq!(store.embed_backlog().unwrap(), 0);
+
+        let hits = store.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(hits[0].0, chunk_id);
+
+        // replace_file cleans vec rows for the file's chunks
+        store
+            .replace_file("a.py", "python", &[2u8; 32], &sample_index())
+            .unwrap();
+        assert_eq!(store.embed_backlog().unwrap(), 1); // new chunk id, no vec row
+
+        // model change wipes cache + vec table
+        assert!(store.set_model("other-model", 4).unwrap());
+        assert!(store.embed_cache_get(&hash).unwrap().is_none());
+        assert_eq!(store.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap().len(), 0);
+
+        assert!(!store.set_model("other-model", 4).unwrap()); // same model: no wipe
     }
 }
