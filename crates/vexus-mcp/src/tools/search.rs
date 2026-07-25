@@ -21,8 +21,11 @@ pub fn search_text(
     let limit = limit.unwrap_or(DEFAULT_LIMIT);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
+    // Embed before locking: a real embedder's inference call must not hold
+    // the store mutex, or it stalls every other tool call for its duration.
+    let query_vec = embed_query(state, query);
+
     let store = state.store.lock().expect("store mutex poisoned");
-    let query_vec = embed_query(state, &store, query);
     let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
         Ok(hits) => hits,
         Err(e) => return format!("search error: {e:#}"),

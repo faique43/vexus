@@ -58,17 +58,27 @@ pub(crate) fn resolve_or_text(store: &Store, target: &str) -> Result<SymbolInfo,
 /// Shared embed-query step for every tool that feeds `search_hybrid`:
 /// embeds `query` via `state.embedder()` when one is available AND its
 /// model matches what the index was actually built with (checked against
-/// `meta` on the already-locked `store`) — the same guard `vexus-cli`'s
-/// `Cmd::Search` uses, since a mismatched vector would otherwise blow up
-/// `search_hybrid`'s KNN lookup against `vec_chunks`' declared width). No
-/// embedder, or a mismatch, returns `None` so the caller degrades to
-/// keyword-only search rather than failing.
-pub(crate) fn embed_query(state: &AppState, store: &Store, query: &str) -> Option<Vec<f32>> {
+/// `meta` while briefly locking the store, the same model-mismatch guard
+/// `vexus-cli`'s `Cmd::Search` uses — a mismatched vector would otherwise
+/// blow up `search_hybrid`'s KNN lookup against `vec_chunks`' declared
+/// width). No embedder, or a mismatch, returns `None` so the caller
+/// degrades to keyword-only search rather than failing.
+///
+/// Callers MUST call this *before* taking their own store lock for
+/// `search_hybrid`: the model-guard check only needs the store held for
+/// two `meta` reads, which this function does and releases internally —
+/// but the embed itself can be a real (slow, possibly ONNX) inference call,
+/// and must run unlocked so it doesn't stall every other tool call for the
+/// duration.
+pub(crate) fn embed_query(state: &AppState, query: &str) -> Option<Vec<f32>> {
     let embedder = state.embedder()?;
-    let indexed_id = store.meta("model_id").ok().flatten();
-    let indexed_dim = store.meta("model_dim").ok().flatten();
-    let same_model = indexed_id.as_deref() == Some(embedder.id())
-        && indexed_dim.as_deref() == Some(embedder.dim().to_string().as_str());
+    let same_model = {
+        let store = state.store.lock().expect("store mutex poisoned");
+        let indexed_id = store.meta("model_id").ok().flatten();
+        let indexed_dim = store.meta("model_dim").ok().flatten();
+        indexed_id.as_deref() == Some(embedder.id())
+            && indexed_dim.as_deref() == Some(embedder.dim().to_string().as_str())
+    };
     if !same_model {
         return None;
     }

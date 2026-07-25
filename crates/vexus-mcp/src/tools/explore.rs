@@ -41,8 +41,11 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
     let header = format!("explore: \"{question}\"\n\n");
 
+    // Embed before locking: a real embedder's inference call must not hold
+    // the store mutex, or it stalls every other tool call for its duration.
+    let query_vec = embed_query(state, question);
+
     let store = state.store.lock().expect("store mutex poisoned");
-    let query_vec = embed_query(state, &store, question);
     let hits = match store.search_hybrid(question, query_vec.as_deref(), ENTRY_LIMIT) {
         Ok(h) => h,
         Err(e) => return format!("explore error: {e:#}"),
