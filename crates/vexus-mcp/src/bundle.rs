@@ -92,12 +92,13 @@ pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec
         .collect();
     selected_items.sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
 
-    // Build omitted list: all items not in selected, sorted by score descending
-    let mut omitted: Vec<(String, f64)> = items
+    // Build omitted list: items that made it through dedup but weren't selected (budget-exhausted only).
+    // Deduplicated losers are omitted entirely and don't appear as "related".
+    let mut omitted: Vec<(String, f64)> = deduped
         .iter()
-        .enumerate()
-        .filter(|(idx, _)| !selected_indices.contains(idx))
-        .map(|(_, item)| {
+        .filter(|&&idx| !selected_indices.contains(&idx))
+        .map(|&idx| {
+            let item = &items[idx];
             let name = item
                 .qualname
                 .as_ref()
@@ -175,11 +176,15 @@ mod tests {
 
         let (selected, omitted) = pack(items, 10000);
 
-        // Only the higher-score item should be selected
+        // Only the higher-score item should be selected.
+        // The lower-score duplicate is deduplicated away and should NOT appear in omitted
+        // (its content is present via the higher-score copy, so not "related missing").
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].score, 2.0);
-        assert_eq!(omitted.len(), 1);
-        assert_eq!(omitted[0].1, 1.0);
+        assert!(
+            omitted.is_empty(),
+            "Deduplicated losers should not appear in omitted"
+        );
     }
 
     #[test]

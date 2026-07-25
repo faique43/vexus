@@ -4,6 +4,22 @@ use vexus_core::query::{EdgeHit, SymbolInfo};
 
 use crate::bundle::BundleItem;
 
+/// Find the longest run of consecutive backticks in a string.
+/// Used to determine fence size for code blocks that might contain backticks.
+fn longest_backtick_run(s: &str) -> usize {
+    let mut max_run = 0;
+    let mut current_run = 0;
+    for ch in s.chars() {
+        if ch == '`' {
+            current_run += 1;
+            max_run = max_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+    max_run
+}
+
 /// Render a bundle of selected items with an optional omitted footer.
 /// Groups by path (in order of first appearance), adds `## <path>` headers,
 /// and per-item shows `<path>:<start>-<end>` with triple-backtick fenced code.
@@ -38,12 +54,17 @@ pub fn render_bundle(selected: &[BundleItem], omitted: &[(String, f64)]) -> Stri
                 "{}:{}-{}\n",
                 item.path, item.start_line, item.end_line
             ));
-            output.push_str("```\n");
+            // Use a fence with enough backticks to safely escape the content
+            let fence_size = (longest_backtick_run(&item.content) + 1).max(3);
+            let fence = "`".repeat(fence_size);
+            output.push_str(&fence);
+            output.push('\n');
             output.push_str(&item.content);
             if !item.content.ends_with('\n') {
                 output.push('\n');
             }
-            output.push_str("```\n");
+            output.push_str(&fence);
+            output.push('\n');
         }
     }
 
@@ -216,6 +237,33 @@ mod tests {
             "Expected at most 15 names, got {}",
             name_count
         );
+    }
+
+    #[test]
+    fn render_bundle_escapes_backticks_in_content() {
+        // Content containing triple backticks should use a larger fence
+        let content_with_backticks = "code:\n```\ninner snippet\n```\nmore code";
+        let selected = vec![make_bundle_item(
+            "test.rs",
+            Some("func"),
+            1,
+            10,
+            content_with_backticks,
+        )];
+
+        let output = render_bundle(&selected, &[]);
+
+        // Should use 4-backtick fence (more than the inner 3-backtick run)
+        assert!(
+            output.contains("````\n"),
+            "Should have opening 4-backtick fence"
+        );
+        assert!(
+            output.contains("\n````\n"),
+            "Should have closing 4-backtick fence"
+        );
+        // The inner triple backticks should be intact
+        assert!(output.contains("```\ninner snippet\n```"));
     }
 
     #[test]
