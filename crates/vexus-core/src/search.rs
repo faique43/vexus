@@ -231,9 +231,8 @@ mod tests {
             .search_hybrid("banana", Some(&[1.0, 0.0, 0.0, 0.0]), 10)
             .unwrap();
         // C (both lists) must outrank A (keyword only) and B (vector only)
-        assert_eq!(
+        assert!(
             hits[0].excerpt.contains("hybrid"),
-            true,
             "both-list chunk wins RRF"
         );
         assert_eq!(hits.len(), 3);
