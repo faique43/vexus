@@ -5,12 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use vexus_core::model::estimate_tokens;
-use vexus_core::query::Resolution;
 
 use crate::bundle::{pack, BundleItem};
-use crate::format::{render_bundle, render_candidates};
+use crate::format::render_bundle;
 use crate::state::AppState;
-use crate::tools::clamp_budget;
+use crate::tools::{clamp_budget, resolve_or_text};
 
 const DEFAULT_BUDGET_TOKENS: u32 = 6000;
 
@@ -23,57 +22,36 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
     }
 
     let store = state.store.lock().expect("store mutex poisoned");
-    let resolution = match store.resolve_symbol(target) {
-        Ok(r) => r,
-        Err(e) => return format!("open error: {e:#}"),
+    let info = match resolve_or_text(&store, target) {
+        Ok(info) => info,
+        Err(text) => return text,
     };
 
-    match resolution {
-        Resolution::Exact(info) => {
-            let chunks = match store.symbol_source(info.id) {
-                Ok(c) => c,
-                Err(e) => return format!("open error: {e:#}"),
-            };
-            drop(store);
-            if chunks.is_empty() {
-                return format!(
-                    "{} ({}:{}-{}) has no source chunks (likely a module or an empty body).",
-                    info.qualname, info.path, info.start_line, info.end_line
-                );
-            }
-            let items: Vec<BundleItem> = chunks
-                .into_iter()
-                .map(|(start_line, end_line, content)| BundleItem {
-                    path: info.path.clone(),
-                    qualname: Some(info.qualname.clone()),
-                    start_line,
-                    end_line,
-                    content,
-                    score: 1.0,
-                    chunk_id: -1,
-                })
-                .collect();
-            let (selected, omitted) = pack(items, budget_tokens);
-            render_bundle(&selected, &omitted)
-        }
-        Resolution::Candidates(candidates) => {
-            drop(store);
-            let mut out = render_candidates(&candidates);
-            out.push_str("\nAmbiguous — narrow with the full qualname.\n");
-            out
-        }
-        Resolution::NotFound { suggestions } => {
-            drop(store);
-            if suggestions.is_empty() {
-                format!("no symbol found for \"{target}\".")
-            } else {
-                format!(
-                    "no symbol found for \"{target}\" — did you mean: {}?",
-                    suggestions.join(", ")
-                )
-            }
-        }
+    let chunks = match store.symbol_source(info.id) {
+        Ok(c) => c,
+        Err(e) => return format!("open error: {e:#}"),
+    };
+    drop(store);
+    if chunks.is_empty() {
+        return format!(
+            "{} ({}:{}-{}) has no source chunks (likely a module or an empty body).",
+            info.qualname, info.path, info.start_line, info.end_line
+        );
     }
+    let items: Vec<BundleItem> = chunks
+        .into_iter()
+        .map(|(start_line, end_line, content)| BundleItem {
+            path: info.path.clone(),
+            qualname: Some(info.qualname.clone()),
+            start_line,
+            end_line,
+            content,
+            score: 1.0,
+            chunk_id: -1,
+        })
+        .collect();
+    let (selected, omitted) = pack(items, budget_tokens);
+    render_bundle(&selected, &omitted)
 }
 
 /// Recognizes the `path:start-end` form (equivalent to the regex

@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::state::AppState;
-use crate::tools::{open, search};
+use crate::tools::{graph, open, search};
 
 /// Params for the `search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -47,6 +47,31 @@ struct OpenParams {
         description = "Token budget for the rendered source (default 6000, capped at 20000)."
     )]
     budget_tokens: Option<u32>,
+}
+
+/// Params for the `callers`/`callees` tools.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CallGraphParams {
+    /// A symbol qualname/name (e.g. `app.util.slug`).
+    symbol: String,
+    /// Traversal depth (default 1, max 3).
+    #[schemars(description = "Traversal depth (default 1, max 3).")]
+    depth: Option<u32>,
+    /// Token budget for the rendered edge tree (default 4000, capped at 20000).
+    #[schemars(
+        description = "Token budget for the rendered edge tree (default 4000, capped at 20000)."
+    )]
+    budget_tokens: Option<u32>,
+}
+
+/// Params for the `impact` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImpactParams {
+    /// A symbol qualname/name (e.g. `app.util.slug`).
+    symbol: String,
+    /// Traversal depth (default 5, max 10).
+    #[schemars(description = "Traversal depth (default 5, max 10).")]
+    max_depth: Option<u32>,
 }
 
 /// Steering layer 1 (see plan doc §5): shipped verbatim per the Task 3 brief.
@@ -126,6 +151,51 @@ impl VexusServer {
         {
             Ok(text) => text,
             Err(e) => format!("open error: tool task panicked ({e})"),
+        }
+    }
+
+    #[tool(
+        description = "Who calls this symbol (transitive with depth). Confidence-annotated; 'unresolved' rows are name-only heuristic matches."
+    )]
+    async fn callers(&self, Parameters(params): Parameters<CallGraphParams>) -> String {
+        let state = self.state.clone();
+        match tokio::task::spawn_blocking(move || {
+            graph::callers_text(&state, &params.symbol, params.depth, params.budget_tokens)
+        })
+        .await
+        {
+            Ok(text) => text,
+            Err(e) => format!("callers error: tool task panicked ({e})"),
+        }
+    }
+
+    #[tool(
+        description = "Who this symbol calls (transitive with depth). Confidence-annotated; 'unresolved' rows are name-only heuristic matches."
+    )]
+    async fn callees(&self, Parameters(params): Parameters<CallGraphParams>) -> String {
+        let state = self.state.clone();
+        match tokio::task::spawn_blocking(move || {
+            graph::callees_text(&state, &params.symbol, params.depth, params.budget_tokens)
+        })
+        .await
+        {
+            Ok(text) => text,
+            Err(e) => format!("callees error: tool task panicked ({e})"),
+        }
+    }
+
+    #[tool(
+        description = "Transitive blast radius of changing a symbol — every caller chain that reaches it, plus import dependents."
+    )]
+    async fn impact(&self, Parameters(params): Parameters<ImpactParams>) -> String {
+        let state = self.state.clone();
+        match tokio::task::spawn_blocking(move || {
+            graph::impact_text(&state, &params.symbol, params.max_depth)
+        })
+        .await
+        {
+            Ok(text) => text,
+            Err(e) => format!("impact error: tool task panicked ({e})"),
         }
     }
 }
