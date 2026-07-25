@@ -19,8 +19,9 @@ impl Store {
         let mut total = 0;
         for name in names {
             // match edges whose dst_name equals the name OR ends with `.name`
+            // Use exact suffix matching instead of LIKE to avoid _ and % wildcards
             total += self.resolve_where(
-                "(e.dst_name = ?1 OR e.dst_name LIKE '%.' || ?1)",
+                "(e.dst_name = ?1 OR substr(e.dst_name, -length(?1) - 1) = '.' || ?1)",
                 &[name],
             )?;
         }
@@ -166,5 +167,52 @@ mod tests {
             "SELECT s.qualname FROM edges e JOIN symbols s ON e.dst_id = s.id
              WHERE e.dst_name = 'late'", [], |r| r.get(0)).unwrap();
         assert_eq!(q.as_deref(), Some("z.late"));
+    }
+
+    #[test]
+    fn suffix_matching_literal_underscore_not_wildcard() {
+        // Test that suffix matching doesn't treat '_' as a wildcard.
+        // When looking for symbol '_data' via resolve_edges_for_names(&["_data"]),
+        // the pattern '%.._data' should match 'mod._data' but NOT 'mod.adata'
+        // (underscore in LIKE is a wildcard matching any single char)
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "a.caller", SymbolKind::Function, Some(0))],
+            edges: vec![
+                // Edge that should match _data (exact unqualified name)
+                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "_data".into(), dst_arity: None },
+                // Edge that should match _data (qualified suffix)
+                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "mod._data".into(), dst_arity: None },
+                // This edge should NOT match _data, but vulnerable LIKE pattern would:
+                // Pattern '%.._data' matches 'mod.adata' because _ is wildcard in LIKE
+                NewEdge { src: 0, kind: EdgeKind::Calls, dst_name: "mod.aData".into(), dst_arity: None },
+            ],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("a.py", caller)]);
+
+        // Add symbol with underscore prefix in name
+        let defs = FileIndex {
+            symbols: vec![sym("_data", "lib._data", SymbolKind::Function, None)],
+            edges: vec![], chunks: vec![],
+        };
+        store.replace_file("lib.py", "python", &[2u8; 32], &defs).unwrap();
+
+        // Resolve by name - should only match edges ending with literal '._data',
+        // NOT edges with 'mod.aData' even though the buggy LIKE pattern would select it
+        let n = store.resolve_edges_for_names(&["_data".into()]).unwrap();
+        assert_eq!(n, 2); // Only the two _data edges should resolve
+
+        // Verify which edges got resolved
+        let resolved: Vec<(String, Option<String>)> = store.conn
+            .prepare("SELECT e.dst_name, s.qualname FROM edges e LEFT JOIN symbols s ON e.dst_id = s.id ORDER BY e.id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(resolved[0], ("_data".into(), Some("lib._data".into())));
+        assert_eq!(resolved[1], ("mod._data".into(), Some("lib._data".into())));
+        assert_eq!(resolved[2], ("mod.aData".into(), None)); // Should still be NULL
     }
 }
