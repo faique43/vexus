@@ -10,6 +10,24 @@ struct EdgeRow {
     dst_arity: Option<u32>,
 }
 
+/// Extract the last path segment of a possibly-qualified name, recognizing
+/// `.` (Python/JS-style), `::` (Rust-style), and `/` (relative-path-style)
+/// separators. Picks whichever separator occurs latest in the string, so
+/// mixed names (e.g. `std::collections::HashMap`, `./utils/helper`) resolve
+/// to their true last segment rather than falling back to Python-only `.`
+/// splitting.
+fn last_segment(name: &str) -> &str {
+    let cut = name
+        .rfind("::")
+        .map(|i| i + 2)
+        .into_iter()
+        .chain(name.rfind('.').map(|i| i + 1))
+        .chain(name.rfind('/').map(|i| i + 1))
+        .max()
+        .unwrap_or(0);
+    &name[cut..]
+}
+
 impl Store {
     pub fn resolve_all_edges(&mut self) -> Result<u64> {
         self.resolve_where("1=1", &[])
@@ -18,10 +36,16 @@ impl Store {
     pub fn resolve_edges_for_names(&mut self, names: &[String]) -> Result<u64> {
         let mut total = 0;
         for name in names {
-            // match edges whose dst_name equals the name OR ends with `.name`
-            // Use exact suffix matching instead of LIKE to avoid _ and % wildcards
+            // Match edges whose dst_name equals the name OR ends with a
+            // qualified suffix using any of the supported separators:
+            // `.name` (Python/JS), `::name` (Rust), or `/name` (paths).
+            // Exact-length suffix comparisons are used instead of LIKE to
+            // avoid `_`/`%` being interpreted as wildcards.
             total += self.resolve_where(
-                "(e.dst_name = ?1 OR substr(e.dst_name, -length(?1) - 1) = '.' || ?1)",
+                "(e.dst_name = ?1
+                  OR substr(e.dst_name, -length(?1) - 1) = '.' || ?1
+                  OR substr(e.dst_name, -length(?1) - 2) = '::' || ?1
+                  OR substr(e.dst_name, -length(?1) - 1) = '/' || ?1)",
                 &[name],
             )?;
         }
@@ -54,7 +78,7 @@ impl Store {
         let mut updated = 0;
         let tx = self.conn.transaction()?;
         for e in &edges {
-            let last = e.dst_name.rsplit('.').next().unwrap_or(&e.dst_name);
+            let last = last_segment(&e.dst_name);
             // candidates: (id, file_id, qualname, arity), same-file first then lowest id
             let cands: Vec<(i64, i64, String, Option<u32>)> = {
                 let mut stmt = tx.prepare_cached(
@@ -308,5 +332,147 @@ mod tests {
         assert_eq!(resolved[0], ("_data".into(), Some("lib._data".into())));
         assert_eq!(resolved[1], ("mod._data".into(), Some("lib._data".into())));
         assert_eq!(resolved[2], ("mod.aData".into(), None)); // Should still be NULL
+    }
+
+    #[test]
+    fn rust_style_double_colon_path_resolves_to_last_segment() {
+        // dogfood evidence: Rust import edges like `std::collections::HashMap`
+        // never resolved because last-segment extraction only split on '.'.
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "a::caller", SymbolKind::Function, None)],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Imports,
+                dst_name: "std::collections::HashMap".into(),
+                dst_arity: None,
+            }],
+            chunks: vec![],
+        };
+        let defs = FileIndex {
+            symbols: vec![sym(
+                "HashMap",
+                "std::collections::HashMap",
+                SymbolKind::Class,
+                None,
+            )],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("a.rs", caller), ("collections.rs", defs)]);
+        let n = store.resolve_all_edges().unwrap();
+        assert_eq!(n, 1);
+
+        let q: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT s.qualname FROM edges e JOIN symbols s ON e.dst_id = s.id
+                 WHERE e.dst_name = 'std::collections::HashMap'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(q.as_deref(), Some("std::collections::HashMap"));
+    }
+
+    #[test]
+    fn relative_path_style_import_resolves_to_last_segment() {
+        // dogfood evidence: relative-path import edges like `./utils/helper`
+        // never resolved because last-segment extraction only split on '.'.
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "app.caller", SymbolKind::Function, None)],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Imports,
+                dst_name: "./utils/helper".into(),
+                dst_arity: None,
+            }],
+            chunks: vec![],
+        };
+        let defs = FileIndex {
+            symbols: vec![sym("helper", "utils.helper", SymbolKind::Function, None)],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("app.py", caller), ("utils.py", defs)]);
+        let n = store.resolve_all_edges().unwrap();
+        assert_eq!(n, 1);
+
+        let q: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT s.qualname FROM edges e JOIN symbols s ON e.dst_id = s.id
+                 WHERE e.dst_name = './utils/helper'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(q.as_deref(), Some("utils.helper"));
+    }
+
+    #[test]
+    fn resolve_edges_for_names_matches_double_colon_and_slash_suffixes() {
+        // Extends the exact-suffix matching used by incremental re-resolution
+        // (resolve_edges_for_names) to the '::' and '/' separators, not just '.'.
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "a::caller", SymbolKind::Function, None)],
+            edges: vec![
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Imports,
+                    dst_name: "std::collections::HashMap".into(),
+                    dst_arity: None,
+                },
+                NewEdge {
+                    src: 0,
+                    kind: EdgeKind::Imports,
+                    dst_name: "./utils/helper".into(),
+                    dst_arity: None,
+                },
+            ],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("a.rs", caller)]);
+        store.resolve_all_edges().unwrap(); // both edges start unresolved
+
+        let late = FileIndex {
+            symbols: vec![
+                sym(
+                    "HashMap",
+                    "std::collections::HashMap",
+                    SymbolKind::Class,
+                    None,
+                ),
+                sym("helper", "utils.helper", SymbolKind::Function, None),
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("late.rs", "rust", &[3u8; 32], &late)
+            .unwrap();
+
+        let n = store
+            .resolve_edges_for_names(&["HashMap".into(), "helper".into()])
+            .unwrap();
+        assert_eq!(n, 2);
+
+        let resolved: Vec<(String, Option<String>)> = store.conn
+            .prepare("SELECT e.dst_name, s.qualname FROM edges e LEFT JOIN symbols s ON e.dst_id = s.id ORDER BY e.id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            resolved[0],
+            (
+                "std::collections::HashMap".into(),
+                Some("std::collections::HashMap".into())
+            )
+        );
+        assert_eq!(
+            resolved[1],
+            ("./utils/helper".into(), Some("utils.helper".into()))
+        );
     }
 }
