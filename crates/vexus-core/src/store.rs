@@ -161,6 +161,10 @@ impl Store {
         Ok(n > 0)
     }
 
+    pub fn conn_ref(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
     pub fn counts(&self) -> Result<crate::model::Counts> {
         let one = |sql: &str| -> Result<i64> {
             Ok(self.conn.query_row(sql, [], |r| r.get(0))?)

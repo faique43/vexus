@@ -3,3 +3,20 @@ name = "vexus-cli"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "vexus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+vexus-core = { path = "../vexus-core" }
+vexus-index = { path = "../vexus-index" }
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"

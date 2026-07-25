@@ -1,1 +1,3 @@
+mod pipeline;
+
 fn main() {}
