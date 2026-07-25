@@ -139,6 +139,9 @@ fn count_params(params: Node, source: &str) -> u32 {
     let mut n = 0;
     let mut cursor = params.walk();
     for child in params.named_children(&mut cursor) {
+        if child.kind() == "self_parameter" {
+            continue;
+        }
         let text = child.utf8_text(source.as_bytes()).unwrap_or("");
         if text == "self" || text == "cls" {
             continue;
