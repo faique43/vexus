@@ -114,6 +114,7 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
         }
     }
 
+    crate::chunk::build_chunks(&mut idx, source);
     idx
 }
 
