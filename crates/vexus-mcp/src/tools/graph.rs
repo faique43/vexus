@@ -118,7 +118,11 @@ pub fn callees_text(
     render_capped(header, &edges, budget_tokens)
 }
 
-/// Pure inner implementation of the `impact` tool.
+/// Pure inner implementation of the `impact` tool: the transitive caller
+/// graph (per `impact_of`) plus module-level import dependents (the
+/// incoming side of `imports_of`) — "blast radius" per the tool's shipped
+/// description covers both, even though the plan's interface line only
+/// spelled out the call-graph half.
 pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> String {
     let max_depth = max_depth.unwrap_or(5).clamp(1, 10);
 
@@ -129,6 +133,13 @@ pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> St
     };
     let edges = match store.impact_of(info.id, max_depth) {
         Ok(e) => e,
+        Err(e) => return format!("impact error: {e:#}"),
+    };
+    // Only the incoming side matters for "blast radius" — files that import
+    // this symbol's module (i.e. would be affected by changing it), not
+    // modules this file itself imports.
+    let (_outgoing, importers) = match store.imports_of(info.id) {
+        Ok(v) => v,
         Err(e) => return format!("impact error: {e:#}"),
     };
     drop(store);
@@ -146,9 +157,14 @@ pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> St
         out.push_str(&render_edge_tree(&group));
     }
 
+    if !importers.is_empty() {
+        out.push_str("import dependents:\n");
+        out.push_str(&render_edge_tree(&importers));
+    }
+
     let mut symbol_ids = HashSet::new();
     let mut files = HashSet::new();
-    for e in &edges {
+    for e in edges.iter().chain(importers.iter()) {
         symbol_ids.insert(e.symbol.id);
         files.insert(e.symbol.path.clone());
     }
@@ -355,6 +371,32 @@ mod tests {
             "got: {out:?}"
         );
         assert!(!out.contains("row cap"), "got: {out:?}");
+        assert!(
+            !out.contains("import dependents:"),
+            "no other file imports chain.py, so the section must be omitted entirely: {out:?}"
+        );
+    }
+
+    #[test]
+    fn impact_includes_import_dependents_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def target():\n    pass\n");
+        write(root, "b.py", "import a\n");
+        let state = indexed_state(root);
+
+        let out = impact_text(&state, "a.target", None);
+        assert!(out.contains("import dependents:"), "got: {out:?}");
+        assert!(
+            out.contains("b  (b.py:1)"),
+            "expected b's module symbol line: {out:?}"
+        );
+        // target has no callers, so the only affected entity is b's module —
+        // the footer's file count must still pick up the import dependent.
+        assert!(
+            out.contains("affected: 1 symbols across 1 files"),
+            "got: {out:?}"
+        );
     }
 
     #[test]
