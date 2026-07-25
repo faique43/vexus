@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vexus-core", "crates/vexus-index", "crates/vexus-cli", "crates/vexus-embed"]
+members = ["crates/vexus-core", "crates/vexus-index", "crates/vexus-cli", "crates/vexus-embed", "crates/vexus-mcp"]
 
 [workspace.package]
 edition = "2021"

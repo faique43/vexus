@@ -16,6 +16,7 @@ ignore = "0.4"
 vexus-core = { path = "../vexus-core" }
 vexus-embed = { path = "../vexus-embed" }
 vexus-index = { path = "../vexus-index" }
+vexus-mcp = { path = "../vexus-mcp" }
 
 [dev-dependencies]
 tempfile.workspace = true

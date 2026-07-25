@@ -12,6 +12,9 @@ sha2.workspace = true
 ort = { version = "2.0.0-rc.12", default-features = true }
 tokenizers = "0.20"
 ndarray = "0.17"
+vexus-core = { path = "../vexus-core" }
+vexus-index = { path = "../vexus-index" }
+ignore = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

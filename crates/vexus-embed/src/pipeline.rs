@@ -1,9 +1,20 @@
+//! File-walking indexer + embedding backlog drainer.
+//!
+//! Both live here (rather than split across crates) because they were
+//! originally one file in vexus-cli and share test fixtures; `index_repo`
+//! moved alongside `embed_pending` so `vexus-mcp`'s startup path (which needs
+//! both, without depending on the `vexus-cli` binary crate — that dependency
+//! would be circular, since `vexus-cli` depends on `vexus-mcp` for the
+//! `serve` subcommand) can call a single shared implementation instead of a
+//! duplicated copy.
+
 use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Result};
 use vexus_core::Store;
-use vexus_embed::Embedder;
+
+use crate::Embedder;
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
@@ -94,6 +105,10 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
     }
 
     store.resolve_all_edges()?;
+    // Persisted so a later `status` call (possibly in a different process,
+    // e.g. the MCP server) can report "skipped files" from the *last* run
+    // without re-walking the repo.
+    store.set_meta("last_index_failed", &report.failed.len().to_string())?;
     Ok(report)
 }
 
@@ -186,7 +201,7 @@ mod tests {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
         index_repo(root, &mut store).unwrap();
 
-        let embedder = vexus_embed::MockEmbedder;
+        let embedder = crate::MockEmbedder;
         store.set_model(embedder.id(), embedder.dim()).unwrap();
         let r = embed_pending(&mut store, &embedder).unwrap();
         assert!(r.embedded >= 2);
@@ -232,6 +247,21 @@ mod tests {
         assert_eq!(store.counts().unwrap().files, 1);
     }
 
+    #[test]
+    fn index_repo_persists_last_index_failed_to_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/app.py", "def run():\n    return 1\n");
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+
+        let r = index_repo(root, &mut store).unwrap();
+        assert_eq!(r.failed.len(), 0);
+        assert_eq!(
+            store.meta("last_index_failed").unwrap().as_deref(),
+            Some("0")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreadable_file_goes_to_failed_and_others_still_index() {
@@ -256,6 +286,11 @@ mod tests {
         assert!(r.failed[0].contains("secret.py"), "failed: {:?}", r.failed);
         assert_eq!(r.indexed, 1);
         assert_eq!(store.counts().unwrap().files, 1);
+        assert_eq!(
+            store.meta("last_index_failed").unwrap().as_deref(),
+            Some("1"),
+            "failed count must be persisted for a later status read"
+        );
     }
 
     #[cfg(unix)]
@@ -309,7 +344,7 @@ mod tests {
     }
 
     struct ShortBatchEmbedder;
-    impl vexus_embed::Embedder for ShortBatchEmbedder {
+    impl crate::Embedder for ShortBatchEmbedder {
         fn id(&self) -> &str {
             "short"
         }

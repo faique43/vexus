@@ -1,10 +1,7 @@
-mod pipeline;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use vexus_embed::Embedder;
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +27,8 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: u32,
     },
+    /// Run the MCP server over stdio (builds the index first if none exists)
+    Serve { path: Option<PathBuf> },
 }
 
 fn db_path(root: &Path) -> PathBuf {
@@ -43,52 +42,13 @@ fn open_store(root: &Path) -> Result<vexus_core::Store> {
     Ok(store)
 }
 
-/// The user's home directory, without pulling in a `dirs`-style crate:
-/// `HOME` on Unix, falling back to `USERPROFILE` on Windows. `None` if
-/// neither is set (e.g. a stripped-down container).
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
-/// Selects the embedder for this run from `VEXUS_EMBEDDER`:
-/// - `mock` → deterministic `MockEmbedder` (tests/CI, no model download)
-/// - `none` → structural-only, no embeddings
-/// - unset  → download/load the default ONNX model; any failure degrades to
-///   `None` (structural-only) rather than failing the whole command.
-fn make_embedder() -> Option<Box<dyn Embedder>> {
-    match std::env::var("VEXUS_EMBEDDER").as_deref() {
-        Ok("mock") => Some(Box::new(vexus_embed::MockEmbedder)),
-        Ok("none") => None,
-        _ => {
-            let Some(home) = home_dir() else {
-                eprintln!(
-                    "vexus: embeddings unavailable (no HOME/USERPROFILE); running structural-only"
-                );
-                return None;
-            };
-            let models = home.join(".vexus/models");
-            match vexus_embed::download::ensure_model(&vexus_embed::JINA_CODE_V2, &models)
-                .and_then(|dir| vexus_embed::OnnxEmbedder::load(&dir, &vexus_embed::JINA_CODE_V2))
-            {
-                Ok(e) => Some(Box::new(e)),
-                Err(e) => {
-                    eprintln!("vexus: embeddings unavailable ({e:#}); running structural-only");
-                    None
-                }
-            }
-        }
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Index { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             let mut store = open_store(&root)?;
-            let r = pipeline::index_repo(&root, &mut store)?;
+            let r = vexus_embed::pipeline::index_repo(&root, &mut store)?;
             println!(
                 "indexed: {}  unchanged: {}  skipped: {}  removed: {}  failed: {}",
                 r.indexed,
@@ -108,13 +68,13 @@ fn main() -> Result<()> {
                 // store, so structural-only is the honest outcome here.
                 println!("embeddings: skipped (sqlite-vec unavailable)");
             } else {
-                match make_embedder() {
+                match vexus_embed::select::make_embedder() {
                     Some(embedder) => {
                         store.set_model(embedder.id(), embedder.dim())?;
                         // Degrade, never die: structural indexing above already
                         // succeeded and was reported, so an embedding failure
                         // (e.g. a flaky ONNX run) must not abort the command.
-                        match pipeline::embed_pending(&mut store, embedder.as_ref()) {
+                        match vexus_embed::pipeline::embed_pending(&mut store, embedder.as_ref()) {
                             Ok(er) => {
                                 println!(
                                     "embedded: {} (cache hits: {})",
@@ -198,7 +158,7 @@ fn main() -> Result<()> {
                 }
             };
             let query_vec = if worth_building {
-                make_embedder().and_then(|embedder| {
+                vexus_embed::select::make_embedder().and_then(|embedder| {
                     let same_model = indexed_model.0.as_deref() == Some(embedder.id())
                         && indexed_model.1.as_deref() == Some(embedder.dim().to_string().as_str());
                     if !same_model {
@@ -219,6 +179,10 @@ fn main() -> Result<()> {
                     qual, h.path, h.start_line, h.end_line, h.score, h.excerpt
                 );
             }
+        }
+        Cmd::Serve { path } => {
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            vexus_mcp::serve(root)?;
         }
     }
     Ok(())

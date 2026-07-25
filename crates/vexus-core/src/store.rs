@@ -358,6 +358,18 @@ impl Store {
         Ok(v)
     }
 
+    /// Generic single-key upsert into `meta`, for callers that need to persist
+    /// one fact without a bespoke method (e.g. `index_repo` recording the
+    /// last run's failed-file count under `last_index_failed`).
+    pub fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn file_hash(&self, path: &str) -> Result<Option<[u8; 32]>> {
         let v: Option<Vec<u8>> = self
             .conn
@@ -527,6 +539,23 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "missing table {t}");
         }
+    }
+
+    #[test]
+    fn set_meta_inserts_then_upserts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        assert_eq!(store.meta("last_index_failed").unwrap(), None);
+        store.set_meta("last_index_failed", "3").unwrap();
+        assert_eq!(
+            store.meta("last_index_failed").unwrap().as_deref(),
+            Some("3")
+        );
+        store.set_meta("last_index_failed", "0").unwrap();
+        assert_eq!(
+            store.meta("last_index_failed").unwrap().as_deref(),
+            Some("0")
+        );
     }
 
     #[test]
