@@ -966,4 +966,56 @@ mod tests {
             "cache intentionally not invalidated by raw SQL"
         );
     }
+
+    #[test]
+    fn dim_mismatched_query_vec_never_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+
+        let missing = store.chunks_missing_embedding(100).unwrap();
+        assert_eq!(missing.len(), 1);
+        let (chunk_id, _content, _hash) = missing[0].clone();
+
+        // Embed with 4-dim vector
+        store
+            .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        assert_eq!(store.embed_backlog().unwrap(), 0);
+
+        // Matching dimension works
+        let hits = store
+            .search_hybrid("greet", Some(&[1.0, 0.0, 0.0, 0.0]), 10)
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "4-dim query against 4-dim table should return hits"
+        );
+
+        // Mismatched dimension must not panic—acceptable outcomes are Err or keyword-only
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.search_hybrid("greet", Some(&[0.5; 8]), 10)
+        }));
+        assert!(
+            result.is_ok(),
+            "8-dim query against 4-dim table must not panic"
+        );
+        match result.unwrap() {
+            Ok(hits) => {
+                // Keyword-only results are acceptable (knn_chunks fails gracefully)
+                let kw_only = store.search_hybrid("greet", None, 10).unwrap();
+                assert_eq!(
+                    hits.len(),
+                    kw_only.len(),
+                    "mismatched dim query should degrade to keyword-only, not error"
+                );
+            }
+            Err(_) => {
+                // Err is also acceptable if the implementation catches the mismatch
+            }
+        }
+    }
 }
