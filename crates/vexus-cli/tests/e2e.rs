@@ -19,6 +19,7 @@ fn index_status_search_flow() {
 
     Command::cargo_bin("vexus")
         .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
         .args(["index", root.to_str().unwrap()])
         .assert()
         .success()
@@ -32,6 +33,7 @@ fn index_status_search_flow() {
 
     Command::cargo_bin("vexus")
         .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
         .args(["status", root.to_str().unwrap()])
         .assert()
         .success()
@@ -39,6 +41,7 @@ fn index_status_search_flow() {
 
     Command::cargo_bin("vexus")
         .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
         .args(["search", "backoff", root.to_str().unwrap()])
         .assert()
         .success()
@@ -52,8 +55,74 @@ fn status_without_index_is_calm() {
     let dir = tempfile::tempdir().unwrap();
     Command::cargo_bin("vexus")
         .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
         .args(["status", dir.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("no index"));
+}
+
+#[test]
+fn index_embeds_with_mock_and_hybrid_search_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "app.py",
+        "def compute_backoff(delay):\n    return delay * 2\n",
+    );
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["index", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("embedded:"));
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["status", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("model: mock")
+                .and(predicate::str::contains("embed backlog: 0")),
+        );
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["search", "backoff", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compute_backoff"));
+}
+
+#[test]
+fn structural_only_mode_still_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "app.py",
+        "def compute_backoff(delay):\n    return delay * 2\n",
+    );
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["index", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("embeddings: skipped"));
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["search", "backoff", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compute_backoff"));
 }

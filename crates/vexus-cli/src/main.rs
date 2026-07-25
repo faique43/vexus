@@ -139,6 +139,17 @@ fn main() -> Result<()> {
                 "files: {}  symbols: {}  edges: {}  chunks: {}",
                 c.files, c.symbols, c.edges, c.chunks
             );
+            let model_id = store.meta("model_id")?.unwrap_or_else(|| "none".into());
+            let backlog = store.embed_backlog()?;
+            let vec_status = if store.vec_available() {
+                "available"
+            } else {
+                "unavailable"
+            };
+            println!(
+                "model: {}  embed backlog: {}  vec: {}",
+                model_id, backlog, vec_status
+            );
         }
         Cmd::Search { query, path, limit } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
