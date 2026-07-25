@@ -18,6 +18,7 @@ pub trait Backend {
     fn load(&self, key: &str) -> String;
 }
 
+/// Looks up a key in the map.
 fn lookup<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a String> {
     map.get(key)
 }

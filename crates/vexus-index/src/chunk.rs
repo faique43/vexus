@@ -125,6 +125,8 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             sym.kind,
             SymbolKind::Function
                 | SymbolKind::Method
+                | SymbolKind::Const
+                | SymbolKind::Type
                 | SymbolKind::Class
                 | SymbolKind::Struct
                 | SymbolKind::Enum
@@ -167,7 +169,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
     // 4. Symbol chunks (leaf bodies / container skeletons), using the doc-extended start.
     for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
         match sym.kind {
-            SymbolKind::Function | SymbolKind::Method => {
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Const | SymbolKind::Type => {
                 let ext_start = ext_starts[i];
                 let content = slice(ext_start, sym.end_line);
                 if estimate_tokens(&content) <= MAX_TOKENS {

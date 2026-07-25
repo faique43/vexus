@@ -5,6 +5,7 @@ from utils.text import slugify
 TIMEOUT = 30
 
 
+# Doubles then adds.
 def top_level(a, b):
     """Adds."""
     return helper(a) + b

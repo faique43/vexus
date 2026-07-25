@@ -2,6 +2,7 @@ import { join } from "path";
 
 export const LIMIT = 10;
 
+// Fetches a user with retry.
 export function fetchUser(id: string, retries: number) {
   return withRetry(() => load(id), retries);
 }

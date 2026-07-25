@@ -2,9 +2,9 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: symbol_lines(&idx)
 ---
-- "module typescript.sample [1-21] arity=None parent=None sig=None"
-- "function typescript.sample.fetchUser [5-7] arity=Some(2) parent=Some(0) sig=Some(\"export function fetchUser(id: string, retries: number) {\")"
-- "function typescript.sample.load [9-11] arity=Some(1) parent=Some(0) sig=Some(\"function load(id: string) {\")"
-- "class typescript.sample.Repo [13-17] arity=None parent=Some(0) sig=Some(\"export class Repo {\")"
-- "method typescript.sample.Repo.find [14-16] arity=Some(1) parent=Some(3) sig=Some(\"find(id: string) {\")"
-- "interface typescript.sample.Options [19-21] arity=None parent=Some(0) sig=Some(\"interface Options {\")"
+- "module typescript.sample [1-22] arity=None parent=None sig=None"
+- "function typescript.sample.fetchUser [6-8] arity=Some(2) parent=Some(0) sig=Some(\"export function fetchUser(id: string, retries: number) {\")"
+- "function typescript.sample.load [10-12] arity=Some(1) parent=Some(0) sig=Some(\"function load(id: string) {\")"
+- "class typescript.sample.Repo [14-18] arity=None parent=Some(0) sig=Some(\"export class Repo {\")"
+- "method typescript.sample.Repo.find [15-17] arity=Some(1) parent=Some(3) sig=Some(\"find(id: string) {\")"
+- "interface typescript.sample.Options [20-22] arity=None parent=Some(0) sig=Some(\"interface Options {\")"
