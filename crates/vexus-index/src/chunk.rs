@@ -1,4 +1,4 @@
-use vexus_core::model::{estimate_tokens, FileIndex, NewChunk, SymbolKind};
+use vexus_core::model::{estimate_tokens, FileIndex, NewChunk, NewSymbol, SymbolKind};
 
 const MAX_TOKENS: u32 = 512;
 
@@ -12,18 +12,41 @@ fn is_annotation_line(line: &str) -> bool {
         || t.starts_with('@')
 }
 
-/// Extend `start` upward over contiguous annotation lines not covered by another symbol.
-fn extend_start(start: u32, covered_by_other: &[bool], lines: &[&str]) -> u32 {
+/// True if `ancestor` is a strict ancestor of `of` by walking `parent` links.
+fn is_ancestor(ancestor: usize, of: usize, symbols: &[NewSymbol]) -> bool {
+    let mut cur = symbols[of].parent;
+    while let Some(p) = cur {
+        if p == ancestor {
+            return true;
+        }
+        cur = symbols[p].parent;
+    }
+    false
+}
+
+/// Extend `start` upward over contiguous annotation lines whose innermost owner (if any)
+/// is an ancestor of `sym_index` — i.e. lines only "covered" by a containing symbol (or
+/// uncovered) may still be claimed; lines owned by an unrelated symbol may not.
+fn extend_start(
+    sym_index: usize,
+    start: u32,
+    owner: &[Option<usize>],
+    lines: &[&str],
+    symbols: &[NewSymbol],
+) -> u32 {
     let mut s = start;
     while s > 1 {
         let prev = (s - 2) as usize; // 0-based index of line s-1
-        if prev >= covered_by_other.len()
-            || prev >= lines.len()
-            || covered_by_other[prev]
-            || lines[prev].trim().is_empty()
-            || !is_annotation_line(lines[prev])
-        {
+        if prev >= owner.len() || prev >= lines.len() {
             break;
+        }
+        if lines[prev].trim().is_empty() || !is_annotation_line(lines[prev]) {
+            break;
+        }
+        if let Some(o) = owner[prev] {
+            if o != sym_index && !is_ancestor(o, sym_index, symbols) {
+                break;
+            }
         }
         s -= 1;
     }
@@ -37,6 +60,15 @@ fn cap_content(content: String) -> String {
     let mut out = String::new();
     for line in content.lines() {
         if estimate_tokens(&out) + estimate_tokens(line) > MAX_TOKENS - 4 {
+            if out.is_empty() {
+                // A single line alone busts the budget: hard-truncate it at the char
+                // budget (char-boundary safe via `chars().take()`) rather than dropping
+                // it entirely and emitting only the truncation marker.
+                let budget_chars = (MAX_TOKENS as usize) * 4;
+                let truncated: String = line.chars().take(budget_chars).collect();
+                out.push_str(&truncated);
+                out.push('\n');
+            }
             break;
         }
         out.push_str(line);
@@ -61,18 +93,32 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
 
     let mut chunks = Vec::new();
 
-    // 1. Build `covered` bitmap from non-module symbol ranges.
+    // 1. Build `covered` bitmap from non-module symbol ranges (used for the preamble),
+    //    and an `owner` map recording the innermost (most specific) symbol covering each
+    //    line (used for doc-extension ancestor checks). `owner` is filled largest-range
+    //    first so nested (smaller) ranges overwrite their containers for shared lines.
     let mut covered = vec![false; lines.len()];
-    for s in idx.symbols.iter().skip(1) {
-        let start = (s.start_line as usize - 1).min(covered.len());
+    let mut owner: Vec<Option<usize>> = vec![None; lines.len()];
+    let mut by_size: Vec<usize> = (1..idx.symbols.len()).collect();
+    by_size.sort_by_key(|&i| {
+        let s = &idx.symbols[i];
+        std::cmp::Reverse(s.end_line.saturating_sub(s.start_line))
+    });
+    for &i in &by_size {
+        let s = &idx.symbols[i];
+        let start = (s.start_line as usize - 1).min(lines.len());
         let end = (s.end_line as usize).min(lines.len());
         if start < end {
             covered[start..end].fill(true);
+            for slot in owner[start..end].iter_mut() {
+                *slot = Some(i);
+            }
         }
     }
 
-    // 2. Doc extension for ALL leaf/container symbols first, so `covered` is final
-    //    before the preamble is computed. Extended lines are marked covered.
+    // 2. Doc extension for ALL leaf/container symbols first, so `covered`/`owner` are
+    //    final before the preamble is computed. Extended lines are claimed by the
+    //    extending symbol (marked covered, owner set to that symbol).
     let mut ext_starts: Vec<u32> = vec![0; idx.symbols.len()];
     for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
         if !matches!(
@@ -87,12 +133,15 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
         ) {
             continue;
         }
-        let ext_start = extend_start(sym.start_line, &covered, &lines);
+        let ext_start = extend_start(i, sym.start_line, &owner, &lines, &idx.symbols);
         ext_starts[i] = ext_start;
         let start = (ext_start as usize - 1).min(covered.len());
         let end = ((sym.start_line as usize).saturating_sub(1)).min(covered.len());
         if start < end {
             covered[start..end].fill(true);
+            for slot in owner[start..end].iter_mut() {
+                *slot = Some(i);
+            }
         }
     }
 
@@ -324,6 +373,42 @@ def decorated():
     }
 
     #[test]
+    fn nested_method_doc_comment_joins_method_chunk() {
+        let source = "class C:\n    # doc for a\n    def a(self):\n        pass\n";
+        let mut idx = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 4,
+                    parent: None,
+                    arity: None,
+                },
+                f("C", SymbolKind::Class, 1, 4, Some(0)),
+                NewSymbol {
+                    name: "a".into(),
+                    qualname: "m.C.a".into(),
+                    kind: SymbolKind::Method,
+                    sig: Some("def a(self):".into()),
+                    start_line: 3,
+                    end_line: 4,
+                    parent: Some(1),
+                    arity: Some(0),
+                },
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, source);
+        let a = idx.chunks.iter().find(|c| c.symbol == Some(2)).unwrap();
+        assert_eq!(a.start_line, 2);
+        assert!(a.content.starts_with("    # doc for a"));
+    }
+
+    #[test]
     fn preamble_split_into_contiguous_runs_with_true_ranges() {
         let source =
             "import a\n\ndef f1():\n    pass\n\nCONST = 1\nOTHER = 2\n\ndef f2():\n    pass\n";
@@ -382,6 +467,22 @@ def decorated():
             .chunks
             .iter()
             .any(|c| c.content.ends_with("… (truncated)\n")));
+    }
+
+    #[test]
+    fn cap_content_hard_truncates_a_single_oversized_line() {
+        // A single 3000-char line alone busts the 512-token budget; it must be
+        // hard-truncated at the char budget rather than dropped entirely.
+        let line: String = "x".repeat(3000);
+        let content = format!("{line}\n");
+
+        let out = super::cap_content(content);
+
+        assert!(out.ends_with("… (truncated)\n"));
+        let budget_chars = 512 * 4;
+        let expected_prefix: String = line.chars().take(budget_chars).collect();
+        assert!(out.starts_with(&expected_prefix));
+        assert!(vexus_core::model::estimate_tokens(&out) <= 512 + 8);
     }
 
     #[test]
