@@ -7,7 +7,7 @@ pub mod server;
 pub mod state;
 pub mod tools;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -91,18 +91,40 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     } // writer dropped here
 
     // Tool handlers only ever read; opening read-only keeps concurrent
-    // access (this process's watcher, in a later task, and any other reader)
+    // access (this process's watcher, spawned below, and any other reader)
     // from contending with tools over a write lock, and makes accidental
     // writes from a tool handler fail loudly instead of corrupting state.
-    let store = vexus_core::Store::open_read_only(&db_path)
-        .with_context(|| format!("failed to open read-only index at {}", db_path.display()))?;
+    let store = open_reader_with_probe(&db_path, &root)?;
 
     let state = Arc::new(AppState {
         store: Mutex::new(store),
         embedder: OnceLock::new(),
-        root,
+        root: root.clone(),
         last_generation: AtomicU64::new(0),
     });
+
+    // Spawn the writer task: opens its own writer connection, runs a
+    // startup reconcile pass (freshness Reconciling -> Fresh/Degraded) to
+    // catch up on anything that changed on disk while nothing was watching,
+    // then hands off into the debounced filesystem watcher for the rest of
+    // the process's life. Built eagerly here (rather than left to the
+    // `AppState`'s lazy `OnceLock`) so it's ready before the watcher needs
+    // it, and shared with tool handlers via `state.embedder()`'s own
+    // `OnceLock` so the process only ever loads one embedder for both
+    // paths.
+    //
+    // No advisory lock yet (Task 6) — until that lands, this always assumes
+    // it's the winning writer, per the brief.
+    let writer_store = vexus_core::Store::open(&db_path)
+        .with_context(|| format!("failed to open writer index at {}", db_path.display()))?;
+    let embedder = state.embedder();
+    let (_shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    // Not joined: the writer thread runs for the life of the process, and
+    // the whole point of the read-only `AppState` above is that tool
+    // handlers never wait on it. `_shutdown_tx` is kept alive in this scope
+    // (not dropped early) purely so a disconnect doesn't tell the writer
+    // thread to shut down before `serve` itself is done.
+    let _writer_handle = vexus_watch::spawn_writer(root, writer_store, embedder, shutdown_rx);
 
     let server = server::VexusServer::new(state);
     server
@@ -111,6 +133,43 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         .waiting()
         .await?;
     Ok(())
+}
+
+/// Opens `db_path` read-only, then immediately runs a cheap probe query
+/// against it so a specific class of failure surfaces here, with a clear
+/// hint, instead of confusing the first real tool call.
+///
+/// Carried finding (Task 1 review): `Store::open_read_only` can succeed
+/// even when `root`'s containing directory can't be written to, because
+/// opening a connection doesn't by itself need to touch anything beyond the
+/// `.db` file. The first *query* is a different story — this index was
+/// written by a writer `Store` in WAL mode (see `Store::open`), and WAL
+/// requires SQLite to create/maintain `-wal`/`-shm` companion files
+/// alongside `index.db`, even for a read-only connection (readers still
+/// need the shared-memory wal-index to establish a consistent read
+/// snapshot). If those companion files don't already exist and the
+/// directory can't be written to, creating them fails right here, on the
+/// very first real query, with an opaque low-level SQLite error ("unable to
+/// open database file") that gives no hint about *why*. Kept as its own
+/// function (rather than inlined into `serve_async`) so it's unit-testable
+/// on its own — `serve_async`'s mandatory startup writer-open tends to
+/// surface most on-disk permission problems earlier anyway, but this
+/// becomes the *first* thing to open the DB at all once Task 6's advisory
+/// lock lets a losing process skip that writer-open step entirely.
+fn open_reader_with_probe(db_path: &Path, root: &Path) -> Result<vexus_core::Store> {
+    let store = vexus_core::Store::open_read_only(db_path)
+        .with_context(|| format!("failed to open read-only index at {}", db_path.display()))?;
+    store.counts().with_context(|| {
+        format!(
+            "failed to query index at {} right after opening it read-only; if {} (or its \
+             .vexus subdirectory) is on a read-only filesystem, this is almost certainly why — \
+             SQLite needs write access to the directory containing index.db to create its WAL \
+             companion files, even for read-only queries",
+            db_path.display(),
+            root.display()
+        )
+    })?;
+    Ok(store)
 }
 
 #[cfg(test)]
@@ -140,6 +199,59 @@ mod tests {
         assert!(
             msg.contains("index.db"),
             "expected the error to name the index path: {msg}"
+        );
+    }
+
+    /// Carried finding (Task 1 review): a directory that can't be written
+    /// to makes `open_read_only` succeed but the very next query fail
+    /// confusingly (SQLite needing to create fresh `-wal`/`-shm` companion
+    /// files it can't). Reproduced directly against
+    /// `open_reader_with_probe` (rather than through the whole `serve`
+    /// flow) because `serve_async`'s own mandatory startup writer-open
+    /// would otherwise hit the very same permission problem first — this
+    /// isolates the read-only-open-then-probe code path this task adds.
+    #[cfg(unix)]
+    #[test]
+    fn open_reader_with_probe_names_directory_writability_as_the_likely_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("a.py"), "def f():\n    return 1\n").unwrap();
+
+        let db_path = root.join(".vexus/index.db");
+        {
+            // Directory is still writable here: build a real index and let
+            // the writer close normally (which leaves the DB in WAL mode
+            // with no guarantee its `-wal`/`-shm` companion files survive
+            // the close).
+            let mut store = vexus_core::Store::open(&db_path).unwrap();
+            vexus_watch::pipeline::index_repo(&root, &mut store).unwrap();
+        }
+        // Make sure they're gone regardless, so the read-only reopen below
+        // has to (try to) recreate them on its first query.
+        std::fs::remove_file(root.join(".vexus/index.db-wal")).ok();
+        std::fs::remove_file(root.join(".vexus/index.db-shm")).ok();
+
+        let vexus_dir = root.join(".vexus");
+        std::fs::set_permissions(&vexus_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = open_reader_with_probe(&db_path, &root);
+
+        // Restore permissions before asserting/unwrapping so tempdir
+        // cleanup never fails.
+        std::fs::set_permissions(&vexus_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = match result {
+            Ok(_) => panic!(
+                "a read-only directory missing its WAL companion files must fail the probe query"
+            ),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("read-only filesystem") && msg.contains("write access"),
+            "expected the error to hint at directory writability: {msg}"
         );
     }
 }

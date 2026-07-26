@@ -80,10 +80,13 @@ pub(crate) fn classify_file(root: &Path, rel: &str) -> FileClass {
     FileClass::Supported { lang, bytes }
 }
 
-pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
-    let mut report = IndexReport::default();
-    let mut seen: HashSet<String> = HashSet::new();
-
+/// Walks `root` yielding repo-relative, forward-slash-normalized paths for
+/// every regular file, skipping `.git` and `.vexus` entirely — the walker
+/// rules `index_repo`'s full sweep uses, extracted so `reconcile`'s
+/// non-git fallback (`vexus_watch::reconcile`) can reuse exactly the same
+/// rules rather than risk the two ever drifting on which files are "in
+/// scope" for the index.
+pub(crate) fn walk_repo_relative_files(root: &Path) -> Vec<String> {
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(|e| {
@@ -92,6 +95,7 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
         })
         .build();
 
+    let mut out = Vec::new();
     for entry in walker {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -103,7 +107,16 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        out.push(rel);
+    }
+    out
+}
 
+pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
+    let mut report = IndexReport::default();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for rel in walk_repo_relative_files(root) {
         match classify_file(root, &rel) {
             FileClass::Missing => {
                 // Disappeared between the walk and the stat/read (race); the

@@ -416,6 +416,18 @@ impl Store {
         Ok(())
     }
 
+    /// Removes `key` from `meta` entirely (as opposed to overwriting it with
+    /// some sentinel value) — for transient, presence-means-something-is-
+    /// happening keys like `reconcile_progress`, where a stale leftover
+    /// value read after the fact would otherwise need every reader to also
+    /// know to ignore it based on some other state. A no-op (not an error)
+    /// when `key` was already absent.
+    pub fn delete_meta(&mut self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     /// Monotonically increasing counter bumped by a writer on any change
     /// that could invalidate a reader's cached state (currently:
     /// `vec_table_cached`). Absent (fresh DB, or written by a build predating
@@ -668,6 +680,27 @@ mod tests {
             store.meta("last_index_failed").unwrap().as_deref(),
             Some("0")
         );
+    }
+
+    #[test]
+    fn delete_meta_removes_the_key_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_meta("reconcile_progress", "5/10").unwrap();
+        assert_eq!(
+            store.meta("reconcile_progress").unwrap().as_deref(),
+            Some("5/10")
+        );
+
+        store.delete_meta("reconcile_progress").unwrap();
+        assert_eq!(
+            store.meta("reconcile_progress").unwrap(),
+            None,
+            "deleted key must read back as absent, not an empty string"
+        );
+
+        // Deleting an already-absent key is a no-op, not an error.
+        store.delete_meta("reconcile_progress").unwrap();
     }
 
     #[test]
