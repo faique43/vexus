@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use vexus_watch::pipeline;
 
 #[derive(Parser)]
 #[command(
@@ -48,7 +49,7 @@ fn main() -> Result<()> {
         Cmd::Index { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             let mut store = open_store(&root)?;
-            let r = vexus_embed::pipeline::index_repo(&root, &mut store)?;
+            let r = pipeline::index_repo(&root, &mut store)?;
             println!(
                 "indexed: {}  unchanged: {}  skipped: {}  removed: {}  failed: {}",
                 r.indexed,
@@ -74,7 +75,7 @@ fn main() -> Result<()> {
                         // Degrade, never die: structural indexing above already
                         // succeeded and was reported, so an embedding failure
                         // (e.g. a flaky ONNX run) must not abort the command.
-                        match vexus_embed::pipeline::embed_pending(&mut store, embedder.as_ref()) {
+                        match pipeline::embed_pending(&mut store, embedder.as_ref()) {
                             Ok(er) => {
                                 println!(
                                     "embedded: {} (cache hits: {})",

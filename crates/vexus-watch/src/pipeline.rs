@@ -14,7 +14,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use vexus_core::Store;
 
-use crate::Embedder;
+use vexus_embed::Embedder;
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
@@ -201,7 +201,7 @@ mod tests {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
         index_repo(root, &mut store).unwrap();
 
-        let embedder = crate::MockEmbedder;
+        let embedder = vexus_embed::MockEmbedder;
         store.set_model(embedder.id(), embedder.dim()).unwrap();
         let r = embed_pending(&mut store, &embedder).unwrap();
         assert!(r.embedded >= 2);
@@ -344,7 +344,7 @@ mod tests {
     }
 
     struct ShortBatchEmbedder;
-    impl crate::Embedder for ShortBatchEmbedder {
+    impl vexus_embed::Embedder for ShortBatchEmbedder {
         fn id(&self) -> &str {
             "short"
         }

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 use vexus_embed::Embedder;
+use vexus_watch::pipeline;
 
 pub struct AppState {
     pub store: Mutex<vexus_core::Store>,
@@ -83,10 +84,10 @@ mod tests {
 
     fn indexed_state(root: &std::path::Path) -> AppState {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        vexus_embed::pipeline::index_repo(root, &mut store).unwrap();
+        pipeline::index_repo(root, &mut store).unwrap();
         let embedder = vexus_embed::MockEmbedder;
         store.set_model(embedder.id(), embedder.dim()).unwrap();
-        vexus_embed::pipeline::embed_pending(&mut store, &embedder).unwrap();
+        pipeline::embed_pending(&mut store, &embedder).unwrap();
         AppState {
             store: Mutex::new(store),
             embedder: OnceLock::new(),

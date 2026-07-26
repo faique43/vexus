@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use vexus_core::model::estimate_tokens;
+use vexus_watch::pipeline;
 
 use crate::bundle::{pack, BundleItem};
 use crate::format::render_bundle;
@@ -212,7 +213,7 @@ mod tests {
 
     fn indexed_state(root: &std::path::Path) -> AppState {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        vexus_embed::pipeline::index_repo(root, &mut store).unwrap();
+        pipeline::index_repo(root, &mut store).unwrap();
         AppState {
             store: Mutex::new(store),
             embedder: OnceLock::new(),

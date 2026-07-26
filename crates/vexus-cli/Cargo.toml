@@ -16,6 +16,7 @@ vexus-core = { path = "../vexus-core" }
 vexus-embed = { path = "../vexus-embed" }
 vexus-index = { path = "../vexus-index" }
 vexus-mcp = { path = "../vexus-mcp" }
+vexus-watch = { path = "../vexus-watch" }
 
 [dev-dependencies]
 tempfile.workspace = true

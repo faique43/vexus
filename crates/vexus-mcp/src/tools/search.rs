@@ -3,6 +3,7 @@
 //! carries no full symbol bodies — that's what `open`/`explore` are for.
 
 use vexus_core::model::estimate_tokens;
+use vexus_watch::pipeline;
 
 use crate::state::AppState;
 use crate::tools::{clamp_budget, embed_query};
@@ -88,10 +89,10 @@ mod tests {
     /// hermetic regardless of process environment.
     fn indexed_state(root: &std::path::Path) -> AppState {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        vexus_embed::pipeline::index_repo(root, &mut store).unwrap();
+        pipeline::index_repo(root, &mut store).unwrap();
         let embedder = vexus_embed::MockEmbedder;
         store.set_model(embedder.id(), embedder.dim()).unwrap();
-        vexus_embed::pipeline::embed_pending(&mut store, &embedder).unwrap();
+        pipeline::embed_pending(&mut store, &embedder).unwrap();
 
         let embedder_slot = OnceLock::new();
         let _ = embedder_slot.set(Some(std::sync::Arc::new(vexus_embed::MockEmbedder)
@@ -105,7 +106,7 @@ mod tests {
 
     fn keyword_only_state(root: &std::path::Path) -> AppState {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        vexus_embed::pipeline::index_repo(root, &mut store).unwrap();
+        pipeline::index_repo(root, &mut store).unwrap();
 
         let embedder_slot: OnceLock<Option<std::sync::Arc<dyn vexus_embed::Embedder>>> =
             OnceLock::new();

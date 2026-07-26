@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
+use vexus_watch::pipeline;
 
 use crate::state::AppState;
 
@@ -40,7 +41,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         // rather than refusing to start at all — `status` still reports the
         // truth, and tools simply have less to work with until the caller
         // re-runs `vexus index`.
-        match vexus_embed::pipeline::index_repo(&root, &mut store)
+        match pipeline::index_repo(&root, &mut store)
             .with_context(|| format!("failed to index repo at {}", root.display()))
         {
             Ok(report) => {
@@ -53,10 +54,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
                     match vexus_embed::select::make_embedder() {
                         Some(embedder) => {
                             store.set_model(embedder.id(), embedder.dim())?;
-                            match vexus_embed::pipeline::embed_pending(
-                                &mut store,
-                                embedder.as_ref(),
-                            ) {
+                            match pipeline::embed_pending(&mut store, embedder.as_ref()) {
                                 Ok(er) => eprintln!(
                                     "vexus: embedded {} chunks (cache hits: {})",
                                     er.embedded, er.from_cache

@@ -21,6 +21,8 @@
 
 use std::collections::HashMap;
 
+use vexus_watch::pipeline;
+
 use crate::bundle::{pack, BundleItem};
 use crate::format::render_bundle;
 use crate::state::AppState;
@@ -170,7 +172,7 @@ mod tests {
     /// rank as a direct hit.
     fn keyword_only_state(root: &std::path::Path) -> AppState {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        vexus_embed::pipeline::index_repo(root, &mut store).unwrap();
+        pipeline::index_repo(root, &mut store).unwrap();
         let embedder_slot: OnceLock<Option<std::sync::Arc<dyn vexus_embed::Embedder>>> =
             OnceLock::new();
         let _ = embedder_slot.set(None);
