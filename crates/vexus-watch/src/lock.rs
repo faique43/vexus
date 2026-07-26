@@ -1,108 +1,77 @@
-//! Advisory writer lock using fd-lock (per-fd locking).
+//! Advisory writer lock using flock (per-fd locking).
 //!
 //! This module provides a WriterLock that ensures at most one process
 //! (or "vexus serve" instance) writes the index at a time.
 
-use std::fs::OpenOptions;
+use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// A guard that holds the write lock. We store it to keep the lock alive.
-struct LockGuard {
-    _lock: fd_lock::RwLock<std::fs::File>,
-    _guard: fd_lock::RwLockWriteGuard<'static, std::fs::File>,
-}
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
-impl LockGuard {
-    /// Try to create a lock guard by acquiring a write lock on the given path.
-    fn try_acquire(path: &Path) -> Result<Option<Self>> {
-        // Open the lock file for writing (creates it if needed).
-        // We don't truncate because we don't care about the file's contents.
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .with_context(|| format!("failed to open lock file at {}", path.display()))?;
-
-        let mut lock = fd_lock::RwLock::new(file);
-
-        // Try to acquire an exclusive write lock without blocking.
-        // We use a nested scope to ensure the guard Result is dropped before
-        // we move the lock into LockGuard.
-        let got_lock = {
-            if let Ok(guard) = lock.try_write() {
-                // SAFETY: We're extending the lifetime of the guard to 'static.
-                // This is safe because we're storing both the lock and the guard
-                // in the same struct, and they'll both be dropped together when
-                // the LockGuard is dropped.
-                let guard = unsafe {
-                    std::mem::transmute::<
-                        fd_lock::RwLockWriteGuard<std::fs::File>,
-                        fd_lock::RwLockWriteGuard<'static, std::fs::File>,
-                    >(guard)
-                };
-                Some(guard)
-            } else {
-                None
-            }
-        };
-
-        match got_lock {
-            Some(guard) => Ok(Some(LockGuard {
-                _lock: lock,
-                _guard: guard,
-            })),
-            None => Ok(None),
-        }
-    }
-}
-
-/// Holds an exclusive write lock on `.vexus/lock`. The lock is advisory
-/// (not enforced by the OS, but honored by participating processes) and
-/// released when this struct is dropped.
+/// Advisory writer lock on `.vexus/lock`. Held while alive; released on drop
+/// (explicit funlock + fd close both release it).
 ///
-/// Two `WriterLock` instances on the same path in the same process will
-/// conflict: fd-lock uses flock on Unix (per-fd, not per-process), so two
-/// separate File opens will block each other.
+/// Unix only: uses flock for per-fd locking. Non-unix platforms return
+/// Some() always (no locking yet; document as a todo).
 pub struct WriterLock {
-    _inner: LockGuard,
+    #[cfg(unix)]
+    file: File,
+    #[cfg(not(unix))]
+    _marker: std::marker::PhantomData<()>,
 }
 
 impl WriterLock {
-    /// Try to acquire an exclusive write lock on `vexus_dir/.vexus/lock`.
+    /// Try to acquire an exclusive write lock on `root/.vexus/lock`.
     ///
     /// Returns:
     /// - `Ok(Some(WriterLock))` if we acquired the lock (we're the writer)
     /// - `Ok(None)` if another process/fd holds the lock (we're a reader)
     /// - `Err(_)` on I/O or other errors
-    pub fn try_acquire(vexus_dir: &Path) -> Result<Option<WriterLock>> {
-        let lock_path = vexus_dir.join(".vexus/lock");
+    pub fn try_acquire(root: &Path) -> Result<Option<WriterLock>> {
+        #[cfg(unix)]
+        {
+            let dir = root.join(".vexus");
+            std::fs::create_dir_all(&dir).with_context(|| {
+                format!("failed to create .vexus directory at {}", dir.display())
+            })?;
 
-        // Ensure .vexus directory exists. If it's already a file (shouldn't happen
-        // in normal use, but happens in some tests), the lock file open below will fail.
-        let vexus_dir_path = lock_path.parent().unwrap();
-        match std::fs::create_dir_all(vexus_dir_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Directory already exists; that's fine.
-            }
-            Err(e) => {
-                // Some other error; we can't create the directory.
-                return Err(e).with_context(|| {
-                    format!(
-                        "failed to create .vexus directory at {}",
-                        vexus_dir_path.display()
-                    )
-                });
+            let path = dir.join("lock");
+            let file = File::create(&path)
+                .with_context(|| format!("failed to create lock file at {}", path.display()))?;
+
+            // LOCK_EX | LOCK_NB: exclusive, non-blocking
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+
+            if rc == 0 {
+                Ok(Some(WriterLock { file }))
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                    Ok(None)
+                } else {
+                    Err(err).context("flock .vexus/lock")
+                }
             }
         }
 
-        match LockGuard::try_acquire(&lock_path)? {
-            Some(inner) => Ok(Some(WriterLock { _inner: inner })),
-            None => Ok(None),
+        #[cfg(not(unix))]
+        {
+            // Non-unix platforms: no locking yet. TODO: implement Windows equivalent.
+            let _ = root;
+            Ok(Some(WriterLock {
+                _marker: std::marker::PhantomData,
+            }))
         }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
