@@ -115,16 +115,31 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     // Only spawn the writer thread if we won the lock.
     // The WriterLock is moved into the thread closure and held for the
     // thread's lifetime; it's released when the thread exits.
+    //
+    // `writer_shutdown` (the sender half) is declared out here, *outside*
+    // the `if is_writer` block, and deliberately never sent on — only
+    // dropped once `serve` itself is done (see the explicit `drop` below).
+    // The watcher loop's very first iteration checks `shutdown_rx.try_recv()`
+    // before it ever touches the `notify` channel, and treats a disconnected
+    // sender exactly like an explicit shutdown signal (see vexus-watch's
+    // `run_writer`): if `shutdown_tx` were scoped to *inside* `if is_writer`
+    // instead, it would drop at that block's closing brace — nowhere near
+    // "when serve is done" — disconnecting `shutdown_rx` before the watch
+    // loop's first tick and making the writer thread exit immediately, having
+    // never read a single filesystem event. (This was exactly that bug: the
+    // watcher thread ran, reconcile completed, freshness read `fresh`, but
+    // the loop had already broken out on iteration one, so `last_event_at`
+    // never got stamped no matter how long anything waited afterward.)
+    let mut writer_shutdown: Option<std::sync::mpsc::Sender<()>> = None;
     if is_writer {
         let writer_store = vexus_core::Store::open(&db_path)
             .with_context(|| format!("failed to open writer index at {}", db_path.display()))?;
         let embedder = state.embedder();
-        let (_shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        writer_shutdown = Some(shutdown_tx);
         // Not joined: the writer thread runs for the life of the process, and
         // the whole point of the read-only `AppState` above is that tool
-        // handlers never wait on it. `_shutdown_tx` is kept alive in this scope
-        // (not dropped early) purely so a disconnect doesn't tell the writer
-        // thread to shut down before `serve` itself is done.
+        // handlers never wait on it.
         let writer_root = root.clone();
         let _writer_handle = std::thread::spawn(move || {
             // Hold the WriterLock for the duration of this thread
@@ -142,6 +157,11 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         .await?
         .waiting()
         .await?;
+    // Explicit, even though it would happen anyway when `writer_shutdown`
+    // goes out of scope at the end of the function: this is the actual
+    // "tell the writer thread to shut down" signal, and it belongs right
+    // here — once serving is genuinely done — not any earlier.
+    drop(writer_shutdown);
     Ok(())
 }
 

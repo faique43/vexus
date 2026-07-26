@@ -351,6 +351,64 @@ mod tests {
         );
     }
 
+    /// Regression guard for a real bug in `vexus_mcp::serve_async`: its
+    /// shutdown-channel sender was scoped to end at the close of an `if
+    /// is_writer { ... }` block — dropping (and so disconnecting the
+    /// receiver) long before `serve` itself was actually done. The main
+    /// loop's very first `shutdown_rx.try_recv()`, checked before it ever
+    /// touches the `notify` channel, treats a disconnected sender exactly
+    /// like an explicit shutdown signal, so the writer thread exited on its
+    /// first tick, having never watched anything — reconcile still
+    /// completed fine, so `status` read `freshness: fresh` with `last
+    /// event: none` forever, no matter how long a caller waited.
+    ///
+    /// Catching that class of bug doesn't need a real filesystem event (or
+    /// even a registered OS-level watch, which is exactly what makes this
+    /// fast and platform-independent, unlike the test above): it only needs
+    /// to show that holding the sender keeps the thread alive with no
+    /// events at all, and that dropping it stops the thread promptly.
+    #[test]
+    fn writer_thread_stays_alive_while_shutdown_sender_is_held_and_exits_once_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("a.py"), "def helper():\n    return 1\n").unwrap();
+
+        let db_path = root.join(".vexus/index.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            crate::pipeline::index_repo(&root, &mut store).unwrap();
+        }
+
+        let writer_store = Store::open(&db_path).unwrap();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let handle = spawn_watcher(root, writer_store, None, shutdown_rx);
+
+        // No filesystem events at all during this window — the bug this
+        // guards against would exit the thread within its very first
+        // ~100ms tick regardless, so 1.5s is a generous, not a tight, margin.
+        thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !handle.is_finished(),
+            "writer thread must still be running while the shutdown sender is alive, \
+             even with zero filesystem events"
+        );
+
+        drop(shutdown_tx);
+        // The main loop polls shutdown_rx once per RECV_TIMEOUT (100ms)
+        // tick; a few ticks' worth of margin covers scheduling jitter.
+        for _ in 0..20 {
+            if handle.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            handle.is_finished(),
+            "writer thread must exit promptly once the shutdown sender is dropped"
+        );
+        handle.join().unwrap();
+    }
+
     fn write(root: &Path, rel: &str, content: &str) {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();

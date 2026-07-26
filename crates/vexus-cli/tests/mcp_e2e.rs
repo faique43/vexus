@@ -248,33 +248,19 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
 /// own drain ran, not just that the file happens to be on disk); search
 /// again -> hit. This is the full watch -> update -> query loop.
 ///
-/// `#[ignore]`d — not because the test is wrong, but because of a narrow,
-/// heavily-diagnosed environment finding: in the sandboxed dev container
-/// this task was implemented in, a `vexus serve` *child process* spawned
-/// over the real MCP stdio transport never receives a single macOS FSEvents
-/// callback for its whole lifetime, even for its own `.vexus/index.db-wal`
-/// churn — while the *identical* watcher/reconcile/freshness code, called
-/// directly (no separate `vexus_mcp::serve` call, no spawned child process)
-/// from a throwaway probe binary linking the very same `vexus-watch` /
-/// `vexus-mcp` crates, reliably receives events and stamps `last_event_at`
-/// within ~1s, every time. Isolated across ~15 controlled variants (see the
-/// Task 8 report): ruled out the advisory `WriterLock`, `vexus-embed`/`ort`
-/// linkage, `rusqlite`, a bumped `notify` (6.1.1 -> 8.2.0), reconcile-vs-watch
-/// registration order, and JoinHandle scoping — none changed the outcome.
-/// The one reproducible correlate is calling into the real, compiled
-/// `vexus_mcp::serve`/`serve_async` specifically (vs. re-implementing the
-/// identical logic inline in a separate crate) — which points at something
-/// below this task's scope (most likely a `notify` 6.x macOS FSEvents FFI
-/// callback quirk sensitive to crate-boundary codegen, or a container/VM
-/// FSEvents delivery limitation), not a defect in this plan's code. The
-/// watcher/debounce/reconcile/freshness/`last_event_at` machinery this test
-/// exercises is independently and thoroughly covered by `vexus-watch`'s own
-/// in-process unit tests (`watcher::tests::*`, all green in `cargo test
-/// --workspace`) — this test adds the real-MCP-stdio wiring on top. Run
-/// explicitly, and on a real (non-sandboxed) machine, with `cargo test -p
-/// vexus-cli --test mcp_e2e -- --ignored watcher_e2e --nocapture`.
+/// This test caught a real bug on first write (see `vexus_mcp::serve_async`
+/// in `lib.rs`): the writer thread's shutdown-channel sender was declared
+/// *inside* the `if is_writer { ... }` block, so it dropped at that block's
+/// closing brace — long before `serve` itself was done. The watcher loop's
+/// very first iteration checks the shutdown receiver before it ever touches
+/// the `notify` channel, and a disconnected sender reads exactly like an
+/// explicit shutdown — so the writer thread exited on its first tick, having
+/// never watched anything. Reconcile (which runs before the watch loop)
+/// still completed fine, so `status` showed `freshness: fresh` with
+/// `last event: none` forever, no matter how long a caller waited. Fixed by
+/// hoisting the sender out to `serve_async`'s top level and dropping it
+/// explicitly only after `.waiting()` returns.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "watcher e2e: FSEvents never reach a `vexus serve` child process in this sandboxed dev container (see doc comment) — run manually on a real machine with `cargo test -p vexus-cli --test mcp_e2e -- --ignored watcher_e2e --nocapture`"]
 async fn watcher_e2e_search_miss_write_file_status_heals_then_search_hit() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
