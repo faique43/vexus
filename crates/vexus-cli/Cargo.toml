@@ -12,7 +12,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 blake3.workspace = true
 clap = { version = "4", features = ["derive"] }
-ignore = "0.4"
 vexus-core = { path = "../vexus-core" }
 vexus-embed = { path = "../vexus-embed" }
 vexus-index = { path = "../vexus-index" }

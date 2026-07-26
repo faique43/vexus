@@ -2468,7 +2468,6 @@ dependencies = [
  "assert_cmd",
  "blake3",
  "clap",
- "ignore",
  "predicates",
  "rmcp",
  "serde_json",
