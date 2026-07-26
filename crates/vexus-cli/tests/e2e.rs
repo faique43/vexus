@@ -37,7 +37,12 @@ fn index_status_search_flow() {
         .args(["status", root.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("files: 1").and(predicate::str::contains("symbols:")));
+        .stdout(
+            predicate::str::contains("index: 1 files")
+                .and(predicate::str::contains("symbols"))
+                .and(predicate::str::contains("role: writer"))
+                .and(predicate::str::contains("last event: none")),
+        );
 
     Command::cargo_bin("vexus")
         .unwrap()
@@ -48,6 +53,55 @@ fn index_status_search_flow() {
         .stdout(
             predicate::str::contains("app.py").and(predicate::str::contains("compute_backoff")),
         );
+}
+
+/// `vexus status`'s `role:` line reflects the same advisory `.vexus/lock`
+/// `vexus serve` uses: while another process holds it, `status` reports
+/// `reader`; once released, `status` (winning the now-uncontested lock
+/// itself, briefly) reports `writer` — matching what a real `vexus serve`
+/// process's own `status` tool would say in each case.
+#[test]
+fn status_role_line_reflects_the_advisory_writer_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "app.py",
+        "def compute_backoff(delay):\n    return delay * 2\n",
+    );
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["index", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    {
+        // Simulates a `vexus serve` process already holding the lock.
+        let _held = vexus_watch::WriterLock::try_acquire(root)
+            .unwrap()
+            .expect("test process should win the lock first");
+
+        Command::cargo_bin("vexus")
+            .unwrap()
+            .env("VEXUS_EMBEDDER", "mock")
+            .args(["status", root.to_str().unwrap()])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "role: reader (another vexus serve owns the index)",
+            ));
+        // `_held` drops (and releases the lock) at the end of this block.
+    }
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["status", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("role: writer"));
 }
 
 #[test]

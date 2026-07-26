@@ -195,22 +195,18 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let store = vexus_core::Store::open(&db_path(&root))?;
-            let c = store.counts()?;
-            println!(
-                "files: {}  symbols: {}  edges: {}  chunks: {}",
-                c.files, c.symbols, c.edges, c.chunks
-            );
-            let model_id = store.meta("model_id")?.unwrap_or_else(|| "none".into());
-            let backlog = store.embed_backlog()?;
-            let vec_status = if store.vec_available() {
-                "available"
-            } else {
-                "unavailable"
-            };
-            println!(
-                "model: {}  embed backlog: {}  vec: {}",
-                model_id, backlog, vec_status
-            );
+            // Renders through the exact same `vexus_mcp::state::status_text`
+            // the MCP `status` tool uses — CLI/MCP parity is structural
+            // (one format string, not two hand-copied ones). `role` here is
+            // a one-shot probe of the same advisory `.vexus/lock` `vexus
+            // serve` uses: acquiring it (and releasing it again once this
+            // `Store` — and the lock — drop at the end of this arm) means no
+            // `vexus serve` currently holds it, so this invocation reports
+            // `writer`; losing the race to a running `vexus serve` reports
+            // `reader`, the same as that server's own `status` would.
+            let writer_lock = vexus_watch::WriterLock::try_acquire(&root)?;
+            let is_writer = writer_lock.is_some();
+            println!("{}", vexus_mcp::state::status_text(&store, is_writer)?);
         }
         Cmd::Search { query, path, limit } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 use vexus_embed::Embedder;
-use vexus_watch::{effective_freshness, Freshness};
+use vexus_watch::{effective_freshness, role_line, Freshness};
 #[cfg(test)]
 use vexus_watch::{pipeline, set_freshness};
 
@@ -73,52 +73,115 @@ impl AppState {
     /// Renders the `status` tool's plain-text report. Kept as a plain method
     /// on `AppState` (rather than inline in the tool handler) so it's
     /// directly unit-testable without going through the MCP transport.
+    /// Delegates to the free `status_text` function below — the single
+    /// source both the MCP `status` tool and the CLI's `vexus status`
+    /// command render through, so CLI/MCP parity is structural rather than
+    /// two hand-copied format strings that can drift.
     pub fn status_text(&self) -> Result<String> {
         let store = self.lock_store_fresh();
-        let c = store.counts()?;
-        let model_id = store.meta("model_id")?.unwrap_or_else(|| "none".into());
-        let backlog = store.embed_backlog()?;
-        let vec_status = if store.vec_available() {
-            "available"
-        } else {
-            "unavailable"
-        };
-        let failed: i64 = store
-            .meta("last_index_failed")?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-
-        // Unlike the `⚠ index ...` header (which prepends to the other 6
-        // tools' responses), `status` is the one place that always shows the
-        // real state plainly — even when Fresh — since checking freshness is
-        // exactly what a caller reaches for this tool to do.
-        let freshness = effective_freshness(&store)?;
-        let since = store.meta("freshness_since")?;
-        let mut freshness_line = format!("freshness: {}", freshness.as_str());
-        if let Some(since) = &since {
-            freshness_line.push_str(&format!(" (since {since})"));
-        }
-        if freshness != Freshness::Fresh {
-            freshness_line
-                .push_str(" — results may miss recent changes; re-run 'vexus index' after big changes if this persists");
-        }
-
-        let mut lines = vec![
-            format!(
-                "index: {} files, {} symbols, {} edges, {} chunks",
-                c.files, c.symbols, c.edges, c.chunks
-            ),
-            format!("model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"),
-            freshness_line,
-        ];
-        if failed > 0 {
-            lines.push(format!("skipped files: {failed}"));
-        }
-        if let Some(role) = vexus_watch::role_line(self.is_writer) {
-            lines.push(role);
-        }
-        Ok(lines.join("\n"))
+        status_text(&store, self.is_writer)
     }
+}
+
+/// Renders the exact `status` shape shared by the MCP `status` tool and the
+/// CLI's `vexus status` command:
+///
+/// ```text
+/// index: {n} files, {n} symbols, {n} edges, {n} chunks
+/// model: {id|none}  embed backlog: {n}  vec: {available|unavailable}
+/// freshness: {state} (since {rfc3339}){ hint when not fresh }
+/// role: {writer|reader (another vexus serve owns the index)}
+/// last event: {rfc3339|none}
+/// skipped files: {n}                  # only when >0
+/// ```
+///
+/// `is_writer` is the caller's own outcome from probing the advisory
+/// `.vexus/lock` (`serve`'s long-held `WriterLock`, or the CLI's own
+/// one-shot acquire-then-release) — this function only renders the result,
+/// it never touches the lock itself.
+pub fn status_text(store: &vexus_core::Store, is_writer: bool) -> Result<String> {
+    let c = store.counts()?;
+    let model_id = store.meta("model_id")?.unwrap_or_else(|| "none".into());
+    let backlog = store.embed_backlog()?;
+    let vec_status = if store.vec_available() {
+        "available"
+    } else {
+        "unavailable"
+    };
+    let failed: i64 = store
+        .meta("last_index_failed")?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    // Unlike the `⚠ index ...` header (which prepends to the other 6
+    // tools' responses), `status` is the one place that always shows the
+    // real state plainly — even when Fresh — since checking freshness is
+    // exactly what a caller reaches for this tool to do.
+    let freshness = effective_freshness(store)?;
+    let since = store
+        .meta("freshness_since")?
+        .and_then(|v| v.parse::<u64>().ok());
+    let mut freshness_line = format!("freshness: {}", freshness.as_str());
+    if let Some(since) = since {
+        freshness_line.push_str(&format!(" (since {})", epoch_to_rfc3339(since)));
+    }
+    if freshness != Freshness::Fresh {
+        freshness_line
+            .push_str(" — results may miss recent changes; re-run 'vexus index' after big changes if this persists");
+    }
+
+    // `last_event_at` is stamped by the watcher (`vexus-watch`'s
+    // `drain_and_apply`) on every drain that applied at least one change
+    // cleanly — absent means the watcher hasn't completed a successful
+    // drain yet this run (or isn't running at all, e.g. reader mode).
+    let last_event = store
+        .meta("last_event_at")?
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(epoch_to_rfc3339)
+        .unwrap_or_else(|| "none".into());
+
+    let mut lines = vec![
+        format!(
+            "index: {} files, {} symbols, {} edges, {} chunks",
+            c.files, c.symbols, c.edges, c.chunks
+        ),
+        format!("model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"),
+        freshness_line,
+    ];
+    if let Some(role) = role_line(is_writer) {
+        lines.push(role);
+    }
+    lines.push(format!("last event: {last_event}"));
+    if failed > 0 {
+        lines.push(format!("skipped files: {failed}"));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Formats a unix-epoch second count as an RFC 3339 UTC timestamp
+/// (`YYYY-MM-DDTHH:MM:SSZ`) by hand — `status_text` is the only call site in
+/// the workspace, so pulling in `chrono` for one conversion isn't worth the
+/// dependency. Turns the day count into a proleptic-Gregorian year/month/day
+/// triple via Howard Hinnant's civil-from-days algorithm
+/// (<http://howardhinnant.github.io/date_algorithms.html>); the unit tests
+/// below cross-check every vector against `date -u -r <secs>`.
+fn epoch_to_rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
 /// The `⚠ index {state}{detail} — results may miss recent changes` warning
@@ -176,15 +239,15 @@ mod tests {
         }
     }
 
-    /// Exact-format regression test per the Task 3 brief (freshness line
-    /// updated by Task 2 to show the real state): the four line shapes
-    /// (index counts / model+backlog+vec / real freshness line / optional
-    /// skipped-files line), built from the store's own counts so the
-    /// assertion tracks real indexed content rather than a hardcoded guess
-    /// at tree-sitter's symbol/chunk output for this fixture. `indexed_state`
-    /// never calls `set_freshness`, so this store is a "nothing has ever
-    /// touched freshness" DB — `effective_freshness` reads that as `Fresh`,
-    /// with no `since` suffix and no re-run hint.
+    /// Exact-format regression test per the Task 8 brief (final `status`
+    /// shape: index counts / model+backlog+vec / real freshness line / role
+    /// / last event / optional skipped-files line), built from the store's
+    /// own counts so the assertion tracks real indexed content rather than a
+    /// hardcoded guess at tree-sitter's symbol/chunk output for this
+    /// fixture. `indexed_state` never calls `set_freshness`, so this store
+    /// is a "nothing has ever touched freshness" DB — `effective_freshness`
+    /// reads that as `Fresh`, with no `since` suffix and no re-run hint. It
+    /// also never runs the watcher, so `last_event_at` is absent -> `none`.
     #[test]
     fn status_text_matches_exact_line_format_with_no_failures() {
         let dir = tempfile::tempdir().unwrap();
@@ -203,7 +266,8 @@ mod tests {
             "index: {} files, {} symbols, {} edges, {} chunks\n\
              model: mock  embed backlog: 0  vec: available\n\
              freshness: fresh\n\
-             role: writer",
+             role: writer\n\
+             last event: none",
             c.files, c.symbols, c.edges, c.chunks
         );
         assert_eq!(text, expected);
@@ -231,10 +295,55 @@ mod tests {
             .unwrap();
 
         let text = state.status_text().unwrap();
-        assert!(text.contains("\nskipped files: 2\n"), "got: {text:?}");
+        assert!(text.contains("\nrole: writer\n"), "got: {text:?}");
+        assert!(text.contains("\nlast event: none\n"), "got: {text:?}");
         assert!(
-            text.ends_with("\nrole: writer"),
-            "role line should be last: {text:?}"
+            text.ends_with("\nskipped files: 2"),
+            "skipped-files line should be last: {text:?}"
+        );
+    }
+
+    /// The `status` shape's writer/reader role split, at the `status_text`
+    /// level (the underlying `role_line` string itself is already exercised
+    /// directly in `vexus-watch`'s `lock.rs` tests).
+    #[test]
+    fn status_text_shows_reader_role_line_when_not_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f():\n    return 1\n");
+
+        let mut state = indexed_state(root);
+        state.is_writer = false;
+
+        let text = state.status_text().unwrap();
+        assert!(
+            text.contains("\nrole: reader (another vexus serve owns the index)\n"),
+            "got: {text:?}"
+        );
+    }
+
+    /// `last event:` reads `meta('last_event_at')` (stamped by the
+    /// watcher's `drain_and_apply` per successful drain — see
+    /// `vexus-watch`'s `watcher.rs`) and renders it as RFC 3339, not the raw
+    /// unix-epoch string.
+    #[test]
+    fn status_text_renders_last_event_at_as_rfc3339_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f():\n    return 1\n");
+
+        let state = indexed_state(root);
+        state
+            .store
+            .lock()
+            .unwrap()
+            .set_meta("last_event_at", "1753488000")
+            .unwrap();
+
+        let text = state.status_text().unwrap();
+        assert!(
+            text.contains("\nlast event: 2025-07-26T00:00:00Z"),
+            "got: {text:?}"
         );
     }
 
@@ -322,11 +431,16 @@ mod tests {
 
         let text = state.status_text().unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        // The freshness line is now second-to-last (last is role line)
-        let freshness_line = lines.get(lines.len() - 2).unwrap();
+        // freshness is always the third line: index, model, freshness, ...
+        let freshness_line = lines[2];
         assert!(
             freshness_line.starts_with("freshness: degraded (since "),
             "got: {freshness_line:?}"
+        );
+        assert!(
+            freshness_line.contains("Z)"),
+            "since must be rendered as an RFC 3339 UTC timestamp, not a raw \
+             unix-epoch number: {freshness_line:?}"
         );
         assert!(
             freshness_line.contains("re-run 'vexus index'"),
@@ -348,8 +462,8 @@ mod tests {
 
         let text = state.status_text().unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        // The freshness line is now second-to-last (last is role line)
-        let freshness_line = lines.get(lines.len() - 2).unwrap();
+        // freshness is always the third line: index, model, freshness, ...
+        let freshness_line = lines[2];
         assert!(
             freshness_line.starts_with("freshness: fresh (since "),
             "got: {freshness_line:?}"
@@ -451,5 +565,27 @@ mod tests {
             Some("⚠ index stale — results may miss recent changes"),
             "a long-Degraded store must render the header as Stale, not Degraded"
         );
+    }
+
+    /// Every vector here was cross-checked against `date -u -r <secs>
+    /// +%Y-%m-%dT%H:%M:%SZ` on macOS before being hardcoded — not just
+    /// hand-derived — per the Task 8 brief's instruction to verify rather
+    /// than assume. Covers the epoch, a recent date (the one the brief
+    /// itself names), a leap day, a non-midnight time crossing a
+    /// year/month/day boundary (1999-12-31 -> 2000-01-01 in UTC, one second
+    /// before that), and the mp>=10 branch of the civil-from-days algorithm
+    /// (November/December, and January/February needing the `y+1`
+    /// adjustment).
+    #[test]
+    fn epoch_to_rfc3339_matches_verified_date_u_output() {
+        for (secs, expected) in [
+            (0u64, "1970-01-01T00:00:00Z"),
+            (1_753_488_000, "2025-07-26T00:00:00Z"),
+            (1_709_208_000, "2024-02-29T12:00:00Z"),
+            (978_307_199, "2000-12-31T23:59:59Z"),
+            (2_147_483_647, "2038-01-19T03:14:07Z"),
+        ] {
+            assert_eq!(epoch_to_rfc3339(secs), expected, "secs = {secs}");
+        }
     }
 }
