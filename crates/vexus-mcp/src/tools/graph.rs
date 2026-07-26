@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use vexus_core::model::estimate_tokens;
-use vexus_core::query::EdgeHit;
+use vexus_core::query::{EdgeHit, IMPACT_ROW_CAP};
 
 use crate::format::render_edge_tree;
 use crate::state::AppState;
@@ -20,10 +20,6 @@ const DEFAULT_BUDGET_TOKENS: u32 = 4000;
 /// `callers_of`/`callees_of` row limit — generous enough for any real
 /// depth-1..3 fan-out, independent of `impact`'s much larger hard cap.
 const CALLERS_CALLEES_LIMIT: u32 = 50;
-/// Mirrors `vexus_core::query`'s internal `IMPACT_ROW_CAP`: `impact_of`
-/// truncates at exactly this many rows regardless of `max_depth`, so hitting
-/// it here means the true blast radius is larger than what's shown.
-const IMPACT_ROW_CAP: usize = 500;
 
 /// Stable-sort so unresolved rows (confidence `None`) land after resolved
 /// rows within the same depth, without disturbing the query's own
@@ -66,7 +62,7 @@ pub fn callers_text(
     let depth = depth.unwrap_or(1).clamp(1, 3);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let store = state.store.lock().expect("store mutex poisoned");
+    let store = state.lock_store();
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
         Err(text) => return text,
@@ -97,7 +93,7 @@ pub fn callees_text(
     let depth = depth.unwrap_or(1).clamp(1, 3);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let store = state.store.lock().expect("store mutex poisoned");
+    let store = state.lock_store();
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
         Err(text) => return text,
@@ -124,9 +120,9 @@ pub fn callees_text(
 /// description covers both, even though the plan's interface line only
 /// spelled out the call-graph half.
 pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> String {
-    let max_depth = max_depth.unwrap_or(5).clamp(1, 10);
+    let max_depth = max_depth.unwrap_or(5).clamp(1, 5);
 
-    let store = state.store.lock().expect("store mutex poisoned");
+    let store = state.lock_store();
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
         Err(text) => return text,
@@ -144,7 +140,7 @@ pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> St
     };
     drop(store);
 
-    let row_cap_hit = edges.len() >= IMPACT_ROW_CAP;
+    let row_cap_hit = edges.len() >= IMPACT_ROW_CAP as usize;
     let deepest = edges.iter().map(|e| e.depth).max().unwrap_or(0);
 
     let mut out = String::new();
@@ -400,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn impact_max_depth_clamped_to_10() {
+    fn impact_max_depth_clamped_to_5() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         chain_repo(root);
