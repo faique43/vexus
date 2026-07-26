@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecursiveMode, Watcher};
 use vexus_core::Store;
 use vexus_embed::Embedder;
@@ -58,27 +57,55 @@ fn mark_degraded(store: &mut Store) {
     let _ = store.set_meta("needs_reconcile", "1");
 }
 
-/// Bundles the gitignore-filtering state `normalize_event_paths` and
-/// `drain_and_apply` share across the whole life of the writer thread's
-/// event loop — grouped into one struct (rather than three loose
-/// parameters threaded through both functions) mainly to keep their
-/// argument lists small, but it also keeps the three pieces that only ever
-/// make sense *together* from drifting apart.
+/// Bundles the gitignore-filtering state `drain_and_apply` needs across the
+/// whole life of the writer thread's event loop.
 ///
 /// - `is_git_repo`: whether `root` is a git repo, checked once at watcher
 ///   start (item 1, P4 residual) — a root becoming (or ceasing to be) one
 ///   mid-run is out of scope for this fix.
-/// - `gitignore`: a matcher for `root`'s own top-level `.gitignore` only —
-///   the sole gitignore signal available for a non-git root, and the
-///   fallback for a git root when `git_check_ignore` itself fails. Rebuilt
-///   by `run_writer_inner` whenever a drained path is `.gitignore` itself.
+/// - `fallback`: an `ignore::IncrementalIgnore` — the *same* hierarchical,
+///   per-directory `.gitignore`-matching engine `pipeline::index_repo`'s
+///   full walk uses under the hood (`ignore::WalkBuilder`), just used here
+///   to check one already-known path at a time instead of walking a whole
+///   tree. It's the PRIMARY check for a non-git root (there's no `git
+///   check-ignore` to call there), and the FALLBACK for a git root when
+///   `git_check_ignore` itself fails. Rebuilt whenever a drained path is
+///   `.gitignore` itself — an `IncrementalIgnore` is a snapshot; per its own
+///   docs, edits to `.gitignore` files made after it's built are never
+///   observed.
+///
+///   Item 1 follow-up (P4 review): this replaces an earlier version that
+///   only ever consulted `root`'s own top-level `.gitignore` for a non-git
+///   root — so a live-created file under a *nested* `.gitignore` (e.g.
+///   `sub/.gitignore`) was indexed by the watcher even though a full
+///   `vexus index` (honoring nested `.gitignore`s via `require_git(false)`,
+///   item 1's other fix) would have skipped it. Reusing the real
+///   `ignore::WalkBuilder` machinery here — rather than hand-rolling a
+///   second, parallel hierarchy-walking implementation — is what actually
+///   guarantees the two can't drift apart on what "in scope" means.
 /// - `check_ignore_broken_logged`: set the first (and only the first) time
 ///   `git_check_ignore` fails during this thread's life, so a persistently
 ///   broken `git` doesn't spam stderr once per debounce cycle forever.
 struct GitignoreState {
     is_git_repo: bool,
-    gitignore: Gitignore,
+    fallback: ignore::IncrementalIgnore,
     check_ignore_broken_logged: bool,
+}
+
+/// Builds the `fallback` matcher for [`GitignoreState`] — configured
+/// identically to `pipeline::walk_repo_relative_files`'s own
+/// `ignore::WalkBuilder` (`hidden(false)`, `require_git(false)`) so the two
+/// can never drift apart on what ".gitignore" means for a given path.
+/// `root` must be the same absolute, canonicalized path the watcher thread
+/// itself uses — `IncrementalIgnore::matched` interprets paths as relative
+/// to it.
+fn build_fallback_matcher(root: &Path) -> ignore::IncrementalIgnore {
+    ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .build_matchers()
+        .pop()
+        .expect("WalkBuilder::build_matchers returns exactly one matcher per configured root")
 }
 
 /// Turn a raw `notify::Event`'s (absolute) paths into repo-relative,
@@ -87,16 +114,11 @@ struct GitignoreState {
 /// ignored up front (no paths returned) — they fire on reads, not writes,
 /// and carry no information `update_file` needs to act on.
 ///
-/// Gitignore filtering itself does NOT happen here (item 1, P4 residual):
-/// in a git repo, it's done once per drain batch via [`git_check_ignore`],
-/// which covers nested `.gitignore`s, `.git/info/exclude`, and the global
-/// excludesfile — all of which this per-event, root-`.gitignore`-only
-/// matcher misses. For a non-git directory (no authoritative `git
-/// check-ignore` to call), `gi.gitignore` is still applied right here,
-/// since that's the only gitignore signal available at all for a non-git
-/// root; see `drain_and_apply`'s `is_git_repo` branch for where the
-/// git-repo case gets its own filtering instead.
-fn normalize_event_paths(root: &Path, event: &notify::Event, gi: &GitignoreState) -> Vec<PathBuf> {
+/// Gitignore filtering does NOT happen here (item 1, P4 residual): it's
+/// done once per drain batch instead, in `drain_and_apply`, uniformly for
+/// both the git-repo case (`git_check_ignore`) and the non-git/fallback
+/// case (`GitignoreState::fallback`) — see that function's doc comment.
+fn normalize_event_paths(root: &Path, event: &notify::Event) -> Vec<PathBuf> {
     if matches!(event.kind, notify::EventKind::Access(_)) {
         return Vec::new();
     }
@@ -114,16 +136,7 @@ fn normalize_event_paths(root: &Path, event: &notify::Event, gi: &GitignoreState
             {
                 return None;
             }
-            let rel = PathBuf::from(rel);
-            if !gi.is_git_repo
-                && gi
-                    .gitignore
-                    .matched_path_or_any_parents(&rel, false)
-                    .is_ignore()
-            {
-                return None;
-            }
-            Some(rel)
+            Some(PathBuf::from(rel))
         })
         .collect()
 }
@@ -133,14 +146,16 @@ fn normalize_event_paths(root: &Path, event: &notify::Event, gi: &GitignoreState
 /// once per path) — cheap enough per drain, and the only way to get the
 /// *authoritative* answer `pipeline::index_repo`'s full walk relies on
 /// (nested `.gitignore`s, `.git/info/exclude`, the global excludesfile),
-/// none of which the watcher's own lightweight root-`.gitignore` matcher
-/// covers. Paths are written to stdin NUL-separated (`-z` on both ends) so a
-/// filename containing a newline can't corrupt the split.
+/// none of which `GitignoreState::fallback` covers (it's built with
+/// `require_git(false)`, which — see `build_fallback_matcher` — also turns
+/// off `.git/info/exclude`/global-excludes honoring). Paths are written to
+/// stdin NUL-separated (`-z` on both ends) so a filename containing a
+/// newline can't corrupt the split.
 ///
 /// Returns the ignored subset on success, or `None` if the subprocess itself
 /// failed — `git` missing from `PATH`, `root` not a valid repository despite
 /// having a `.git` entry, or any other non-{0,1} exit — so the caller can
-/// fall back to the root-matcher uniformly rather than needing to
+/// fall back to `GitignoreState::fallback` uniformly rather than needing to
 /// distinguish failure modes. Per `git check-ignore`'s documented exit-code
 /// convention: `0` means at least one given path is ignored, `1` means none
 /// are (routine, not a failure), anything else (notably `128`, a fatal
@@ -194,33 +209,6 @@ fn git_check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> 
     }
 }
 
-/// Builds a `.gitignore`-aware matcher for `root`'s own top-level
-/// `.gitignore` file (not nested `.gitignore`s, `.git/info/exclude`, or the
-/// global gitignore — narrower than `pipeline::walk_repo_relative_files`'s
-/// full `ignore::WalkBuilder`, but covers the common case of a project-root
-/// `.gitignore` for build output, dependency directories, etc.). Rebuilt
-/// live by `run_writer` whenever a drained path is `.gitignore` itself, so
-/// edits to it take effect without a restart.
-///
-/// A missing or unreadable `.gitignore` degrades to "nothing ignored"
-/// rather than an error — the watcher must never refuse to run over this.
-fn build_gitignore(root: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(root);
-    let gi_path = root.join(".gitignore");
-    if gi_path.exists() {
-        if let Some(e) = builder.add(&gi_path) {
-            eprintln!("vexus: failed to parse {}: {e}", gi_path.display());
-        }
-    }
-    builder.build().unwrap_or_else(|e| {
-        eprintln!(
-            "vexus: failed to build gitignore matcher for {}: {e}",
-            root.display()
-        );
-        Gitignore::empty()
-    })
-}
-
 /// After a reconcile pass, drain whatever's left of the embedding backlog —
 /// chunks `reconcile`'s own per-file `update_file` calls never touch,
 /// because `update_file` only re-embeds files it actually reindexed (a
@@ -268,24 +256,38 @@ fn drain_embed_backlog(store: &mut Store, embedder: Option<&dyn Embedder>) {
 /// case means the reconcile/index pass itself owns when it transitions to
 /// `Fresh` (or `Degraded`) once it actually completes.
 ///
+/// Filters `ready` through `gi.fallback` (`ignore::IncrementalIgnore`),
+/// keeping only the paths it does NOT consider ignored. A plain function
+/// (rather than a closure inline at each call site) so it takes its own
+/// `&mut GitignoreState` borrow each time it's called, rather than one
+/// long-lived closure-captured borrow that would conflict with
+/// `drain_and_apply`'s own `gi.check_ignore_broken_logged = true` write in
+/// between the two places this needs calling.
+fn filter_via_fallback<'a>(gi: &mut GitignoreState, ready: &'a [PathBuf]) -> Vec<&'a PathBuf> {
+    ready
+        .iter()
+        .filter(|p| !gi.fallback.matched(p, false).is_ignore())
+        .collect()
+}
+
 /// Returns whatever it drained (possibly empty) so callers can react to
 /// *which* paths just settled — `run_writer` uses this to notice a
-/// `.gitignore` edit and rebuild its gitignore matcher (finding C2).
+/// `.gitignore` edit and rebuild `GitignoreState::fallback` (finding C2).
 ///
-/// Item 1 (P4 residual): in a git repo (`is_git_repo`), the drained batch is
-/// filtered through [`git_check_ignore`] before any of it reaches
-/// `update_file` — the authoritative check `pipeline::index_repo`'s full
-/// walk is already held to, covering nested `.gitignore`s,
-/// `.git/info/exclude`, and the global excludesfile alike (none of which
-/// `normalize_event_paths`'s lightweight root-matcher can see). If that
-/// subprocess itself fails, this falls back to `gitignore` (the root-only
-/// matcher) instead — logging the fallback exactly once via
-/// `check_ignore_broken_logged` rather than on every single drain, so a
-/// persistently broken `git` (missing from `PATH`, say) doesn't spam
-/// stderr once per debounce cycle for the rest of this thread's life. A
-/// non-git root skips this filtering step entirely: `normalize_event_paths`
-/// already applied the root-matcher when the event first arrived, so
-/// `ready` is already in scope.
+/// Item 1 (P4 residual): every drained batch is filtered for gitignore
+/// scope before any of it reaches `update_file`.
+///
+/// - In a git repo (`gi.is_git_repo`), the batch goes through
+///   [`git_check_ignore`] first — the authoritative answer
+///   `pipeline::index_repo`'s full walk is already held to (nested
+///   `.gitignore`s, `.git/info/exclude`, the global excludesfile). If that
+///   subprocess itself fails, this falls back to `gi.fallback` instead —
+///   logging the fallback exactly once via `check_ignore_broken_logged`
+///   rather than on every single drain, so a persistently broken `git`
+///   (missing from `PATH`, say) doesn't spam stderr for the rest of this
+///   thread's life.
+/// - For a non-git root (no `git check-ignore` to call at all), `gi.fallback`
+///   is the only check, and the primary one — not a degraded fallback.
 fn drain_and_apply(
     store: &mut Store,
     debouncer: &mut Debouncer,
@@ -305,23 +307,16 @@ fn drain_and_apply(
             None => {
                 if !gi.check_ignore_broken_logged {
                     eprintln!(
-                        "vexus: git check-ignore failed; falling back to the root .gitignore \
-                         matcher until the next successful drain"
+                        "vexus: git check-ignore failed; falling back to the built-in \
+                         .gitignore matcher until the next successful drain"
                     );
                     gi.check_ignore_broken_logged = true;
                 }
-                ready
-                    .iter()
-                    .filter(|p| {
-                        !gi.gitignore
-                            .matched_path_or_any_parents(p, false)
-                            .is_ignore()
-                    })
-                    .collect()
+                filter_via_fallback(gi, &ready)
             }
         }
     } else {
-        ready.iter().collect()
+        filter_via_fallback(gi, &ready)
     };
 
     let mut any_failed = false;
@@ -476,7 +471,7 @@ fn run_writer_inner(
     // out of scope for this fix.
     let mut gi = GitignoreState {
         is_git_repo: root.join(".git").exists(),
-        gitignore: build_gitignore(&root),
+        fallback: build_fallback_matcher(&root),
         check_ignore_broken_logged: false,
     };
     let mut debouncer = Debouncer::default();
@@ -491,7 +486,7 @@ fn run_writer_inner(
         match rx.recv_timeout(RECV_TIMEOUT) {
             Ok(Ok(event)) => {
                 let now = Instant::now();
-                for rel in normalize_event_paths(&root, &event, &gi) {
+                for rel in normalize_event_paths(&root, &event) {
                     debouncer.push(rel, now);
                 }
             }
@@ -518,7 +513,7 @@ fn run_writer_inner(
             .iter()
             .any(|p| p.file_name().is_some_and(|n| n == ".gitignore"))
         {
-            gi.gitignore = build_gitignore(&root);
+            gi.fallback = build_fallback_matcher(&root);
         }
 
         tick += 1;
@@ -909,6 +904,166 @@ mod tests {
         );
     }
 
+    /// Recursively copies every file under `src` into `dst`, skipping
+    /// `.vexus` — used below to prove the live watcher's final on-disk state
+    /// (post-run) converges with what a fresh `index_repo` full walk over
+    /// the *exact same files* produces, without the copy's own `.vexus`
+    /// directory (a different index entirely) getting in the way.
+    fn copy_tree_excluding_vexus(src: &Path, dst: &Path) {
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if name == ".vexus" {
+                continue;
+            }
+            let src_path = entry.path();
+            let dst_path = dst.join(&name);
+            if entry.file_type().unwrap().is_dir() {
+                std::fs::create_dir_all(&dst_path).unwrap();
+                copy_tree_excluding_vexus(&src_path, &dst_path);
+            } else {
+                std::fs::copy(&src_path, &dst_path).unwrap();
+            }
+        }
+    }
+
+    /// P4 review finding: the non-git watcher path only ever consulted
+    /// `root`'s own top-level `.gitignore`, so a live-created file under a
+    /// *nested* `.gitignore` (e.g. `sub/.gitignore`) got indexed by the
+    /// watcher even though a full `vexus index` (which honors nested
+    /// `.gitignore`s via `require_git(false)`, item 1's other fix) would
+    /// have skipped it — the exact flip-flop this whole task exists to
+    /// close. This is the live, non-git counterpart to
+    /// `watcher_honors_a_nested_gitignore_in_a_real_git_repo` above, and
+    /// goes one step further: after the live watcher run, it copies the
+    /// resulting file tree and runs a completely independent full
+    /// `index_repo` over it, proving the two converge on the same
+    /// structural state across the *real* `notify`-driven event path (not
+    /// `update_file` driven directly, the way `pipeline.rs`'s
+    /// `index_repo_and_per_file_update_file_converge_on_the_same_final_state`
+    /// test does it).
+    #[test]
+    fn watcher_honors_a_nested_gitignore_in_a_non_git_repo_and_converges_with_a_full_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        assert!(!root.join(".git").exists());
+
+        write(&root, ".gitignore", "build/\n");
+        write(&root, "sub/.gitignore", "*.gen.py\n");
+        write(&root, "a.py", "def helper():\n    return 1\n");
+
+        let db_path = root.join(".vexus/index.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            crate::pipeline::index_repo(&root, &mut store).unwrap();
+        }
+
+        let writer_store = Store::open(&db_path).unwrap();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let handle = spawn_watcher(root.clone(), writer_store, None, shutdown_rx);
+
+        // Give the OS watch a moment to register before writing.
+        thread::sleep(Duration::from_millis(200));
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(
+            root.join("build/a.py"),
+            "def ignored_by_root():\n    return 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sub/x.gen.py"),
+            "def ignored_by_nested():\n    return 2\n",
+        )
+        .unwrap();
+        let sentinel = root.join("sub/ok.py");
+        std::fs::write(&sentinel, "def live_symbol():\n    return 3\n").unwrap();
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(5);
+        let mut nudged = false;
+        let mut sentinel_seen = false;
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(150));
+
+            // Same macOS FSEvents flakiness workaround used elsewhere in
+            // this file.
+            if !nudged && start.elapsed() >= Duration::from_secs(1) {
+                let _ =
+                    std::fs::write(&sentinel, "def live_symbol():\n    return 3\n    # nudge\n");
+                nudged = true;
+            }
+
+            let Ok(reader) = Store::open_read_only(&db_path) else {
+                continue;
+            };
+            if let Ok(Resolution::Exact(_)) = reader.resolve_symbol("live_symbol") {
+                sentinel_seen = true;
+                break;
+            }
+        }
+
+        drop(shutdown_tx);
+        handle.join().unwrap();
+
+        assert!(
+            sentinel_seen,
+            "watcher did not pick up the non-ignored sub/ok.py within 5s"
+        );
+
+        let reader = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(
+            reader.file_hash("build/a.py").unwrap(),
+            None,
+            "a root-.gitignore'd file must never be indexed by the live watcher"
+        );
+        assert_eq!(
+            reader.file_hash("sub/x.gen.py").unwrap(),
+            None,
+            "a file under a NESTED .gitignore must never be indexed by the live watcher \
+             in a non-git directory — this is the exact bug this test guards against"
+        );
+        assert!(
+            reader.file_hash("sub/ok.py").unwrap().is_some(),
+            "the non-ignored sentinel must be indexed"
+        );
+
+        // Convergence: copy the watcher-built tree's exact files (skipping
+        // .vexus) and run a completely independent full index_repo over the
+        // copy, then compare structural counts against the live watcher's
+        // own final state.
+        let copy_dir = tempfile::tempdir().unwrap();
+        let copy_root = copy_dir.path();
+        copy_tree_excluding_vexus(&root, copy_root);
+
+        let mut copy_store = Store::open(&copy_root.join(".vexus/index.db")).unwrap();
+        let report = crate::pipeline::index_repo(copy_root, &mut copy_store).unwrap();
+        assert_eq!(
+            report.indexed, 2,
+            "the full reindex of the copy must index exactly a.py and sub/ok.py — both \
+             .gitignore files are unsupported (not source), and build/a.py / sub/x.gen.py \
+             stay excluded by the same root and nested .gitignore rules"
+        );
+
+        let watcher_counts = reader.counts().unwrap();
+        let full_counts = copy_store.counts().unwrap();
+        assert_eq!(
+            watcher_counts.files, full_counts.files,
+            "files count must match across the live-watcher and full-reindex paths"
+        );
+        assert_eq!(
+            watcher_counts.symbols, full_counts.symbols,
+            "symbols count must match across the live-watcher and full-reindex paths"
+        );
+        assert_eq!(
+            watcher_counts.edges, full_counts.edges,
+            "edges count must match across the live-watcher and full-reindex paths"
+        );
+        assert_eq!(
+            watcher_counts.chunks, full_counts.chunks,
+            "chunks count must match across the live-watcher and full-reindex paths"
+        );
+    }
+
     /// Item 3 (P4 residual): a fresh writer-thread start must clear
     /// `last_event_at` and reset `last_index_failed` to `0`, even with zero
     /// filesystem events — both keys otherwise carry forward stale meaning
@@ -977,7 +1132,7 @@ mod tests {
             debouncer.push(PathBuf::from("a.py"), now);
             let mut gi = GitignoreState {
                 is_git_repo: false,
-                gitignore: Gitignore::empty(),
+                fallback: build_fallback_matcher(root),
                 check_ignore_broken_logged: false,
             };
             drain_and_apply(
@@ -1017,7 +1172,7 @@ mod tests {
             debouncer.push(PathBuf::from("a.py"), now);
             let mut gi = GitignoreState {
                 is_git_repo: false,
-                gitignore: Gitignore::empty(),
+                fallback: build_fallback_matcher(root),
                 check_ignore_broken_logged: false,
             };
             drain_and_apply(
