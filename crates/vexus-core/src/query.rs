@@ -12,7 +12,7 @@ const NAME_MATCH_LIMIT: i64 = 11;
 const SUGGESTION_LIMIT: i64 = 5;
 /// Hard row cap for `impact_of`, independent of `max_depth`: a highly
 /// connected graph must never return an unbounded result set.
-const IMPACT_ROW_CAP: u32 = 500;
+pub const IMPACT_ROW_CAP: u32 = 500;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolInfo {
@@ -312,12 +312,29 @@ impl Store {
     }
 
     /// Shared recursive-caller walk backing `callers_of` and `impact_of`.
+    ///
+    /// The recursive part (`reach`) tracks only `(id, depth)` and dedupes
+    /// with `UNION` (not `UNION ALL`): it enumerates reachable *nodes*, not
+    /// every distinct call *path* into them. A dense, mutually-calling
+    /// graph has exponentially many paths but only linearly many nodes, so
+    /// this is the difference between a sub-10ms query and a multi-second
+    /// one that holds the store's global mutex the whole time. A node can
+    /// still legitimately appear at more than one depth (reached via a
+    /// shorter path and a longer one) — that's a distinct `(id, depth)`
+    /// tuple each time, so `UNION` doesn't collapse it away.
+    ///
     /// Depth 1 seeds from edges resolved to `symbol_id` plus unresolved
     /// (dst_id NULL) edges whose `dst_name` suffix-matches `name`; deeper
     /// levels only follow resolved edges (`e.dst_id = <known caller id>`
     /// can never match a NULL dst_id), since an unresolved edge's caller is
     /// still a real symbol id (src_id) — it's just that specific edge into
     /// the previous frontier that didn't resolve.
+    ///
+    /// `via_name`/`confidence` aren't part of `reach` (they're per-edge, not
+    /// per-node); the outer `SELECT` re-joins the edge(s) that could have
+    /// produced each `(node, depth)` pair and picks the one with the
+    /// smallest edge id, purely for a deterministic single answer — any one
+    /// of them is an equally valid "how did we get here".
     fn walk_callers(
         &self,
         symbol_id: i64,
@@ -326,27 +343,41 @@ impl Store {
         row_cap: u32,
     ) -> Result<Vec<EdgeHit>> {
         let max_depth = max_depth.max(1);
-        let suffix = suffix_match_sql("e.dst_name", "?2");
+        let seed_suffix = suffix_match_sql("e.dst_name", "?2");
+        let pick_suffix = suffix_match_sql("e2.dst_name", "?2");
         let sql = format!(
-            "WITH RECURSIVE callers(caller_id, via_name, confidence, resolved, depth) AS (
-                SELECT e.src_id, e.dst_name, e.confidence, (e.dst_id IS NOT NULL), 1
+            "WITH RECURSIVE reach(id, depth) AS (
+                SELECT e.src_id, 1
                 FROM edges e
                 WHERE e.kind = 'calls'
-                  AND (e.dst_id = ?1 OR (e.dst_id IS NULL AND {suffix}))
+                  AND (e.dst_id = ?1 OR (e.dst_id IS NULL AND {seed_suffix}))
 
-                UNION ALL
+                UNION
 
-                SELECT e.src_id, e.dst_name, e.confidence, 1, c.depth + 1
+                SELECT e.src_id, r.depth + 1
                 FROM edges e
-                JOIN callers c ON e.dst_id = c.caller_id
-                WHERE e.kind = 'calls' AND c.depth < ?3
+                JOIN reach r ON e.dst_id = r.id
+                WHERE e.kind = 'calls' AND r.depth < ?3
             )
             SELECT s.id, s.name, s.qualname, s.kind, s.sig, f.path, s.start_line, s.end_line,
-                   callers.via_name, callers.confidence, callers.resolved, callers.depth
-            FROM callers
-            JOIN symbols s ON s.id = callers.caller_id
+                   e.dst_name, e.confidence, (e.dst_id IS NOT NULL), reach.depth
+            FROM reach
+            JOIN symbols s ON s.id = reach.id
             JOIN files f ON f.id = s.file_id
-            ORDER BY callers.depth ASC, s.id ASC
+            JOIN edges e ON e.id = (
+                SELECT MIN(e2.id)
+                FROM edges e2
+                WHERE e2.src_id = reach.id
+                  AND e2.kind = 'calls'
+                  AND (
+                    (reach.depth = 1 AND (e2.dst_id = ?1 OR (e2.dst_id IS NULL AND {pick_suffix})))
+                    OR
+                    (reach.depth > 1 AND e2.dst_id IN (
+                        SELECT r2.id FROM reach r2 WHERE r2.depth = reach.depth - 1
+                    ))
+                  )
+            )
+            ORDER BY reach.depth ASC, s.id ASC
             LIMIT ?4"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -886,5 +917,63 @@ mod tests {
         // the impact_of-specific hard cap.
         let limited = store.callers_of(target_id, 1, 10).unwrap();
         assert_eq!(limited.len(), 10);
+    }
+
+    /// Regression for the recursive-CTE rewrite: a densely mutually-calling
+    /// graph (every one of 26 functions calls every other one) is the worst
+    /// case for a recursive CTE that enumerates call *paths* instead of
+    /// reachable *nodes* — path count blows up combinatorially with depth
+    /// even though the node count stays flat. Before the `reach(id, depth)`
+    /// rewrite this took ~21s at depth 5 on a graph this size (holding the
+    /// store's global mutex the whole time); the node-deduped CTE should
+    /// finish in low milliseconds.
+    #[test]
+    fn impact_of_dense_mutual_graph_completes_quickly_and_stays_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = Box::leak(Box::new(dir));
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+
+        const N: usize = 26;
+        let symbols: Vec<NewSymbol> = (0..N)
+            .map(|i| fn_sym(&format!("f{i}"), &format!("dense.f{i}"), Some(0)))
+            .collect();
+        // Every function calls every other function — the densest possible
+        // call graph on N nodes.
+        let edges: Vec<NewEdge> = (0..N)
+            .flat_map(|i| {
+                (0..N).filter(move |&j| j != i).map(move |j| NewEdge {
+                    src: i,
+                    kind: EdgeKind::Calls,
+                    dst_name: format!("f{j}"),
+                    dst_arity: Some(0),
+                })
+            })
+            .collect();
+        let idx = FileIndex {
+            symbols,
+            edges,
+            chunks: vec![],
+        };
+        store
+            .replace_file("dense.py", "python", &[9u8; 32], &idx)
+            .unwrap();
+        store.resolve_all_edges().unwrap();
+
+        let target_id = id_of(&store, "dense.f0");
+
+        let start = std::time::Instant::now();
+        let hits = store.impact_of(target_id, 5).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs_f64() < 2.0,
+            "impact_of on a dense {N}-node mutual-call graph at depth 5 must stay fast \
+             (node-deduped CTE, not path enumeration); took {elapsed:?}"
+        );
+        assert!(
+            hits.len() <= super::IMPACT_ROW_CAP as usize,
+            "result must still respect the row cap, got {}",
+            hits.len()
+        );
     }
 }
