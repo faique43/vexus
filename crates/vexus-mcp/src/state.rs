@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 use vexus_embed::Embedder;
+use vexus_watch::{effective_freshness, Freshness};
 #[cfg(test)]
-use vexus_watch::pipeline;
+use vexus_watch::{pipeline, set_freshness};
 
 pub struct AppState {
     pub store: Mutex<vexus_core::Store>,
@@ -85,21 +86,64 @@ impl AppState {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
+        // Unlike the `⚠ index ...` header (which prepends to the other 6
+        // tools' responses), `status` is the one place that always shows the
+        // real state plainly — even when Fresh — since checking freshness is
+        // exactly what a caller reaches for this tool to do.
+        let freshness = effective_freshness(&store)?;
+        let since = store.meta("freshness_since")?;
+        let mut freshness_line = format!("freshness: {}", freshness.as_str());
+        if let Some(since) = &since {
+            freshness_line.push_str(&format!(" (since {since})"));
+        }
+        if freshness != Freshness::Fresh {
+            freshness_line
+                .push_str(" — results may miss recent changes; re-run 'vexus index' after big changes if this persists");
+        }
+
         let mut lines = vec![
             format!(
                 "index: {} files, {} symbols, {} edges, {} chunks",
                 c.files, c.symbols, c.edges, c.chunks
             ),
-            format!(
-                "model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"
-            ),
-            "freshness: static (watcher lands in a future release — re-run 'vexus index' after big changes)".to_string(),
+            format!("model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"),
+            freshness_line,
         ];
         if failed > 0 {
             lines.push(format!("skipped files: {failed}"));
         }
         Ok(lines.join("\n"))
     }
+}
+
+/// The `⚠ index {state}{detail} — results may miss recent changes` warning
+/// line prepended (as `header + "\n\n"`) to every non-`status` tool's
+/// response when the index isn't `Fresh` (see the plan's Global
+/// Constraints). `None` on `Fresh` — the common case — so call sites skip
+/// the prepend entirely rather than concatenating an empty string.
+///
+/// `detail` is ` ({done}/{total} files)` when the state is `Reconciling` and
+/// `meta('reconcile_progress')` (written by the reconcile pass as
+/// `"done/total"`) is present; otherwise empty.
+pub fn freshness_header(store: &vexus_core::Store) -> Option<String> {
+    let state = effective_freshness(store).unwrap_or(Freshness::Degraded);
+    if state == Freshness::Fresh {
+        return None;
+    }
+    let detail = if state == Freshness::Reconciling {
+        store
+            .meta("reconcile_progress")
+            .ok()
+            .flatten()
+            .map(|progress| format!(" ({progress} files)"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let state_str = state.as_str();
+    Some(format!(
+        "⚠ index {state_str}{detail} — results may miss recent changes"
+    ))
 }
 
 #[cfg(test)]
@@ -126,11 +170,15 @@ mod tests {
         }
     }
 
-    /// Exact-format regression test per the Task 3 brief: the four line
-    /// shapes (index counts / model+backlog+vec / static freshness line /
-    /// optional skipped-files line), built from the store's own counts so
-    /// the assertion tracks real indexed content rather than a hardcoded
-    /// guess at tree-sitter's symbol/chunk output for this fixture.
+    /// Exact-format regression test per the Task 3 brief (freshness line
+    /// updated by Task 2 to show the real state): the four line shapes
+    /// (index counts / model+backlog+vec / real freshness line / optional
+    /// skipped-files line), built from the store's own counts so the
+    /// assertion tracks real indexed content rather than a hardcoded guess
+    /// at tree-sitter's symbol/chunk output for this fixture. `indexed_state`
+    /// never calls `set_freshness`, so this store is a "nothing has ever
+    /// touched freshness" DB — `effective_freshness` reads that as `Fresh`,
+    /// with no `since` suffix and no re-run hint.
     #[test]
     fn status_text_matches_exact_line_format_with_no_failures() {
         let dir = tempfile::tempdir().unwrap();
@@ -148,7 +196,7 @@ mod tests {
         let expected = format!(
             "index: {} files, {} symbols, {} edges, {} chunks\n\
              model: mock  embed backlog: 0  vec: available\n\
-             freshness: static (watcher lands in a future release — re-run 'vexus index' after big changes)",
+             freshness: fresh",
             c.files, c.symbols, c.edges, c.chunks
         );
         assert_eq!(text, expected);
@@ -245,6 +293,147 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, &second),
             "embedder() must return the same Arc after the first call, not rebuild"
+        );
+    }
+
+    #[test]
+    fn status_text_shows_real_non_fresh_state_with_since_and_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f():\n    return 1\n");
+
+        let state = indexed_state(root);
+        {
+            let mut store = state.store.lock().unwrap();
+            set_freshness(&mut store, Freshness::Degraded).unwrap();
+        }
+
+        let text = state.status_text().unwrap();
+        let freshness_line = text.lines().last().unwrap();
+        assert!(
+            freshness_line.starts_with("freshness: degraded (since "),
+            "got: {freshness_line:?}"
+        );
+        assert!(
+            freshness_line.contains("re-run 'vexus index'"),
+            "non-fresh state must keep the re-run hint: {freshness_line:?}"
+        );
+    }
+
+    #[test]
+    fn status_text_omits_the_rerun_hint_when_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f():\n    return 1\n");
+
+        let state = indexed_state(root);
+        {
+            let mut store = state.store.lock().unwrap();
+            set_freshness(&mut store, Freshness::Fresh).unwrap();
+        }
+
+        let text = state.status_text().unwrap();
+        let freshness_line = text.lines().last().unwrap();
+        assert!(
+            freshness_line.starts_with("freshness: fresh (since "),
+            "got: {freshness_line:?}"
+        );
+        assert!(
+            !freshness_line.contains("re-run 'vexus index'"),
+            "Fresh must not carry the re-run hint: {freshness_line:?}"
+        );
+    }
+
+    #[test]
+    fn freshness_header_is_none_when_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        assert_eq!(freshness_header(&store), None);
+    }
+
+    #[test]
+    fn freshness_header_exact_text_for_each_non_fresh_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+
+        for (state, expected) in [
+            (
+                Freshness::Indexing,
+                "⚠ index indexing — results may miss recent changes",
+            ),
+            (
+                Freshness::Reconciling,
+                "⚠ index reconciling — results may miss recent changes",
+            ),
+            (
+                Freshness::Degraded,
+                "⚠ index degraded — results may miss recent changes",
+            ),
+            (
+                Freshness::Stale,
+                "⚠ index stale — results may miss recent changes",
+            ),
+        ] {
+            set_freshness(&mut store, state).unwrap();
+            assert_eq!(
+                freshness_header(&store).as_deref(),
+                Some(expected),
+                "state {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_header_includes_reconcile_progress_detail_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        set_freshness(&mut store, Freshness::Reconciling).unwrap();
+        store.set_meta("reconcile_progress", "50/200").unwrap();
+
+        assert_eq!(
+            freshness_header(&store).as_deref(),
+            Some("⚠ index reconciling (50/200 files) — results may miss recent changes")
+        );
+    }
+
+    #[test]
+    fn freshness_header_omits_progress_detail_for_non_reconciling_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        set_freshness(&mut store, Freshness::Degraded).unwrap();
+        // Stale `reconcile_progress` left over from an earlier reconcile
+        // pass must not leak into an unrelated state's header.
+        store.set_meta("reconcile_progress", "50/200").unwrap();
+
+        assert_eq!(
+            freshness_header(&store).as_deref(),
+            Some("⚠ index degraded — results may miss recent changes")
+        );
+    }
+
+    #[test]
+    fn freshness_header_reflects_effective_freshness_not_raw_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        set_freshness(&mut store, Freshness::Degraded).unwrap();
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        store
+            .set_meta("freshness_since", &since.to_string())
+            .unwrap();
+
+        assert_eq!(
+            freshness_header(&store).as_deref(),
+            Some("⚠ index stale — results may miss recent changes"),
+            "a long-Degraded store must render the header as Stale, not Degraded"
         );
     }
 }

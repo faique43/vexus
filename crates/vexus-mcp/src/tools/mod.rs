@@ -27,6 +27,21 @@ pub(crate) fn clamp_budget(requested: Option<u32>, default: u32) -> u32 {
     requested.unwrap_or(default).min(MAX_BUDGET_TOKENS)
 }
 
+/// Prepends the `⚠ index ...` freshness header (see
+/// `crate::state::freshness_header`) to a tool's rendered body, separated by
+/// a blank line, when `header` is `Some`. Every one of the 6 non-`status`
+/// tools computes its header once (via a single `freshness_header` call
+/// right after `lock_store_fresh`) and routes every return path — including
+/// error/not-found/no-match text — through this so the warning always
+/// appears whenever the index isn't fresh, not just on the "happy path"
+/// result.
+pub(crate) fn apply_header(header: Option<String>, body: String) -> String {
+    match header {
+        Some(h) => format!("{h}\n\n{body}"),
+        None => body,
+    }
+}
+
 /// Shared resolve step for every tool that needs an unambiguous symbol:
 /// `Exact` passes through as `Ok`; `Candidates`/`NotFound` render as the same
 /// guidance text `open` has always shown (candidates: locations + "narrow
@@ -103,5 +118,22 @@ mod tests {
     fn clamp_budget_caps_absurd_requests() {
         assert_eq!(clamp_budget(Some(u32::MAX), 4000), MAX_BUDGET_TOKENS);
         assert_eq!(clamp_budget(Some(50_000), 4000), MAX_BUDGET_TOKENS);
+    }
+
+    #[test]
+    fn apply_header_prepends_with_blank_line_when_some() {
+        let out = apply_header(
+            Some("⚠ index stale — results may miss recent changes".to_string()),
+            "body text".to_string(),
+        );
+        assert_eq!(
+            out,
+            "⚠ index stale — results may miss recent changes\n\nbody text"
+        );
+    }
+
+    #[test]
+    fn apply_header_passes_body_through_unchanged_when_none() {
+        assert_eq!(apply_header(None, "body text".to_string()), "body text");
     }
 }

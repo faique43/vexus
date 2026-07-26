@@ -10,8 +10,8 @@ use vexus_watch::pipeline;
 
 use crate::bundle::{pack, BundleItem};
 use crate::format::render_bundle;
-use crate::state::AppState;
-use crate::tools::{clamp_budget, resolve_or_text};
+use crate::state::{freshness_header, AppState};
+use crate::tools::{apply_header, clamp_budget, resolve_or_text};
 
 const DEFAULT_BUDGET_TOKENS: u32 = 6000;
 
@@ -19,25 +19,37 @@ const DEFAULT_BUDGET_TOKENS: u32 = 6000;
 pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> String {
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
+    // Locked up front — even the path-slice branch below (which never
+    // touches symbol/chunk tables) needs the freshness header, and this is
+    // the one lock scope the whole function shares.
+    let store = state.lock_store_fresh();
+    let fresh_header = freshness_header(&store);
+
     if let Some((rel_path, start, end)) = parse_path_slice(target) {
-        return open_path_slice(&state.root, rel_path, start, end, budget_tokens);
+        drop(store);
+        return apply_header(
+            fresh_header,
+            open_path_slice(&state.root, rel_path, start, end, budget_tokens),
+        );
     }
 
-    let store = state.lock_store_fresh();
     let info = match resolve_or_text(&store, target) {
         Ok(info) => info,
-        Err(text) => return text,
+        Err(text) => return apply_header(fresh_header, text),
     };
 
     let chunks = match store.symbol_source(info.id) {
         Ok(c) => c,
-        Err(e) => return format!("open error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("open error: {e:#}")),
     };
     drop(store);
     if chunks.is_empty() {
-        return format!(
-            "{} ({}:{}-{}) has no source chunks (likely a module or an empty body).",
-            info.qualname, info.path, info.start_line, info.end_line
+        return apply_header(
+            fresh_header,
+            format!(
+                "{} ({}:{}-{}) has no source chunks (likely a module or an empty body).",
+                info.qualname, info.path, info.start_line, info.end_line
+            ),
         );
     }
     let total_chunks = chunks.len();
@@ -67,7 +79,7 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
             total_chunks
         ));
     }
-    out
+    apply_header(fresh_header, out)
 }
 
 /// Recognizes the `path:start-end` form (equivalent to the regex

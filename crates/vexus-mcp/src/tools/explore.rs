@@ -26,8 +26,8 @@ use vexus_watch::pipeline;
 
 use crate::bundle::{pack, BundleItem};
 use crate::format::render_bundle;
-use crate::state::AppState;
-use crate::tools::{clamp_budget, embed_query};
+use crate::state::{freshness_header, AppState};
+use crate::tools::{apply_header, clamp_budget, embed_query};
 
 const DEFAULT_BUDGET_TOKENS: u32 = 8000;
 const ENTRY_LIMIT: u32 = 12;
@@ -42,20 +42,21 @@ const NO_MATCH_TEXT: &str = "nothing indexed matches that question — try 'sear
 /// Pure inner implementation of the `explore` tool.
 pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>) -> String {
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
-    let header = format!("explore: \"{question}\"\n\n");
+    let question_header = format!("explore: \"{question}\"\n\n");
 
     // Embed before locking: a real embedder's inference call must not hold
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, question);
 
     let store = state.lock_store_fresh();
+    let fresh_header = freshness_header(&store);
     let hits = match store.search_hybrid(question, query_vec.as_deref(), ENTRY_LIMIT) {
         Ok(h) => h,
-        Err(e) => return format!("explore error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("explore error: {e:#}")),
     };
 
     if hits.is_empty() {
-        return format!("{header}{NO_MATCH_TEXT}");
+        return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
 
     // Step 1: entry chunks as BundleItems, plus the deduped (symbol_id,
@@ -148,7 +149,10 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
 
     // Step 4: pack + render.
     let (selected, omitted) = pack(items, budget_tokens);
-    format!("{header}{}", render_bundle(&selected, &omitted))
+    apply_header(
+        fresh_header,
+        format!("{question_header}{}", render_bundle(&selected, &omitted)),
+    )
 }
 
 #[cfg(test)]
@@ -269,6 +273,35 @@ mod tests {
                 "explore: \"\"\n\nnothing indexed matches that question — try 'search' with \
                  distinctive words from the code, or 'status' to check index coverage."
             )
+        );
+    }
+
+    #[test]
+    fn explore_prepends_freshness_header_when_reconciling_absent_when_fresh() {
+        use vexus_watch::{set_freshness, Freshness};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        chain_repo(root);
+        let state = keyword_only_state(root);
+
+        let out_fresh = explore_text(&state, "alpha_process", None);
+        assert!(
+            !out_fresh.starts_with('\u{26a0}'),
+            "Fresh index must not carry the warning header: {out_fresh:?}"
+        );
+        assert!(out_fresh.starts_with("explore: \"alpha_process\"\n\n"));
+
+        {
+            let mut store = state.store.lock().unwrap();
+            set_freshness(&mut store, Freshness::Reconciling).unwrap();
+        }
+        let out_reconciling = explore_text(&state, "alpha_process", None);
+        assert!(
+            out_reconciling.starts_with(
+                "⚠ index reconciling — results may miss recent changes\n\nexplore: \"alpha_process\"\n\n"
+            ),
+            "got: {out_reconciling:?}"
         );
     }
 }

@@ -15,8 +15,8 @@ use vexus_core::query::{EdgeHit, IMPACT_ROW_CAP};
 use vexus_watch::pipeline;
 
 use crate::format::render_edge_tree;
-use crate::state::AppState;
-use crate::tools::{clamp_budget, resolve_or_text};
+use crate::state::{freshness_header, AppState};
+use crate::tools::{apply_header, clamp_budget, resolve_or_text};
 
 const DEFAULT_BUDGET_TOKENS: u32 = 4000;
 /// `callers_of`/`callees_of` row limit — generous enough for any real
@@ -65,13 +65,14 @@ pub fn callers_text(
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
     let store = state.lock_store_fresh();
+    let fresh_header = freshness_header(&store);
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
-        Err(text) => return text,
+        Err(text) => return apply_header(fresh_header, text),
     };
     let mut edges = match store.callers_of(info.id, depth, CALLERS_CALLEES_LIMIT) {
         Ok(e) => e,
-        Err(e) => return format!("callers error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("callers error: {e:#}")),
     };
     drop(store);
 
@@ -82,7 +83,7 @@ pub fn callers_text(
         info.qualname,
         depth
     );
-    render_capped(header, &edges, budget_tokens)
+    apply_header(fresh_header, render_capped(header, &edges, budget_tokens))
 }
 
 /// Pure inner implementation of the `callees` tool.
@@ -96,13 +97,14 @@ pub fn callees_text(
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
     let store = state.lock_store_fresh();
+    let fresh_header = freshness_header(&store);
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
-        Err(text) => return text,
+        Err(text) => return apply_header(fresh_header, text),
     };
     let mut edges = match store.callees_of(info.id, depth, CALLERS_CALLEES_LIMIT) {
         Ok(e) => e,
-        Err(e) => return format!("callees error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("callees error: {e:#}")),
     };
     drop(store);
 
@@ -113,7 +115,7 @@ pub fn callees_text(
         info.qualname,
         depth
     );
-    render_capped(header, &edges, budget_tokens)
+    apply_header(fresh_header, render_capped(header, &edges, budget_tokens))
 }
 
 /// Pure inner implementation of the `impact` tool: the transitive caller
@@ -125,20 +127,21 @@ pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> St
     let max_depth = max_depth.unwrap_or(5).clamp(1, 5);
 
     let store = state.lock_store_fresh();
+    let fresh_header = freshness_header(&store);
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
-        Err(text) => return text,
+        Err(text) => return apply_header(fresh_header, text),
     };
     let edges = match store.impact_of(info.id, max_depth) {
         Ok(e) => e,
-        Err(e) => return format!("impact error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("impact error: {e:#}")),
     };
     // Only the incoming side matters for "blast radius" — files that import
     // this symbol's module (i.e. would be affected by changing it), not
     // modules this file itself imports.
     let (_outgoing, importers) = match store.imports_of(info.id) {
         Ok(v) => v,
-        Err(e) => return format!("impact error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("impact error: {e:#}")),
     };
     drop(store);
 
@@ -174,7 +177,7 @@ pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> St
     if row_cap_hit {
         out.push_str("(row cap reached — results truncated)\n");
     }
-    out
+    apply_header(fresh_header, out)
 }
 
 #[cfg(test)]

@@ -6,8 +6,8 @@ use vexus_core::model::estimate_tokens;
 #[cfg(test)]
 use vexus_watch::pipeline;
 
-use crate::state::AppState;
-use crate::tools::{clamp_budget, embed_query};
+use crate::state::{freshness_header, AppState};
+use crate::tools::{apply_header, clamp_budget, embed_query};
 
 const DEFAULT_LIMIT: u32 = 10;
 const MAX_LIMIT: u32 = 100;
@@ -32,15 +32,19 @@ pub fn search_text(
     let query_vec = embed_query(state, query);
 
     let store = state.lock_store_fresh();
+    let fresh_header = freshness_header(&store);
     let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
         Ok(hits) => hits,
-        Err(e) => return format!("search error: {e:#}"),
+        Err(e) => return apply_header(fresh_header, format!("search error: {e:#}")),
     };
     drop(store);
 
     if hits.is_empty() {
-        return format!(
-            "no matches for \"{query}\" — try broader terms, or 'explore' with a question."
+        return apply_header(
+            fresh_header,
+            format!(
+                "no matches for \"{query}\" — try broader terms, or 'explore' with a question."
+            ),
         );
     }
 
@@ -68,7 +72,7 @@ pub fn search_text(
         out.push_str(&line);
         used_tokens += cost;
     }
-    out
+    apply_header(fresh_header, out)
 }
 
 #[cfg(test)]
@@ -235,6 +239,41 @@ mod tests {
         assert!(
             out_zero.starts_with("1. "),
             "limit 0 must clamp to at least 1 result, got: {out_zero:?}"
+        );
+    }
+
+    #[test]
+    fn search_prepends_freshness_header_when_reconciling_absent_when_fresh() {
+        use vexus_watch::{set_freshness, Freshness};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "a.py",
+            "def compute_total(items):\n    return sum(items)\n",
+        );
+
+        let state = indexed_state(root);
+        let out_fresh = search_text(&state, "compute_total", None, None);
+        assert!(
+            !out_fresh.starts_with('\u{26a0}'),
+            "Fresh index must not carry the warning header: {out_fresh:?}"
+        );
+
+        {
+            let mut store = state.store.lock().unwrap();
+            set_freshness(&mut store, Freshness::Reconciling).unwrap();
+        }
+        let out_reconciling = search_text(&state, "compute_total", None, None);
+        assert!(
+            out_reconciling
+                .starts_with("⚠ index reconciling — results may miss recent changes\n\n"),
+            "got: {out_reconciling:?}"
+        );
+        assert!(
+            out_reconciling.contains("compute_total"),
+            "the actual result body must still follow the header: {out_reconciling:?}"
         );
     }
 }
