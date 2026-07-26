@@ -1,0 +1,10 @@
+---
+description: Prefer the vexus MCP tools for code navigation
+alwaysApply: true
+---
+
+This repo has a vexus code index (semantic + call graph) exposed as MCP tools.
+Before grep/file-scanning: `explore` answers "how/where/what-calls" questions in
+one call with verbatim source; `search` finds symbols by meaning; `open` fetches
+exact code; `callers`/`callees`/`impact` trace relationships; `status` shows
+index health. Grep is for exact strings, comments, config values, generated files.

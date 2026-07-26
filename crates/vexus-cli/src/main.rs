@@ -30,6 +30,14 @@ enum Cmd {
     },
     /// Run the MCP server over stdio (builds the index first if none exists)
     Serve { path: Option<PathBuf> },
+    /// Initialize steering packs for an agent (claude-code, cursor, or generic)
+    Init {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        force: bool,
+        path: Option<PathBuf>,
+    },
 }
 
 fn db_path(root: &Path) -> PathBuf {
@@ -41,6 +49,85 @@ fn open_store(root: &Path) -> Result<vexus_core::Store> {
     // self-ignoring dir, like target/
     std::fs::write(root.join(".vexus/.gitignore"), "*\n")?;
     Ok(store)
+}
+
+fn write_pack_file(path: &Path, content: &str, force: bool) -> Result<bool> {
+    if path.exists() && !force {
+        println!("skip: {}", path.display());
+        return Ok(false);
+    }
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(path, content)?;
+    println!("{}", path.display());
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o755);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
+    match agent {
+        "claude-code" => {
+            let plugin_root = root.join(".claude/plugins/vexus");
+
+            let plugin_json_content =
+                include_str!("../../../packs/claude-code/.claude-plugin/plugin.json");
+            let hooks_json_content = include_str!("../../../packs/claude-code/hooks/hooks.json");
+            let nudge_sh_content = include_str!("../../../packs/claude-code/hooks/nudge-grep.sh");
+            let skill_md_content = include_str!("../../../packs/claude-code/skills/vexus/SKILL.md");
+
+            write_pack_file(
+                &plugin_root.join(".claude-plugin/plugin.json"),
+                plugin_json_content,
+                force,
+            )?;
+            write_pack_file(
+                &plugin_root.join("hooks/hooks.json"),
+                hooks_json_content,
+                force,
+            )?;
+            let nudge_script = plugin_root.join("hooks/nudge-grep.sh");
+            write_pack_file(&nudge_script, nudge_sh_content, force)?;
+            set_executable(&nudge_script)?;
+            write_pack_file(
+                &plugin_root.join("skills/vexus/SKILL.md"),
+                skill_md_content,
+                force,
+            )?;
+
+            println!("\nAdd this to .mcp.json:");
+            println!(
+                r#"{{ "mcpServers": {{ "vexus": {{ "command": "vexus", "args": ["serve", "."] }} }} }}"#
+            );
+        }
+        "cursor" => {
+            let cursor_rules = root.join(".cursor/rules/vexus.mdc");
+            let mdc_content = include_str!("../../../packs/cursor/vexus.mdc");
+            write_pack_file(&cursor_rules, mdc_content, force)?;
+        }
+        "generic" => {
+            let generic_content = include_str!("../../../packs/generic/AGENTS-snippet.md");
+            println!("{}", generic_content);
+        }
+        _ => {
+            anyhow::bail!(
+                "Unknown agent: {}. Expected one of: claude-code, cursor, generic",
+                agent
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -184,6 +271,10 @@ fn main() -> Result<()> {
         Cmd::Serve { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             vexus_mcp::serve(root)?;
+        }
+        Cmd::Init { agent, force, path } => {
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            init_steering_packs(&agent, &root, force)?;
         }
     }
     Ok(())

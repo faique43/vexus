@@ -126,3 +126,159 @@ fn structural_only_mode_still_works() {
         .success()
         .stdout(predicate::str::contains("compute_backoff"));
 }
+
+#[test]
+fn init_cursor_writes_mdc_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "cursor", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mdc_path = root.join(".cursor/rules/vexus.mdc");
+    assert!(mdc_path.exists(), "cursor mdc file should exist");
+
+    let content = std::fs::read_to_string(&mdc_path).unwrap();
+    assert!(
+        content.contains("alwaysApply: true"),
+        "cursor file should contain alwaysApply: true"
+    );
+    assert!(
+        content.contains("vexus code index"),
+        "cursor file should contain vexus description"
+    );
+}
+
+#[test]
+fn init_claude_code_writes_all_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Check all expected files exist
+    let plugin_json = root.join(".claude/plugins/vexus/.claude-plugin/plugin.json");
+    let hooks_json = root.join(".claude/plugins/vexus/hooks/hooks.json");
+    let nudge_sh = root.join(".claude/plugins/vexus/hooks/nudge-grep.sh");
+    let skill_md = root.join(".claude/plugins/vexus/skills/vexus/SKILL.md");
+
+    assert!(plugin_json.exists(), "plugin.json should exist");
+    assert!(hooks_json.exists(), "hooks.json should exist");
+    assert!(nudge_sh.exists(), "nudge-grep.sh should exist");
+    assert!(skill_md.exists(), "SKILL.md should exist");
+
+    // Check hook script is executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&nudge_sh).unwrap().permissions();
+        assert!(
+            perms.mode() & 0o111 != 0,
+            "nudge-grep.sh should have execute bit set"
+        );
+    }
+}
+
+#[test]
+fn init_claude_code_without_force_skips_existing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // First run
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let plugin_json = root.join(".claude/plugins/vexus/.claude-plugin/plugin.json");
+    let original_content = std::fs::read_to_string(&plugin_json).unwrap();
+
+    // Second run without --force should skip
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skip").or(predicate::str::contains("Skip")));
+
+    // Content should be unchanged
+    let current_content = std::fs::read_to_string(&plugin_json).unwrap();
+    assert_eq!(
+        original_content, current_content,
+        "file should not be overwritten without --force"
+    );
+}
+
+#[test]
+fn init_claude_code_with_force_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // First run
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let plugin_json = root.join(".claude/plugins/vexus/.claude-plugin/plugin.json");
+
+    // Modify the file
+    std::fs::write(&plugin_json, "modified content").unwrap();
+    let modified_content = std::fs::read_to_string(&plugin_json).unwrap();
+    assert_eq!(modified_content, "modified content");
+
+    // Second run with --force should overwrite
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args([
+            "init",
+            "--agent",
+            "claude-code",
+            "--force",
+            root.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let current_content = std::fs::read_to_string(&plugin_json).unwrap();
+    assert_ne!(
+        current_content, "modified content",
+        "file should be overwritten with --force"
+    );
+    assert!(
+        current_content.contains("vexus"),
+        "file should contain original content"
+    );
+}
+
+#[test]
+fn init_generic_prints_to_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "generic", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("explore").and(predicate::str::contains("Code search")));
+
+    // Check no files were created
+    assert!(
+        !root.join(".cursor").exists(),
+        "no .cursor directory should be created"
+    );
+    assert!(
+        !root.join(".claude").exists(),
+        "no .claude directory should be created"
+    );
+}
