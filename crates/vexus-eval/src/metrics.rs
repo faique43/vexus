@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Running `(sum, count)` for a mean-of-per-query metric. `combine` pools two
 /// accumulators by adding both fields — see the module doc's aggregation
@@ -277,7 +277,7 @@ pub fn edge_counts(
 /// per corpus and for "overall". Field names are renamed on serialization to
 /// match the plan's literal metric names (`@` is a valid JSON string-key
 /// character).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MetricSet {
     #[serde(rename = "recall@5")]
     pub recall_at_5: f64,

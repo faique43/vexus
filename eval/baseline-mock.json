@@ -1,0 +1,32 @@
+{
+  "mode": "mock",
+  "per_corpus": {
+    "polyglot": {
+      "recall@5": 0.2308,
+      "recall@10": 0.5,
+      "mrr": 0.1156,
+      "ndcg@10": 0.1492,
+      "answer_in_bundle": 0.75,
+      "edge_precision": 0.8837,
+      "edge_recall": 0.9048
+    },
+    "pyapp": {
+      "recall@5": 0.3333,
+      "recall@10": 0.3333,
+      "mrr": 0.2056,
+      "ndcg@10": 0.2123,
+      "answer_in_bundle": 0.7,
+      "edge_precision": 0.8852,
+      "edge_recall": 0.9474
+    }
+  },
+  "overall": {
+    "recall@5": 0.2857,
+    "recall@10": 0.4107,
+    "mrr": 0.1638,
+    "ndcg@10": 0.1807,
+    "answer_in_bundle": 0.7222,
+    "edge_precision": 0.8846,
+    "edge_recall": 0.9293
+  }
+}

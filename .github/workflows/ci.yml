@@ -21,3 +21,19 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  eval-gate:
+    name: eval-gate (retrieval-metric ratchet)
+    runs-on: ubuntu-latest
+    env:
+      VEXUS_EMBEDDER: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compares this run's mock-mode metrics against the committed
+      # eval/baseline-mock.json; exits 1 (naming every regressed metric) if
+      # any of the 7 retrieval metrics dropped more than 0.02 absolute in
+      # any corpus or overall. Never runs --real (no model downloads in PR
+      # CI) — see eval/README.md for the pre-release --real --check workflow.
+      - run: cargo run -p vexus-eval -- check
