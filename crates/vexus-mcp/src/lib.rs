@@ -23,12 +23,17 @@ use crate::writer::{start_writer, WriterHandle};
 /// How long the reader (lock-loser) path waits, in total, at startup for
 /// the winner's very first index build to produce `index.db` before
 /// falling back to serving anyway with a not-yet-populated store (finding
-/// C3) — long enough to ride out any first-index build this tool is meant
-/// for; a repo whose very first index takes longer than this is rare
-/// enough that "serve now, keep retrying in the background" beats blocking
-/// `serve` from ever coming up at all.
+/// C3) — kept short, just a couple of seconds (finding D2, round 2): this
+/// wait runs *before* the MCP `initialize` handshake completes, and a
+/// client with its own (sometimes 30s or shorter) handshake timeout would
+/// see `serve` as unresponsive/dead if this blocked anywhere near that
+/// long — reintroducing C3's exact symptom through a different route. The
+/// background thread (`fill_store_when_ready`) owns the actual long tail;
+/// this bounded wait only exists to skip the "index not ready" text
+/// entirely for the common case where the winner's first index finishes
+/// near-instantly.
 const READER_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
-const READER_STARTUP_RETRY_ATTEMPTS: u32 = 60; // 60 * 500ms = 30s
+const READER_STARTUP_RETRY_ATTEMPTS: u32 = 4; // 4 * 500ms = 2s
 
 /// How often the background thread (spawned only once the bounded startup
 /// wait above is exhausted) tries again — `serve` is already up and
@@ -138,7 +143,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         )
         .await
         {
-            Some(store) => {
+            Ok(store) => {
                 if store.counts().ok().map(|c| c.files) == Some(0) {
                     eprintln!(
                         "vexus: no index found for {root:?} — run 'vexus index' to build one \
@@ -147,11 +152,21 @@ async fn serve_async(root: PathBuf) -> Result<()> {
                 }
                 Some(store)
             }
-            None => {
+            // Finding D1 (round 2): report the real, last-seen failure
+            // rather than asserting facts we don't actually know. The old
+            // message here ("no index found ... another vexus serve
+            // finishes building it") was wrong on every clause whenever the
+            // real cause was something else entirely — e.g. a read-only
+            // `.vexus` directory, where the index *was* found but its WAL
+            // companion files couldn't be (re)created, and nothing is
+            // "building" anything.
+            Err(e) => {
                 eprintln!(
-                    "vexus: no index found for {root:?} after {:?} — serving anyway; tool \
-                     calls will report the index isn't ready until another 'vexus serve' \
-                     finishes building it (reader mode: another vexus serve owns the index)",
+                    "vexus: index at {} still not queryable after {:?} ({e:#}) — serving \
+                     anyway; tool calls will report the index isn't ready until it becomes \
+                     queryable (if another 'vexus serve' is building the very first index, \
+                     this resolves on its own once it finishes; otherwise see the error above)",
+                    db_path.display(),
                     READER_STARTUP_RETRY_INTERVAL * READER_STARTUP_RETRY_ATTEMPTS
                 );
                 None
@@ -203,27 +218,33 @@ async fn serve_async(root: PathBuf) -> Result<()> {
 }
 
 /// Repeatedly attempts `open_reader_with_probe`, `interval` apart, up to
-/// `attempts` times, returning the first success (or `None` once `attempts`
-/// is exhausted) — the bounded startup wait a reader (lock-loser) process
-/// gives the writer's very first index build before falling back to
-/// serving with a not-yet-populated store (finding C3). An async sleep
-/// (rather than `std::thread::sleep`) since this runs directly inside
-/// `serve_async` on the tokio runtime, before `serve` itself is up.
+/// `attempts` times, returning the first success — or, once `attempts` is
+/// exhausted, `Err` of the *last* attempt's actual failure (finding D1,
+/// round 2: previously this discarded the error entirely via `if let
+/// Ok(...)`, so a caller had no way to tell "nothing built yet" apart from
+/// e.g. a permissions problem that will never resolve on its own). The
+/// bounded startup wait a reader (lock-loser) process gives the writer's
+/// very first index build before falling back to serving with a
+/// not-yet-populated store (finding C3). An async sleep (rather than
+/// `std::thread::sleep`) since this runs directly inside `serve_async` on
+/// the tokio runtime, before `serve` itself is up.
 async fn wait_for_reader_store(
     db_path: &Path,
     root: &Path,
     attempts: u32,
     interval: Duration,
-) -> Option<vexus_core::Store> {
+) -> Result<vexus_core::Store> {
+    let mut last_err = None;
     for attempt in 0..attempts {
-        if let Ok(store) = open_reader_with_probe(db_path, root) {
-            return Some(store);
+        match open_reader_with_probe(db_path, root) {
+            Ok(store) => return Ok(store),
+            Err(e) => last_err = Some(e),
         }
         if attempt + 1 < attempts {
             tokio::time::sleep(interval).await;
         }
     }
-    None
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no attempt was made (attempts == 0)")))
 }
 
 /// Blocks the calling thread, retrying `open_reader_with_probe` every
@@ -231,15 +252,33 @@ async fn wait_for_reader_store(
 /// background fallback (finding C3) for when `wait_for_reader_store`'s
 /// bounded startup wait was exhausted: `serve` is already up and answering
 /// tool calls with `state::INDEX_NOT_READY` by the time this thread runs,
-/// so there's no reason for it to ever give up. A plain function (rather
-/// than inlined into a `thread::spawn` closure) so a test can drive it
-/// directly with a tiny `interval` against a real filesystem race, instead
-/// of waiting out the real (multi-second) production interval.
+/// so there's no reason for it to ever give up. Logs the *first* failure
+/// it sees, once (finding D1, round 2) — not the bare `if let Ok(...)` this
+/// used to be, which silently swallowed every retry's error forever, and
+/// not a log line per retry either, which would spam stderr indefinitely
+/// for a condition that (by design) might never resolve. A plain function
+/// (rather than inlined into a `thread::spawn` closure) so a test can
+/// drive it directly with a tiny `interval` against a real filesystem
+/// race, instead of waiting out the real (multi-second) production
+/// interval.
 fn fill_store_when_ready(state: &Arc<AppState>, db_path: &Path, root: &Path, interval: Duration) {
+    let mut logged = false;
     loop {
-        if let Ok(store) = open_reader_with_probe(db_path, root) {
-            *state.lock_store() = Some(store);
-            return;
+        match open_reader_with_probe(db_path, root) {
+            Ok(store) => {
+                *state.lock_store() = Some(store);
+                return;
+            }
+            Err(e) => {
+                if !logged {
+                    eprintln!(
+                        "vexus: still waiting for a queryable index at {} ({e:#}); will keep \
+                         retrying in the background every {interval:?}",
+                        db_path.display()
+                    );
+                    logged = true;
+                }
+            }
         }
         std::thread::sleep(interval);
     }
@@ -313,7 +352,7 @@ mod tests {
         let store =
             wait_for_reader_store(&db_path, &root, 5, std::time::Duration::from_millis(10)).await;
         assert!(
-            store.is_some(),
+            store.is_ok(),
             "must succeed on the first attempt when index.db already exists"
         );
     }
@@ -340,25 +379,50 @@ mod tests {
         let store =
             wait_for_reader_store(&db_path, &root, 20, std::time::Duration::from_millis(20)).await;
         assert!(
-            store.is_some(),
+            store.is_ok(),
             "must succeed once index.db appears within the retry window, not just on attempt 1"
         );
     }
 
     /// The bounded side of "bounded wait": if `index.db` never appears, this
     /// must give up once `attempts` is exhausted rather than hang forever —
-    /// what makes it safe to await directly inside `serve_async`.
+    /// what makes it safe to await directly inside `serve_async`. Finding
+    /// D1 (round 2): the `Err` it gives up with must be the real, last-seen
+    /// failure (here: `Store::open_read_only` erroring on a genuinely
+    /// missing file) — not silently discarded the way `if let Ok(...)`
+    /// used to — so a caller can actually tell "nothing built yet" apart
+    /// from a permissions problem that will never resolve on its own.
     #[tokio::test]
     async fn wait_for_reader_store_gives_up_after_exhausting_its_attempts() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let db_path = root.join(".vexus/index.db"); // never created
 
-        let store =
+        let result =
             wait_for_reader_store(&db_path, &root, 3, std::time::Duration::from_millis(5)).await;
+        let err = match result {
+            Ok(_) => panic!("must give up once attempts are exhausted, not hang forever"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
         assert!(
-            store.is_none(),
-            "must give up once attempts are exhausted, not hang forever"
+            msg.contains("index.db") || msg.contains("open"),
+            "the give-up error must be the real underlying failure, not a generic \
+             placeholder: {msg:?}"
+        );
+    }
+
+    /// Finding D2 (round 2): the pre-`initialize`-handshake bounded wait
+    /// must stay short — a client with its own handshake timeout (Claude
+    /// Code's default is 30s) would see `serve` as dead if this blocked
+    /// anywhere near that long, reintroducing C3's exact symptom via a new
+    /// route. Guards against the budget quietly creeping back up.
+    #[test]
+    fn reader_startup_retry_budget_stays_well_under_a_typical_handshake_timeout() {
+        let budget = READER_STARTUP_RETRY_INTERVAL * READER_STARTUP_RETRY_ATTEMPTS;
+        assert!(
+            budget <= Duration::from_secs(5),
+            "pre-handshake retry budget must stay a few seconds, not tens of seconds: {budget:?}"
         );
     }
 
