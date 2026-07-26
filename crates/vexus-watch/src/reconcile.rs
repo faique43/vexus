@@ -110,18 +110,43 @@ pub fn reconcile(
     root: &Path,
 ) -> Result<ReconcileReport> {
     set_freshness(store, Freshness::Reconciling)?;
-    match reconcile_inner(store, embedder, root) {
-        Ok(report) => {
-            set_freshness(store, Freshness::Fresh)?;
-            Ok(report)
-        }
-        Err(e) => {
-            // Best-effort: if the store itself is what's failing, this
-            // write might fail too — there's nothing more to do about it
-            // here, the caller already gets the real error back regardless.
-            let _ = set_freshness(store, Freshness::Degraded);
-            Err(e)
-        }
+    let result = reconcile_inner(store, embedder, root);
+    finalize(store, result.is_ok());
+    result
+}
+
+/// The one place both of `reconcile`'s exit paths funnel through, so a
+/// failure in *this* step itself can never leave the index stuck at
+/// `Reconciling` forever (the bug this fixes: the old success arm did
+/// `set_freshness(store, Fresh)?`, so if that single write failed — a
+/// transient `SQLITE_BUSY`, say — `reconcile` returned `Err` with the state
+/// still `Reconciling`. `drain_and_apply`'s healing gate refuses to touch
+/// `Reconciling`, and `effective_freshness` never ages a non-`Degraded`
+/// state into `Stale` either, so nothing would ever move it off
+/// `Reconciling` again short of another reconcile pass succeeding).
+///
+/// Every write here is best-effort: clears `reconcile_progress`
+/// unconditionally (this also fixes the `reconcile_inner`-internal `?` that
+/// used to skip that clear on any mid-loop error exit), then tries to
+/// persist the *intended* terminal state (`Fresh` on success, `Degraded` on
+/// failure) — and if that specific write itself errors, falls back to
+/// trying `Degraded` too (a no-op if `Degraded` was already the intended
+/// state). `Degraded` is the deliberate fallback target rather than leaving
+/// the state untouched: it's a state `drain_and_apply` CAN heal back to
+/// `Fresh` on the next successful drain, and one `effective_freshness`
+/// escalates to `Stale` after five minutes — either beats a silent,
+/// permanent `Reconciling`. If even the `Degraded` write fails, there's
+/// nothing more productive left to do than let the caller's `Result` speak
+/// for itself.
+fn finalize(store: &mut Store, succeeded: bool) {
+    let _ = store.delete_meta("reconcile_progress");
+    let intended = if succeeded {
+        Freshness::Fresh
+    } else {
+        Freshness::Degraded
+    };
+    if set_freshness(store, intended).is_err() && intended != Freshness::Degraded {
+        let _ = set_freshness(store, Freshness::Degraded);
     }
 }
 
@@ -166,7 +191,9 @@ fn reconcile_inner(
         }
     }
 
-    store.delete_meta("reconcile_progress")?;
+    // `reconcile_progress` is cleared by `finalize`, uniformly across every
+    // exit path (including an `Err` from the `?`s above, which used to skip
+    // a `delete_meta` call that lived here directly) — not here.
     Ok(report)
 }
 
@@ -387,5 +414,71 @@ mod tests {
             Freshness::Degraded,
             "a hard failure mid-reconcile must leave the index Degraded, not silently Fresh"
         );
+        assert_eq!(
+            store.meta("reconcile_progress").unwrap(),
+            None,
+            "reconcile_progress must still be cleared on an error exit (finding 2)"
+        );
+    }
+
+    /// Finding 1 (review): `finalize` is the single funnel both of
+    /// `reconcile`'s exit paths go through, specifically so a failure
+    /// clearing `reconcile_progress` or writing the intended terminal state
+    /// can never leave the index stuck at `Reconciling` — checked directly
+    /// against `finalize` (rather than only through the full `reconcile`,
+    /// where injecting a meta-write failure at exactly the right instant
+    /// isn't cheaply reachable) for both the success and failure shapes.
+    #[test]
+    fn finalize_clears_progress_key_and_sets_the_intended_state_on_both_outcomes() {
+        for (succeeded, expected) in [(true, Freshness::Fresh), (false, Freshness::Degraded)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = Store::open(&dir.path().join(".vexus/index.db")).unwrap();
+            store.set_meta("reconcile_progress", "5/10").unwrap();
+            set_freshness(&mut store, Freshness::Reconciling).unwrap();
+
+            finalize(&mut store, succeeded);
+
+            assert_eq!(
+                store.meta("reconcile_progress").unwrap(),
+                None,
+                "finalize must clear reconcile_progress regardless of outcome"
+            );
+            assert_eq!(
+                effective_freshness(&store).unwrap(),
+                expected,
+                "succeeded={succeeded}"
+            );
+        }
+    }
+
+    /// Finding 1 (review), fallback branch: if the intended-state write
+    /// itself fails, `finalize` must still attempt (rather than skip) a
+    /// `Degraded` fallback write, and — the property this test actually
+    /// pins down — never panic or otherwise diverge even in the worst case
+    /// where *every* write it attempts fails (here, by handing it a
+    /// read-only connection, so both the intended write and the `Degraded`
+    /// fallback are guaranteed to error).
+    ///
+    /// This does not exercise the "first write fails, fallback succeeds"
+    /// interior branch in isolation — doing that would need a `Store`
+    /// whose `set_meta` can be made to fail exactly once (by call count or
+    /// argument), which `vexus-core`'s concrete `Store` has no seam for
+    /// without disproportionate mocking for this fix. The restructure
+    /// itself (one `finalize` funnel, `Degraded` as the always-attempted
+    /// fallback) is otherwise covered by code review and by the "both
+    /// outcomes" test above exercising the non-failing write path for
+    /// each branch.
+    #[test]
+    fn finalize_does_not_panic_when_every_write_it_attempts_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join(".vexus/index.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            set_freshness(&mut store, Freshness::Reconciling).unwrap();
+        }
+
+        let mut reader = Store::open_read_only(&db_path).unwrap();
+        finalize(&mut reader, true);
+        finalize(&mut reader, false);
     }
 }
