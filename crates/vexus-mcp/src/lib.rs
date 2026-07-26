@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
-use vexus_watch::pipeline;
+use vexus_watch::{pipeline, WriterLock};
 
 use crate::state::AppState;
 
@@ -30,11 +30,13 @@ pub fn serve(root: PathBuf) -> Result<()> {
 async fn serve_async(root: PathBuf) -> Result<()> {
     let db_path = root.join(".vexus/index.db");
 
-    // Startup indexing needs a writer. It's opened, used, and dropped here —
-    // tool handlers never see it; they only ever get the read-only Store
-    // opened below. The watcher (a later task) takes over as the long-lived
-    // writer.
-    {
+    // Try to acquire the advisory writer lock. If another process holds it,
+    // we'll run as a reader with no writer thread (Task 6).
+    let writer_lock = WriterLock::try_acquire(&root)?;
+    let is_writer = writer_lock.is_some();
+
+    // Only the writer does startup indexing.
+    if is_writer {
         let mut store = vexus_core::Store::open(&db_path)
             .with_context(|| format!("failed to open index at {}", db_path.display()))?;
         // Self-ignoring dir, like target/ — same convention as the CLI's
@@ -88,7 +90,13 @@ async fn serve_async(root: PathBuf) -> Result<()> {
                 }
             }
         }
-    } // writer dropped here
+    } else {
+        // Reader path: check if DB is empty and warn.
+        let store = open_reader_with_probe(&db_path, &root)?;
+        if store.counts().ok().map(|c| c.files) == Some(0) {
+            eprintln!("vexus: no index found for {root:?} — run 'vexus index' to build one (reader mode: another vexus serve owns the index)");
+        }
+    }
 
     // Tool handlers only ever read; opening read-only keeps concurrent
     // access (this process's watcher, spawned below, and any other reader)
@@ -101,30 +109,32 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         embedder: OnceLock::new(),
         root: root.clone(),
         last_generation: AtomicU64::new(0),
+        is_writer,
     });
 
-    // Spawn the writer task: opens its own writer connection, runs a
-    // startup reconcile pass (freshness Reconciling -> Fresh/Degraded) to
-    // catch up on anything that changed on disk while nothing was watching,
-    // then hands off into the debounced filesystem watcher for the rest of
-    // the process's life. Built eagerly here (rather than left to the
-    // `AppState`'s lazy `OnceLock`) so it's ready before the watcher needs
-    // it, and shared with tool handlers via `state.embedder()`'s own
-    // `OnceLock` so the process only ever loads one embedder for both
-    // paths.
-    //
-    // No advisory lock yet (Task 6) — until that lands, this always assumes
-    // it's the winning writer, per the brief.
-    let writer_store = vexus_core::Store::open(&db_path)
-        .with_context(|| format!("failed to open writer index at {}", db_path.display()))?;
-    let embedder = state.embedder();
-    let (_shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-    // Not joined: the writer thread runs for the life of the process, and
-    // the whole point of the read-only `AppState` above is that tool
-    // handlers never wait on it. `_shutdown_tx` is kept alive in this scope
-    // (not dropped early) purely so a disconnect doesn't tell the writer
-    // thread to shut down before `serve` itself is done.
-    let _writer_handle = vexus_watch::spawn_writer(root, writer_store, embedder, shutdown_rx);
+    // Only spawn the writer thread if we won the lock.
+    // The WriterLock is moved into the thread closure and held for the
+    // thread's lifetime; it's released when the thread exits.
+    if is_writer {
+        let writer_store = vexus_core::Store::open(&db_path)
+            .with_context(|| format!("failed to open writer index at {}", db_path.display()))?;
+        let embedder = state.embedder();
+        let (_shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        // Not joined: the writer thread runs for the life of the process, and
+        // the whole point of the read-only `AppState` above is that tool
+        // handlers never wait on it. `_shutdown_tx` is kept alive in this scope
+        // (not dropped early) purely so a disconnect doesn't tell the writer
+        // thread to shut down before `serve` itself is done.
+        let writer_root = root.clone();
+        let _writer_handle = std::thread::spawn(move || {
+            // Hold the WriterLock for the duration of this thread
+            let _lock = writer_lock;
+            // Run the actual writer logic and wait for it to complete
+            let inner_handle =
+                vexus_watch::spawn_writer(writer_root, writer_store, embedder, shutdown_rx);
+            let _ = inner_handle.join();
+        });
+    }
 
     let server = server::VexusServer::new(state);
     server
@@ -190,15 +200,20 @@ mod tests {
         let root = dir.path().to_path_buf();
         std::fs::write(root.join(".vexus"), b"not a directory").unwrap();
 
-        let err = serve(root.clone()).expect_err("Store::open must fail when .vexus is a file");
+        let err = serve(root.clone()).expect_err("must fail when .vexus is a file");
         let msg = format!("{err:#}");
+        // The lock acquisition now runs first, so check for the lock/index error
+        let has_clear_error = msg.contains("failed to open index")
+            || msg.contains("lock")
+            || msg.contains("directory");
         assert!(
-            msg.contains("failed to open index"),
+            has_clear_error,
             "expected the wrapped context to name the failing step: {msg}"
         );
+        let has_path_context = msg.contains("index.db") || msg.contains(".vexus");
         assert!(
-            msg.contains("index.db"),
-            "expected the error to name the index path: {msg}"
+            has_path_context,
+            "expected the error to name the relevant path: {msg}"
         );
     }
 

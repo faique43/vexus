@@ -9,6 +9,7 @@ anyhow.workspace = true
 blake3.workspace = true
 ignore = "0.4"
 notify.workspace = true
+fd-lock.workspace = true
 vexus-core = { path = "../vexus-core" }
 vexus-index = { path = "../vexus-index" }
 vexus-embed = { path = "../vexus-embed" }

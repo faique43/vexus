@@ -22,6 +22,8 @@ pub struct AppState {
     /// writer elsewhere (the watcher, in a later task) bumping the generation
     /// is noticed and cached derived state is invalidated accordingly.
     pub last_generation: AtomicU64,
+    /// Whether this process is the writer (owns the advisory lock) or a reader.
+    pub is_writer: bool,
 }
 
 impl AppState {
@@ -112,6 +114,9 @@ impl AppState {
         if failed > 0 {
             lines.push(format!("skipped files: {failed}"));
         }
+        if let Some(role) = vexus_watch::role_line(self.is_writer) {
+            lines.push(role);
+        }
         Ok(lines.join("\n"))
     }
 }
@@ -167,6 +172,7 @@ mod tests {
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: AtomicU64::new(0),
+            is_writer: true,
         }
     }
 
@@ -196,7 +202,8 @@ mod tests {
         let expected = format!(
             "index: {} files, {} symbols, {} edges, {} chunks\n\
              model: mock  embed backlog: 0  vec: available\n\
-             freshness: fresh",
+             freshness: fresh\n\
+             role: writer",
             c.files, c.symbols, c.edges, c.chunks
         );
         assert_eq!(text, expected);
@@ -224,7 +231,11 @@ mod tests {
             .unwrap();
 
         let text = state.status_text().unwrap();
-        assert!(text.ends_with("\nskipped files: 2"), "got: {text:?}");
+        assert!(text.contains("\nskipped files: 2\n"), "got: {text:?}");
+        assert!(
+            text.ends_with("\nrole: writer"),
+            "role line should be last: {text:?}"
+        );
     }
 
     /// Exercises `lock_store_fresh` itself (as opposed to vexus-core's lower
@@ -252,6 +263,7 @@ mod tests {
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: AtomicU64::new(0),
+            is_writer: true,
         };
         {
             let store = state.lock_store_fresh();
@@ -309,7 +321,9 @@ mod tests {
         }
 
         let text = state.status_text().unwrap();
-        let freshness_line = text.lines().last().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // The freshness line is now second-to-last (last is role line)
+        let freshness_line = lines.get(lines.len() - 2).unwrap();
         assert!(
             freshness_line.starts_with("freshness: degraded (since "),
             "got: {freshness_line:?}"
@@ -333,7 +347,9 @@ mod tests {
         }
 
         let text = state.status_text().unwrap();
-        let freshness_line = text.lines().last().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // The freshness line is now second-to-last (last is role line)
+        let freshness_line = lines.get(lines.len() - 2).unwrap();
         assert!(
             freshness_line.starts_with("freshness: fresh (since "),
             "got: {freshness_line:?}"

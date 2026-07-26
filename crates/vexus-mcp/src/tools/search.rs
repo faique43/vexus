@@ -107,6 +107,7 @@ mod tests {
             embedder: embedder_slot,
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),
+            is_writer: true,
         }
     }
 
@@ -122,6 +123,7 @@ mod tests {
             embedder: embedder_slot,
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),
+            is_writer: true,
         }
     }
 

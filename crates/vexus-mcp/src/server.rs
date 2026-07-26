@@ -267,6 +267,7 @@ mod tests {
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),
+            is_writer: true,
         });
         let server = VexusServer::new(state);
         let info = server.get_info();
