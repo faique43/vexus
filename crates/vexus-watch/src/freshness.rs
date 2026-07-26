@@ -63,13 +63,26 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Persists `f` as `meta('freshness')` and stamps `meta('freshness_since')`
-/// with the current unix-epoch second — every call, even repeated calls
-/// with the same state, refreshes the timestamp, since it marks "as of when
-/// is this the state" rather than "when did the state last change".
+/// Persists `f` as `meta('freshness')`. `meta('freshness_since')` is
+/// (re)stamped with the current unix-epoch second only when this call
+/// actually *changes* the persisted state — including the first call ever
+/// (nothing persisted yet) — so it tracks "when did the state last change"
+/// rather than "when was `set_freshness` last called with this state".
+///
+/// Finding I2: an earlier version restamped `since` unconditionally, on
+/// every call regardless of whether the state actually moved. The watcher's
+/// `mark_degraded` calls `set_freshness(Degraded)` on every unrecoverable
+/// error, including repeatedly while already `Degraded` (e.g. a run of
+/// `notify` errors); restamping `since` on each of those kept resetting "how
+/// long has this been Degraded" back to zero, so `effective_freshness`'s
+/// Degraded -> Stale escalation could never actually fire no matter how
+/// long the real outage lasted.
 pub fn set_freshness(store: &mut Store, f: Freshness) -> Result<()> {
+    let changed = store.meta("freshness")?.as_deref() != Some(f.as_str());
     store.set_meta("freshness", f.as_str())?;
-    store.set_meta("freshness_since", &now_unix_secs().to_string())?;
+    if changed {
+        store.set_meta("freshness_since", &now_unix_secs().to_string())?;
+    }
     Ok(())
 }
 

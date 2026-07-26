@@ -198,13 +198,25 @@ impl Store {
     /// the embed cache and the vec table (dimensions may differ between
     /// models) and recreates `vec_chunks` for the new dimension. Returns
     /// whether a wipe happened.
+    ///
+    /// Bumps `generation` (finding I6) whenever `vec_chunks` is actually
+    /// created or recreated — either branch below can do that (the
+    /// changed-model path always does; the unchanged path only if
+    /// `ensure_vec_table` finds the table missing, e.g. sqlite-vec just
+    /// became available) — so a reader's `lock_store_fresh` notices and
+    /// clears its cached "no vec table" answer instead of continuing to
+    /// report it after the writer just created one.
     pub fn set_model(&mut self, model_id: &str, dim: usize) -> Result<bool> {
         let current_id = self.meta("model_id")?;
         let current_dim = self.meta("model_dim")?;
         let unchanged = current_id.as_deref() == Some(model_id)
             && current_dim.as_deref() == Some(&*dim.to_string());
         if unchanged {
+            let existed = self.vec_table_exists()?;
             self.ensure_vec_table(dim)?;
+            if !existed && self.vec_table_exists()? {
+                self.bump_generation()?;
+            }
             return Ok(false);
         }
         let vec_available = self.vec_available;
@@ -228,6 +240,7 @@ impl Store {
         )?;
         tx.commit()?;
         self.vec_table_cached.set(Some(vec_available));
+        self.bump_generation()?;
         Ok(true)
     }
 
@@ -1163,6 +1176,51 @@ mod tests {
         );
     }
 
+    /// Finding I6: `set_model` must bump `generation` whenever it actually
+    /// creates or recreates `vec_chunks` — a reader's `lock_store_fresh`
+    /// only re-probes "does vec_chunks exist" on a generation change, so a
+    /// model-changed write that never bumped would leave a reader that
+    /// cached "no vec table" stuck reporting that forever.
+    #[test]
+    fn set_model_bumps_generation_on_a_real_model_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        assert_eq!(store.generation().unwrap(), 0);
+
+        assert!(store.set_model("mock", 4).unwrap());
+        assert_eq!(
+            store.generation().unwrap(),
+            1,
+            "first-ever set_model creates vec_chunks and must bump"
+        );
+
+        assert!(store.set_model("mock", 8).unwrap());
+        assert_eq!(
+            store.generation().unwrap(),
+            2,
+            "a dimension change recreates vec_chunks and must bump again"
+        );
+    }
+
+    /// The flip side: calling `set_model` again with the exact same
+    /// model/dim, once the table already exists, is a true no-op — it must
+    /// not bump `generation` on every repeated call (e.g. every `vexus
+    /// index` run against an unchanged model).
+    #[test]
+    fn set_model_does_not_bump_generation_when_unchanged_and_table_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+        let gen_after_first_set = store.generation().unwrap();
+
+        assert!(!store.set_model("mock", 4).unwrap());
+        assert_eq!(
+            store.generation().unwrap(),
+            gen_after_first_set,
+            "an unchanged set_model call over an already-existing table must not bump"
+        );
+    }
+
     /// All the `!vec_available` degrade branches are unreachable via a real
     /// `Store::open` (sqlite-vec is statically linked, so it's always
     /// available in this workspace's binaries). `force_vec_unavailable`
@@ -1365,8 +1423,11 @@ mod tests {
         );
         assert_eq!(reader.generation().unwrap(), 0);
 
-        // Writer creates vec_chunks (via set_model), embeds a chunk, and
-        // bumps the generation to signal the change.
+        // Writer creates vec_chunks via set_model — which itself bumps the
+        // generation now that it just created the table (finding I6) —
+        // embeds a chunk, then bumps again to signal that separate change
+        // (set_model's own bump only covers the table's existence, not
+        // whatever rows a caller puts into it afterward).
         assert!(writer.set_model("mock", 4).unwrap());
         let (chunk_id, _content, _hash) = writer.chunks_missing_embedding(100).unwrap()[0].clone();
         writer
@@ -1381,8 +1442,9 @@ mod tests {
         );
 
         // Simulate what `lock_store_fresh` does: notice the generation
-        // changed, then clear caches.
-        assert_eq!(reader.generation().unwrap(), 1);
+        // changed, then clear caches. Two bumps: one from `set_model`
+        // creating the table, one from the explicit `bump_generation` above.
+        assert_eq!(reader.generation().unwrap(), 2);
         reader.clear_caches();
 
         assert!(

@@ -170,6 +170,14 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
     // e.g. the MCP server) can report "skipped files" from the *last* run
     // without re-walking the repo.
     store.set_meta("last_index_failed", &report.failed.len().to_string())?;
+    // Finding I6: a reader's `lock_store_fresh` only re-probes cached
+    // derived state (e.g. "does vec_chunks exist") when `generation` moves —
+    // a full `index_repo` run that actually changed anything must bump it,
+    // or a reader that cached "empty index" before this run would keep
+    // reporting that stale answer indefinitely.
+    if report.indexed > 0 || report.removed > 0 {
+        store.bump_generation()?;
+    }
     Ok(report)
 }
 
@@ -306,6 +314,49 @@ mod tests {
         let r = index_repo(root, &mut store).unwrap();
         assert_eq!((r.indexed, r.removed), (1, 1));
         assert_eq!(store.counts().unwrap().files, 1);
+    }
+
+    /// Finding I6: a full `index_repo` run that actually changes anything
+    /// (indexes or removes at least one file) must bump `generation`, so a
+    /// reader's `lock_store_fresh` notices and re-probes derived state
+    /// rather than trusting whatever it cached before this run — a bare
+    /// `vexus index` invocation never calls `bump_generation` on its own,
+    /// so without this the only such signal would come from the
+    /// (unrelated) embedding path.
+    #[test]
+    fn index_repo_bumps_generation_only_when_something_actually_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def helper():\n    return 1\n");
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        assert_eq!(store.generation().unwrap(), 0);
+
+        let r = index_repo(root, &mut store).unwrap();
+        assert_eq!(r.indexed, 1);
+        assert_eq!(
+            store.generation().unwrap(),
+            1,
+            "indexing a new file is a real change and must bump"
+        );
+
+        // Nothing changed on disk: a no-op run must not bump again.
+        let r = index_repo(root, &mut store).unwrap();
+        assert_eq!(r.indexed, 0);
+        assert_eq!(r.removed, 0);
+        assert_eq!(
+            store.generation().unwrap(),
+            1,
+            "a run with nothing indexed or removed must not bump"
+        );
+
+        std::fs::remove_file(root.join("a.py")).unwrap();
+        let r = index_repo(root, &mut store).unwrap();
+        assert_eq!(r.removed, 1);
+        assert_eq!(
+            store.generation().unwrap(),
+            2,
+            "a run that removes a stale file is a real change and must bump"
+        );
     }
 
     #[test]
