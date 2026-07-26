@@ -4,5 +4,9 @@
 # (the `.vexus/` pattern above already covers this at any depth, but the
 # eval fixtures get their own line since it's load-bearing for that gate).
 eval/**/.vexus/
+# Written by `vexus-eval run` on every invocation (local + CI eval-gate) —
+# a fresh, regeneratable artifact, not ground truth (unlike
+# eval/baseline-mock.json, which a later Plan 5 task commits deliberately).
+eval/last-run.json
 .superpowers/
 /target

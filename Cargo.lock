@@ -2639,6 +2639,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vexus-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "vexus-core",
+ "vexus-embed",
+ "vexus-index",
+ "vexus-mcp",
+ "vexus-watch",
+]
+
+[[package]]
 name = "vexus-index"
 version = "0.1.0"
 dependencies = [
