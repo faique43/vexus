@@ -78,7 +78,13 @@ fn set_executable(_path: &Path) -> Result<()> {
 fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
     match agent {
         "claude-code" => {
-            let plugin_root = root.join(".claude/plugins/vexus");
+            // `.claude/plugins/vexus` is never scanned by Claude Code — only
+            // `.claude/skills/<name>/` is auto-discovered per session. A
+            // full plugin bundle (`.claude-plugin/plugin.json`, `hooks/`,
+            // `skills/`) dropped there still loads correctly, as a
+            // skills-directory plugin, so the internal layout below is
+            // unchanged — only the root it's written under moves.
+            let plugin_root = root.join(".claude/skills/vexus");
 
             let plugin_json_content =
                 include_str!("../../../packs/claude-code/.claude-plugin/plugin.json");
@@ -105,6 +111,13 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
                 force,
             )?;
 
+            println!(
+                "\nClaude Code loads this from the LAUNCH directory's .claude/skills — start \
+                 Claude Code from {} (or a directory it's later trusted from) for it to be \
+                 picked up. The first session that finds it will show a workspace-trust \
+                 dialog (it bundles a hook); accept it to enable the nudge + skill.",
+                root.display()
+            );
             println!("\nAdd this to .mcp.json:");
             println!(
                 r#"{{ "mcpServers": {{ "vexus": {{ "command": "vexus", "args": ["serve", "."] }} }} }}"#

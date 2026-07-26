@@ -224,10 +224,10 @@ fn init_claude_code_writes_all_files() {
         .success();
 
     // Check all expected files exist
-    let plugin_json = root.join(".claude/plugins/vexus/.claude-plugin/plugin.json");
-    let hooks_json = root.join(".claude/plugins/vexus/hooks/hooks.json");
-    let nudge_sh = root.join(".claude/plugins/vexus/hooks/nudge-grep.sh");
-    let skill_md = root.join(".claude/plugins/vexus/skills/vexus/SKILL.md");
+    let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
+    let hooks_json = root.join(".claude/skills/vexus/hooks/hooks.json");
+    let nudge_sh = root.join(".claude/skills/vexus/hooks/nudge-grep.sh");
+    let skill_md = root.join(".claude/skills/vexus/skills/vexus/SKILL.md");
 
     assert!(plugin_json.exists(), "plugin.json should exist");
     assert!(hooks_json.exists(), "hooks.json should exist");
@@ -258,7 +258,7 @@ fn init_claude_code_without_force_skips_existing() {
         .assert()
         .success();
 
-    let plugin_json = root.join(".claude/plugins/vexus/.claude-plugin/plugin.json");
+    let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
     let original_content = std::fs::read_to_string(&plugin_json).unwrap();
 
     // Second run without --force should skip
@@ -289,7 +289,7 @@ fn init_claude_code_with_force_overwrites() {
         .assert()
         .success();
 
-    let plugin_json = root.join(".claude/plugins/vexus/.claude-plugin/plugin.json");
+    let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
 
     // Modify the file
     std::fs::write(&plugin_json, "modified content").unwrap();
