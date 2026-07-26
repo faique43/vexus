@@ -43,6 +43,28 @@ fn blob_to_f32s(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// `files.id` for `path`, or `None` if it isn't indexed. Takes a bare
+/// `&Connection` (rather than `&Store`) so it can run either against
+/// `self.conn` directly or against an in-progress `Transaction` (which
+/// derefs to `Connection`) — `replace_file` needs the latter, to read the
+/// old file's id before its own transaction deletes it.
+fn file_id_for_path(conn: &Connection, path: &str) -> Result<Option<i64>> {
+    conn.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })
+        .map_err(Into::into)
+}
+
+/// Distinct `symbols.name` values for a given `file_id`.
+fn symbol_names_for_file_id(conn: &Connection, file_id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT name FROM symbols WHERE file_id = ?1")?;
+    let rows = stmt.query_map([file_id], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub struct Store {
     pub(crate) conn: Connection,
     vec_available: bool,
@@ -442,17 +464,41 @@ impl Store {
         }))
     }
 
+    /// Distinct symbol `name`s currently indexed for `path`, or empty if the
+    /// file isn't indexed at all. For callers that need to know what a file
+    /// used to define *before* removing it (its rows are about to disappear
+    /// and won't be queryable afterward) — in particular
+    /// `vexus_watch::update::update_file`'s "gone from disk" and "no longer
+    /// supported" branches, which must target `resolve_edges_for_names` at
+    /// the old names since `remove_file` itself doesn't report them.
+    pub fn symbol_names_for_file(&self, path: &str) -> Result<Vec<String>> {
+        match file_id_for_path(&self.conn, path)? {
+            Some(file_id) => symbol_names_for_file_id(&self.conn, file_id),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn replace_file(
         &mut self,
         path: &str,
         lang: &str,
         hash: &[u8; 32],
         idx: &crate::model::FileIndex,
-    ) -> Result<i64> {
+    ) -> Result<(i64, Vec<String>)> {
         use crate::model::estimate_tokens;
         use anyhow::anyhow;
         let vec_available = self.vec_available;
         let tx = self.conn.transaction()?;
+
+        // Capture the old symbol names before the delete cascade below wipes
+        // them, so the caller can re-resolve exactly the names that changed
+        // (removed + added) via `resolve_edges_for_names` instead of a full
+        // `resolve_all_edges` sweep (spec §2 decision 2: no global recompute
+        // on a single-file update).
+        let old_names: Vec<String> = match file_id_for_path(&tx, path)? {
+            Some(old_file_id) => symbol_names_for_file_id(&tx, old_file_id)?,
+            None => Vec::new(),
+        };
 
         // vec_chunks is a virtual table with no FK cascade, so its rows for
         // this file's chunks must be cleaned up explicitly before the old
@@ -527,7 +573,19 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(file_id)
+
+        // Touched names = union of the old (removed) and new (just-inserted
+        // batch) symbol names, deduped — this is exactly the target set for
+        // `resolve_edges_for_names` after a single-file update.
+        let mut touched = old_names.clone();
+        let mut seen: std::collections::HashSet<String> = old_names.into_iter().collect();
+        for s in &idx.symbols {
+            if seen.insert(s.name.clone()) {
+                touched.push(s.name.clone());
+            }
+        }
+
+        Ok((file_id, touched))
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<bool> {
@@ -736,6 +794,62 @@ mod tests {
         assert!(store.remove_file("app.py").unwrap());
         let c = store.counts().unwrap();
         assert_eq!((c.files, c.symbols, c.edges, c.chunks), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn replace_file_returns_touched_names_union_of_old_and_new_deduped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+
+        // First insert: no old rows yet, touched == every new symbol name.
+        let (id1, touched1) = store
+            .replace_file("app.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+        assert!(id1 > 0);
+        let mut sorted1 = touched1;
+        sorted1.sort();
+        assert_eq!(sorted1, vec!["greet".to_string(), "mod".to_string()]);
+
+        // Second replace renames "greet" to "hello" but keeps "mod": touched
+        // must be the deduped union of the old names (mod, greet) and the new
+        // batch's names (mod, hello) — "mod" (unchanged) counted once.
+        use crate::model::*;
+        let renamed = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "mod".into(),
+                    qualname: "app".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 10,
+                    parent: None,
+                    arity: None,
+                },
+                NewSymbol {
+                    name: "hello".into(),
+                    qualname: "app.hello".into(),
+                    kind: SymbolKind::Function,
+                    sig: None,
+                    start_line: 3,
+                    end_line: 5,
+                    parent: Some(0),
+                    arity: Some(1),
+                },
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let (_, touched2) = store
+            .replace_file("app.py", "python", &[2u8; 32], &renamed)
+            .unwrap();
+        let mut sorted2 = touched2;
+        sorted2.sort();
+        assert_eq!(
+            sorted2,
+            vec!["greet".to_string(), "hello".to_string(), "mod".to_string()],
+            "touched names must be the deduped union of removed (greet) and added (hello) names"
+        );
     }
 
     #[test]

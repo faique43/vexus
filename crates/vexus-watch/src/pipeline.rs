@@ -27,6 +27,59 @@ pub struct IndexReport {
 
 const MAX_FILE_BYTES: u64 = 1_048_576;
 
+/// The result of inspecting a single repo-relative path on disk, shared by
+/// `index_repo`'s full-walk loop and `update::update_file`'s single-file
+/// path so the hash/skip/binary-sniff rules can never drift between the two
+/// (both used to reimplement this per-file logic separately, which is
+/// exactly the kind of duplication that grows a silent inconsistency).
+pub(crate) enum FileClass {
+    /// Indexable: known language, under the size cap, not binary-sniffed.
+    /// `bytes` are the file's raw contents (read once, reused for hashing
+    /// and parsing).
+    Supported {
+        lang: &'static vexus_index::lang::Lang,
+        bytes: Vec<u8>,
+    },
+    /// Not present on disk at all (stat/read came back `NotFound`).
+    Missing,
+    /// Present but not indexable: unknown extension, over `MAX_FILE_BYTES`,
+    /// or binary-sniffed (a NUL byte in the first 8KiB).
+    Unsupported,
+    /// Present but couldn't be read (permissions, race, etc.) — kept
+    /// distinct from `Missing` so callers don't treat a transient failure
+    /// as "the file is gone" and delete its existing index rows.
+    ReadError(String),
+}
+
+/// Classify `root.join(rel)` per the rules above. Never panics; every
+/// failure mode is a `FileClass` variant, not an `Err`, since "this file
+/// can't be indexed right now" is an ordinary outcome for both callers, not
+/// an exceptional one.
+pub(crate) fn classify_file(root: &Path, rel: &str) -> FileClass {
+    let path = root.join(rel);
+
+    let Some(lang) = vexus_index::lang::for_path(&path) else {
+        return FileClass::Unsupported;
+    };
+    // A stat failure (including "gone") degrades to size 0 here rather than
+    // an early return — the subsequent `std::fs::read` is the authoritative
+    // existence check (its `NotFound` maps to `Missing` below), so a racy or
+    // permission-denied stat doesn't preempt that with a wrong verdict.
+    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > MAX_FILE_BYTES {
+        return FileClass::Unsupported;
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FileClass::Missing,
+        Err(e) => return FileClass::ReadError(e.to_string()),
+    };
+    if bytes.iter().take(8192).any(|&b| b == 0) {
+        return FileClass::Unsupported;
+    }
+    FileClass::Supported { lang, bytes }
+}
+
 pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
     let mut report = IndexReport::default();
     let mut seen: HashSet<String> = HashSet::new();
@@ -51,47 +104,42 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
             .to_string_lossy()
             .replace('\\', "/");
 
-        let Some(lang) = vexus_index::lang::for_path(path) else {
-            report.skipped_unsupported += 1;
-            continue;
-        };
-        if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
-            report.skipped_unsupported += 1;
-            continue;
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
+        match classify_file(root, &rel) {
+            FileClass::Missing => {
+                // Disappeared between the walk and the stat/read (race); the
+                // removal pass below will clean up its DB rows, if any.
+            }
+            FileClass::Unsupported => {
+                seen.insert(rel.clone());
+                report.skipped_unsupported += 1;
+            }
+            FileClass::ReadError(e) => {
                 // The file still exists on disk (transient read failure, e.g.
                 // permissions) — mark it seen so the removal pass below doesn't
                 // delete its existing DB rows out from under it.
                 seen.insert(rel.clone());
                 report.failed.push(format!("{rel}: {e}"));
-                continue;
             }
-        };
-        if bytes.iter().take(8192).any(|&b| b == 0) {
-            report.skipped_unsupported += 1;
-            continue;
-        }
+            FileClass::Supported { lang, bytes } => {
+                seen.insert(rel.clone());
+                let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+                if store.file_hash(&rel)? == Some(hash) {
+                    report.skipped_unchanged += 1;
+                    continue;
+                }
 
-        seen.insert(rel.clone());
-        let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-        if store.file_hash(&rel)? == Some(hash) {
-            report.skipped_unchanged += 1;
-            continue;
-        }
-
-        let source = String::from_utf8_lossy(&bytes).into_owned();
-        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vexus_index::parse::parse_file(lang, &rel, &source)
-        }));
-        match parsed {
-            Ok(idx) => {
-                store.replace_file(&rel, lang.name, &hash, &idx)?;
-                report.indexed += 1;
+                let source = String::from_utf8_lossy(&bytes).into_owned();
+                let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    vexus_index::parse::parse_file(lang, &rel, &source)
+                }));
+                match parsed {
+                    Ok(idx) => {
+                        store.replace_file(&rel, lang.name, &hash, &idx)?;
+                        report.indexed += 1;
+                    }
+                    Err(_) => report.failed.push(format!("{rel}: parser panic")),
+                }
             }
-            Err(_) => report.failed.push(format!("{rel}: parser panic")),
         }
     }
 
