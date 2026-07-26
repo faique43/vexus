@@ -8,6 +8,7 @@ use crate::state::AppState;
 use crate::tools::{clamp_budget, embed_query};
 
 const DEFAULT_LIMIT: u32 = 10;
+const MAX_LIMIT: u32 = 100;
 const DEFAULT_BUDGET_TOKENS: u32 = 4000;
 
 /// Pure inner implementation of the `search` tool. See `tools::embed_query`
@@ -18,14 +19,17 @@ pub fn search_text(
     limit: Option<u32>,
     budget_tokens: Option<u32>,
 ) -> String {
-    let limit = limit.unwrap_or(DEFAULT_LIMIT);
+    // `0` would silently return nothing at all, and an absurd caller-
+    // supplied value would ask `search_hybrid` to rank far more rows than
+    // any real caller reads — clamp to a sane [1, 100] range either way.
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
     // Embed before locking: a real embedder's inference call must not hold
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, query);
 
-    let store = state.store.lock().expect("store mutex poisoned");
+    let store = state.lock_store();
     let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
         Ok(hits) => hits,
         Err(e) => return format!("search error: {e:#}"),
@@ -195,6 +199,38 @@ mod tests {
         assert!(
             numbered_lines <= 2,
             "expected at most 2 results, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn search_limit_clamped_to_100_and_never_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..5 {
+            write(
+                root,
+                &format!("f{i}.py"),
+                &format!("def shared_term_fn_{i}():\n    return {i}\n"),
+            );
+        }
+
+        let state = indexed_state(root);
+
+        // An absurd requested limit must not reach `search_hybrid` verbatim
+        // — clamped to 100 is still plenty for this 5-hit fixture, so this
+        // just proves the call doesn't error or misbehave under a huge
+        // input; the real guard is `MAX_LIMIT` itself.
+        let out_huge = search_text(&state, "shared_term_fn", Some(u32::MAX), None);
+        assert!(
+            !out_huge.is_empty(),
+            "an absurd limit must still return results, not blow up: {out_huge:?}"
+        );
+
+        // `0` must not silently return nothing — clamped up to at least 1.
+        let out_zero = search_text(&state, "shared_term_fn", Some(0), None);
+        assert!(
+            out_zero.starts_with("1. "),
+            "limit 0 must clamp to at least 1 result, got: {out_zero:?}"
         );
     }
 }
