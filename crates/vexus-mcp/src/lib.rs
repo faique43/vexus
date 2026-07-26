@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
-use vexus_watch::{pipeline, WriterLock};
+use vexus_watch::{pipeline, Freshness, WriterLock};
 
 use crate::state::AppState;
 use crate::writer::{start_writer, WriterHandle};
@@ -69,50 +69,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         let _ = std::fs::write(root.join(".vexus/.gitignore"), "*\n");
 
         if store.counts()?.files == 0 {
-            eprintln!("vexus: no index found for {root:?} — building one now...");
-            // A failed initial index degrades to serving an empty/partial index
-            // rather than refusing to start at all — `status` still reports the
-            // truth, and tools simply have less to work with until the caller
-            // re-runs `vexus index`.
-            match pipeline::index_repo(&root, &mut store)
-                .with_context(|| format!("failed to index repo at {}", root.display()))
-            {
-                Ok(report) => {
-                    eprintln!(
-                        "vexus: indexed {} files ({} failed)",
-                        report.indexed,
-                        report.failed.len()
-                    );
-                    if store.vec_available() {
-                        match vexus_embed::select::make_embedder() {
-                            Some(embedder) => {
-                                store.set_model(embedder.id(), embedder.dim())?;
-                                match pipeline::embed_pending(&mut store, embedder.as_ref()) {
-                                    Ok(er) => eprintln!(
-                                        "vexus: embedded {} chunks (cache hits: {})",
-                                        er.embedded, er.from_cache
-                                    ),
-                                    Err(e) => eprintln!(
-                                        "vexus: embedding failed ({e:#}); serving structural-only"
-                                    ),
-                                }
-                            }
-                            None => {
-                                eprintln!("vexus: embeddings unavailable; serving structural-only")
-                            }
-                        }
-                    } else {
-                        eprintln!(
-                            "vexus: embeddings skipped (sqlite-vec unavailable); serving structural-only"
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "vexus: initial indexing failed ({e:#}); serving with an empty index"
-                    );
-                }
-            }
+            build_startup_index_if_empty(&root, &mut store)?;
         }
     }
 
@@ -217,6 +174,67 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Builds the very first index for a freshly-created (or still-empty)
+/// `.vexus/index.db` — only reachable, per `serve_async`, when this process
+/// won the writer lock *and* `store.counts()?.files == 0`. A failed initial
+/// index degrades to serving an empty/partial index rather than refusing to
+/// start at all — `status` still reports the truth, and tools simply have
+/// less to work with until the caller re-runs `vexus index`.
+///
+/// Item 4 (P4 residual): marks the index `Indexing` before any of this
+/// runs, and deliberately does **not** transition it to `Fresh`/`Degraded`
+/// itself once done — that's left to the writer thread's own reconcile pass
+/// (`spawn_writer`'s `do_reconcile: true`, started later in `serve_async`),
+/// which already goes `Reconciling` -> `Fresh`/`Degraded` on its own. Without
+/// this, a `status` call made while this (potentially slow, on a large repo)
+/// initial build is still running would see the default `Fresh` reading
+/// (absent `meta('freshness')` reads as `Fresh` — see
+/// `freshness::get_freshness`), falsely claiming the index is caught up
+/// while it's still being built from scratch.
+fn build_startup_index_if_empty(root: &Path, store: &mut vexus_core::Store) -> Result<()> {
+    let _ = vexus_watch::set_freshness(store, Freshness::Indexing);
+
+    eprintln!("vexus: no index found for {root:?} — building one now...");
+    match pipeline::index_repo(root, store)
+        .with_context(|| format!("failed to index repo at {}", root.display()))
+    {
+        Ok(report) => {
+            eprintln!(
+                "vexus: indexed {} files ({} failed)",
+                report.indexed,
+                report.failed.len()
+            );
+            if store.vec_available() {
+                match vexus_embed::select::make_embedder() {
+                    Some(embedder) => {
+                        store.set_model(embedder.id(), embedder.dim())?;
+                        match pipeline::embed_pending(store, embedder.as_ref()) {
+                            Ok(er) => eprintln!(
+                                "vexus: embedded {} chunks (cache hits: {})",
+                                er.embedded, er.from_cache
+                            ),
+                            Err(e) => {
+                                eprintln!(
+                                    "vexus: embedding failed ({e:#}); serving structural-only"
+                                )
+                            }
+                        }
+                    }
+                    None => eprintln!("vexus: embeddings unavailable; serving structural-only"),
+                }
+            } else {
+                eprintln!(
+                    "vexus: embeddings skipped (sqlite-vec unavailable); serving structural-only"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("vexus: initial indexing failed ({e:#}); serving with an empty index");
+        }
+    }
+    Ok(())
+}
+
 /// Repeatedly attempts `open_reader_with_probe`, `interval` apart, up to
 /// `attempts` times, returning the first success — or, once `attempts` is
 /// exhausted, `Err` of the *last* attempt's actual failure (finding D1,
@@ -316,17 +334,35 @@ fn spawn_background_reader_retry(state: Arc<AppState>, db_path: PathBuf, root: P
 /// surface most on-disk permission problems earlier anyway, but this
 /// becomes the *first* thing to open the DB at all once Task 6's advisory
 /// lock lets a losing process skip that writer-open step entirely.
+///
+/// Since item 5 (P4 residual), `Store::open_read_only` itself runs a real
+/// query right after opening (comparing `meta('schema_version')`) — so the
+/// same WAL-creation failure this whole function exists to explain can now
+/// surface from *that* call instead of from the `counts()` probe below. The
+/// same read-only-filesystem hint is attached to both, so the explanation a
+/// caller sees doesn't depend on exactly which of the two first touches the
+/// directory for real.
 fn open_reader_with_probe(db_path: &Path, root: &Path) -> Result<vexus_core::Store> {
-    let store = vexus_core::Store::open_read_only(db_path)
-        .with_context(|| format!("failed to open read-only index at {}", db_path.display()))?;
+    let hint = || {
+        format!(
+            "if {} (or its .vexus subdirectory) is on a read-only filesystem, this is almost \
+             certainly why — SQLite needs write access to the directory containing index.db to \
+             create its WAL companion files, even for read-only queries",
+            root.display()
+        )
+    };
+    let store = vexus_core::Store::open_read_only(db_path).with_context(|| {
+        format!(
+            "failed to open read-only index at {}; {}",
+            db_path.display(),
+            hint()
+        )
+    })?;
     store.counts().with_context(|| {
         format!(
-            "failed to query index at {} right after opening it read-only; if {} (or its \
-             .vexus subdirectory) is on a read-only filesystem, this is almost certainly why — \
-             SQLite needs write access to the directory containing index.db to create its WAL \
-             companion files, even for read-only queries",
+            "failed to query index at {} right after opening it read-only; {}",
             db_path.display(),
-            root.display()
+            hint()
         )
     })?;
     Ok(store)
@@ -558,6 +594,39 @@ mod tests {
         assert!(
             msg.contains("read-only filesystem") && msg.contains("write access"),
             "expected the error to hint at directory writability: {msg}"
+        );
+    }
+
+    /// Item 4 (P4 residual): `build_startup_index_if_empty` must mark the
+    /// index `Indexing` before it starts, and — this is the property that
+    /// actually matters here — must NOT itself transition it onward once
+    /// the build finishes; only the writer thread's later reconcile pass
+    /// (started separately, after this function returns, back in
+    /// `serve_async`) owns that `Reconciling` -> `Fresh`/`Degraded` step. A
+    /// `status` read taken anywhere between "the initial build just
+    /// finished" and "the writer thread's reconcile pass has run" must see
+    /// `Indexing`, not a stale-looking `Fresh`.
+    #[test]
+    fn build_startup_index_if_empty_marks_indexing_and_leaves_the_transition_to_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("a.py"), "def helper():\n    return 1\n").unwrap();
+
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        assert_eq!(store.counts().unwrap().files, 0);
+
+        build_startup_index_if_empty(&root, &mut store).unwrap();
+
+        assert_eq!(
+            store.counts().unwrap().files,
+            1,
+            "the startup index itself must still actually run"
+        );
+        assert_eq!(
+            vexus_watch::get_freshness(&store).unwrap(),
+            Freshness::Indexing,
+            "must be left at Indexing — only the later writer-thread reconcile pass \
+             transitions it onward to Fresh/Degraded (item 4)"
         );
     }
 }

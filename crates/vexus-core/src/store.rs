@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{Connection, OpenFlags};
 
 pub const SCHEMA_VERSION: &str = "1";
@@ -111,6 +111,15 @@ impl Store {
     /// methods called on the resulting `Store` return the underlying
     /// "attempt to write a readonly database" sqlite error — tools never
     /// call them, so no read-only guard is needed on every method.
+    ///
+    /// Item 5 (P4 residual): unlike `open`, this constructor can never
+    /// rebuild a version-mismatched DB (only a writer is allowed to touch
+    /// the file at all) — so instead, right after opening, it compares
+    /// `meta('schema_version')` against this build's `SCHEMA_VERSION` and
+    /// errs if they differ, rather than letting a reader silently run
+    /// queries against a schema shape it doesn't actually understand (wrong
+    /// column set, missing table, ...) and surface some unrelated, confusing
+    /// SQL error on the first real query instead.
     pub fn open_read_only(path: &Path) -> Result<Self> {
         register_sqlite_vec();
         let conn = Connection::open_with_flags(
@@ -124,11 +133,15 @@ impl Store {
         let vec_available = conn
             .query_row("SELECT vec_version()", [], |_| Ok(()))
             .is_ok();
-        Ok(Self {
+        let store = Self {
             conn,
             vec_available,
             vec_table_cached: std::cell::Cell::new(None),
-        })
+        };
+        if store.meta("schema_version")?.as_deref() != Some(SCHEMA_VERSION) {
+            bail!("index built by an incompatible vexus version — re-run 'vexus index'");
+        }
+        Ok(store)
     }
 
     /// Whether the sqlite-vec extension is loaded in this process. When
@@ -290,6 +303,33 @@ impl Store {
             rusqlite::params![hash, f32s_to_blob(v)],
         )?;
         Ok(())
+    }
+
+    /// Total rows currently in `embed_cache` — a small utility for callers
+    /// (tests, `status`-style diagnostics) that want a cheap sense of the
+    /// cache's size without reaching for a bespoke query.
+    pub fn embed_cache_len(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM embed_cache", [], |r| r.get(0))?)
+    }
+
+    /// Deletes every `embed_cache` row whose `content_hash` no longer
+    /// belongs to any current `chunks` row. `embed_cache` is keyed purely by
+    /// content hash — no foreign key back to a chunk or file — so an edit or
+    /// deletion that changes a chunk's content (and so its hash) leaves the
+    /// old cached embedding behind with nothing else ever cleaning it up; a
+    /// full `index_repo` run (see `pipeline::index_repo`) is the natural
+    /// point to sweep those, since by the time it finishes every chunk the
+    /// repo currently has is already known. Returns the number of rows
+    /// removed, so the caller can log a non-zero prune without needing a
+    /// separate count query.
+    pub fn prune_orphaned_embed_cache(&mut self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM embed_cache WHERE content_hash NOT IN \
+             (SELECT DISTINCT content_hash FROM chunks)",
+            [],
+        )?)
     }
 
     /// Upsert embeddings for chunks in one transaction. No-op when vec is
@@ -1102,6 +1142,35 @@ mod tests {
         assert!(!store.set_model("other-model", 4).unwrap()); // same model: no wipe
     }
 
+    /// Item 6 (P4 residual): `embed_cache` rows are keyed purely by content
+    /// hash, with no foreign key back to any chunk — a hash that no current
+    /// chunk references anymore (its chunk was deleted, or edited into
+    /// different content) is an orphan `prune_orphaned_embed_cache` must
+    /// remove, while a hash a live chunk still references must survive.
+    #[test]
+    fn prune_orphaned_embed_cache_removes_only_hashes_with_no_matching_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+        let (_chunk_id, _content, live_hash) =
+            store.chunks_missing_embedding(100).unwrap()[0].clone();
+
+        store.embed_cache_put(&live_hash, &[1.0, 0.0]).unwrap();
+        // A hash no chunk references at all.
+        store.embed_cache_put(&[9u8; 32], &[2.0, 0.0]).unwrap();
+        assert_eq!(store.embed_cache_len().unwrap(), 2);
+
+        let pruned = store.prune_orphaned_embed_cache().unwrap();
+        assert_eq!(pruned, 1, "exactly the orphaned row must be pruned");
+        assert_eq!(store.embed_cache_len().unwrap(), 1);
+        assert!(
+            store.embed_cache_get(&live_hash).unwrap().is_some(),
+            "a hash still referenced by a live chunk must survive the prune"
+        );
+    }
+
     #[test]
     fn remove_file_cleans_vec_rows_so_reused_chunk_ids_start_fresh() {
         let dir = tempfile::tempdir().unwrap();
@@ -1365,6 +1434,34 @@ mod tests {
         assert!(
             reader.set_meta("foo", "bar").is_err(),
             "write on a read-only store must return an error"
+        );
+    }
+
+    /// Item 5 (P4 residual): a DB whose persisted `schema_version` doesn't
+    /// match this build's `SCHEMA_VERSION` must fail `open_read_only` with a
+    /// message telling the caller how to recover, rather than silently
+    /// reading (and possibly misinterpreting) a schema this build doesn't
+    /// actually understand. Simulated by overwriting `schema_version` via
+    /// `set_meta` on an otherwise-normal DB — `Store::open` itself would
+    /// self-heal a real mismatch by rebuilding the file (see `version_ok`),
+    /// so this deliberately writes the mismatch *after* that check has
+    /// already passed, isolating `open_read_only`'s own check from `open`'s.
+    #[test]
+    fn open_read_only_errs_on_schema_version_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store.set_meta("schema_version", "999").unwrap();
+        }
+
+        let err = match Store::open_read_only(&db) {
+            Ok(_) => panic!("open_read_only must err on a schema_version mismatch"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("re-run 'vexus index'"),
+            "got: {err}"
         );
     }
 

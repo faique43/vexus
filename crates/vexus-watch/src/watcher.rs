@@ -8,7 +8,10 @@
 //! `update_file`, `set_freshness`) is itself plain, synchronous, and already
 //! unit-tested on its own.
 
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -55,24 +58,45 @@ fn mark_degraded(store: &mut Store) {
     let _ = store.set_meta("needs_reconcile", "1");
 }
 
+/// Bundles the gitignore-filtering state `normalize_event_paths` and
+/// `drain_and_apply` share across the whole life of the writer thread's
+/// event loop — grouped into one struct (rather than three loose
+/// parameters threaded through both functions) mainly to keep their
+/// argument lists small, but it also keeps the three pieces that only ever
+/// make sense *together* from drifting apart.
+///
+/// - `is_git_repo`: whether `root` is a git repo, checked once at watcher
+///   start (item 1, P4 residual) — a root becoming (or ceasing to be) one
+///   mid-run is out of scope for this fix.
+/// - `gitignore`: a matcher for `root`'s own top-level `.gitignore` only —
+///   the sole gitignore signal available for a non-git root, and the
+///   fallback for a git root when `git_check_ignore` itself fails. Rebuilt
+///   by `run_writer_inner` whenever a drained path is `.gitignore` itself.
+/// - `check_ignore_broken_logged`: set the first (and only the first) time
+///   `git_check_ignore` fails during this thread's life, so a persistently
+///   broken `git` doesn't spam stderr once per debounce cycle forever.
+struct GitignoreState {
+    is_git_repo: bool,
+    gitignore: Gitignore,
+    check_ignore_broken_logged: bool,
+}
+
 /// Turn a raw `notify::Event`'s (absolute) paths into repo-relative,
 /// forward-slash-normalized paths, dropping anything under `.vexus/` or
-/// `.git/`, anything outside `root` entirely, and anything `gitignore`
-/// considers ignored. `Access` events are ignored up front (no paths
-/// returned) — they fire on reads, not writes, and carry no information
-/// `update_file` needs to act on.
+/// `.git/`, and anything outside `root` entirely. `Access` events are
+/// ignored up front (no paths returned) — they fire on reads, not writes,
+/// and carry no information `update_file` needs to act on.
 ///
-/// The `gitignore` check (finding C2) keeps the watcher's view of "what's in
-/// scope" from drifting away from `pipeline::index_repo`'s full walk (which
-/// already honors `.gitignore` via `ignore::WalkBuilder`) — without it, a
-/// live edit under e.g. `build/` would get indexed by the watcher even
-/// though a full `vexus index` would never have picked it up, so the two
-/// would permanently disagree on what "the index" contains.
-fn normalize_event_paths(
-    root: &Path,
-    event: &notify::Event,
-    gitignore: &Gitignore,
-) -> Vec<PathBuf> {
+/// Gitignore filtering itself does NOT happen here (item 1, P4 residual):
+/// in a git repo, it's done once per drain batch via [`git_check_ignore`],
+/// which covers nested `.gitignore`s, `.git/info/exclude`, and the global
+/// excludesfile — all of which this per-event, root-`.gitignore`-only
+/// matcher misses. For a non-git directory (no authoritative `git
+/// check-ignore` to call), `gi.gitignore` is still applied right here,
+/// since that's the only gitignore signal available at all for a non-git
+/// root; see `drain_and_apply`'s `is_git_repo` branch for where the
+/// git-repo case gets its own filtering instead.
+fn normalize_event_paths(root: &Path, event: &notify::Event, gi: &GitignoreState) -> Vec<PathBuf> {
     if matches!(event.kind, notify::EventKind::Access(_)) {
         return Vec::new();
     }
@@ -91,15 +115,83 @@ fn normalize_event_paths(
                 return None;
             }
             let rel = PathBuf::from(rel);
-            if gitignore
-                .matched_path_or_any_parents(&rel, false)
-                .is_ignore()
+            if !gi.is_git_repo
+                && gi
+                    .gitignore
+                    .matched_path_or_any_parents(&rel, false)
+                    .is_ignore()
             {
                 return None;
             }
             Some(rel)
         })
         .collect()
+}
+
+/// Filters `paths` (repo-relative, forward-slash-normalized) through `git
+/// check-ignore --stdin -z`, spawned once for the whole batch (rather than
+/// once per path) — cheap enough per drain, and the only way to get the
+/// *authoritative* answer `pipeline::index_repo`'s full walk relies on
+/// (nested `.gitignore`s, `.git/info/exclude`, the global excludesfile),
+/// none of which the watcher's own lightweight root-`.gitignore` matcher
+/// covers. Paths are written to stdin NUL-separated (`-z` on both ends) so a
+/// filename containing a newline can't corrupt the split.
+///
+/// Returns the ignored subset on success, or `None` if the subprocess itself
+/// failed — `git` missing from `PATH`, `root` not a valid repository despite
+/// having a `.git` entry, or any other non-{0,1} exit — so the caller can
+/// fall back to the root-matcher uniformly rather than needing to
+/// distinguish failure modes. Per `git check-ignore`'s documented exit-code
+/// convention: `0` means at least one given path is ignored, `1` means none
+/// are (routine, not a failure), anything else (notably `128`, a fatal
+/// error) is the hard-failure case.
+///
+/// Writing happens on a separate thread from reading `stdout` — a batch
+/// large enough that `git`'s own stdout fills its pipe buffer before this
+/// process has finished writing every path to stdin would otherwise
+/// deadlock (`git` blocked writing ignored paths we're not yet reading;
+/// this process blocked writing more stdin `git` isn't yet reading either).
+fn git_check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("check-ignore")
+        .arg("--stdin")
+        .arg("-z")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut stdin = child.stdin.take()?;
+    let payload: Vec<u8> = paths
+        .iter()
+        .flat_map(|p| {
+            let mut bytes = p.to_string_lossy().replace('\\', "/").into_bytes();
+            bytes.push(0);
+            bytes
+        })
+        .collect();
+    let writer = thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+        // `stdin` drops here, closing the pipe so `git` sees EOF.
+    });
+
+    let output = child.wait_with_output().ok()?;
+    let _ = writer.join();
+
+    match output.status.code() {
+        Some(0) | Some(1) => Some(
+            output
+                .stdout
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| PathBuf::from(String::from_utf8_lossy(s).replace('\\', "/")))
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 /// Builds a `.gitignore`-aware matcher for `root`'s own top-level
@@ -179,20 +271,61 @@ fn drain_embed_backlog(store: &mut Store, embedder: Option<&dyn Embedder>) {
 /// Returns whatever it drained (possibly empty) so callers can react to
 /// *which* paths just settled — `run_writer` uses this to notice a
 /// `.gitignore` edit and rebuild its gitignore matcher (finding C2).
+///
+/// Item 1 (P4 residual): in a git repo (`is_git_repo`), the drained batch is
+/// filtered through [`git_check_ignore`] before any of it reaches
+/// `update_file` — the authoritative check `pipeline::index_repo`'s full
+/// walk is already held to, covering nested `.gitignore`s,
+/// `.git/info/exclude`, and the global excludesfile alike (none of which
+/// `normalize_event_paths`'s lightweight root-matcher can see). If that
+/// subprocess itself fails, this falls back to `gitignore` (the root-only
+/// matcher) instead — logging the fallback exactly once via
+/// `check_ignore_broken_logged` rather than on every single drain, so a
+/// persistently broken `git` (missing from `PATH`, say) doesn't spam
+/// stderr once per debounce cycle for the rest of this thread's life. A
+/// non-git root skips this filtering step entirely: `normalize_event_paths`
+/// already applied the root-matcher when the event first arrived, so
+/// `ready` is already in scope.
 fn drain_and_apply(
     store: &mut Store,
     debouncer: &mut Debouncer,
     embedder: Option<&dyn Embedder>,
     root: &Path,
     now: Instant,
+    gi: &mut GitignoreState,
 ) -> Vec<PathBuf> {
     let ready = debouncer.drain_ready(now);
     if ready.is_empty() {
         return ready;
     }
 
+    let to_apply: Vec<&PathBuf> = if gi.is_git_repo {
+        match git_check_ignore(root, &ready) {
+            Some(ignored) => ready.iter().filter(|p| !ignored.contains(*p)).collect(),
+            None => {
+                if !gi.check_ignore_broken_logged {
+                    eprintln!(
+                        "vexus: git check-ignore failed; falling back to the root .gitignore \
+                         matcher until the next successful drain"
+                    );
+                    gi.check_ignore_broken_logged = true;
+                }
+                ready
+                    .iter()
+                    .filter(|p| {
+                        !gi.gitignore
+                            .matched_path_or_any_parents(p, false)
+                            .is_ignore()
+                    })
+                    .collect()
+            }
+        }
+    } else {
+        ready.iter().collect()
+    };
+
     let mut any_failed = false;
-    for rel_path in &ready {
+    for rel_path in &to_apply {
         let rel = rel_path.to_string_lossy();
         match update_file(store, embedder, root, &rel) {
             Ok(UpdateOutcome::Failed(_)) | Err(_) => any_failed = true,
@@ -293,6 +426,17 @@ fn run_writer_inner(
         panic!("test-injected writer panic");
     }
 
+    // Item 3 (P4 residual): a fresh writer-thread start clears any
+    // `last_event_at` left over from a previous run of this process (or a
+    // previous `vexus serve` against the same DB) — it describes "the last
+    // time THIS run's watcher applied a successful drain," which this run
+    // hasn't done yet, so a stale timestamp from before would otherwise look
+    // like a live event just happened. `last_index_failed` resets to `0` the
+    // same way: whatever a prior run last recorded there no longer describes
+    // anything this run has actually observed.
+    let _ = store.delete_meta("last_event_at");
+    let _ = store.set_meta("last_index_failed", "0");
+
     // macOS's FSEvents backend (what `notify::recommended_watcher` picks on
     // this platform) reports paths through the OS's realpath, which
     // resolves symlinked ancestors — notably `/var` -> `/private/var`, the
@@ -326,7 +470,15 @@ fn run_writer_inner(
         drain_embed_backlog(store, embedder.as_deref());
     }
 
-    let mut gitignore = build_gitignore(&root);
+    // Item 1 (P4 residual): `is_git_repo` is checked once, here, rather than
+    // per-drain — the brief's own scoping ("check once at watcher start"),
+    // since a root becoming (or ceasing to be) a git repository mid-run is
+    // out of scope for this fix.
+    let mut gi = GitignoreState {
+        is_git_repo: root.join(".git").exists(),
+        gitignore: build_gitignore(&root),
+        check_ignore_broken_logged: false,
+    };
     let mut debouncer = Debouncer::default();
     let mut tick: u64 = 0;
 
@@ -339,7 +491,7 @@ fn run_writer_inner(
         match rx.recv_timeout(RECV_TIMEOUT) {
             Ok(Ok(event)) => {
                 let now = Instant::now();
-                for rel in normalize_event_paths(&root, &event, &gitignore) {
+                for rel in normalize_event_paths(&root, &event, &gi) {
                     debouncer.push(rel, now);
                 }
             }
@@ -360,12 +512,13 @@ fn run_writer_inner(
             embedder.as_deref(),
             &root,
             Instant::now(),
+            &mut gi,
         );
         if ready
             .iter()
             .any(|p| p.file_name().is_some_and(|n| n == ".gitignore"))
         {
-            gitignore = build_gitignore(&root);
+            gi.gitignore = build_gitignore(&root);
         }
 
         tick += 1;
@@ -577,6 +730,230 @@ mod tests {
         std::fs::write(p, content).unwrap();
     }
 
+    /// `git init -q` plus enough `user.email`/`user.name` config that a
+    /// later commit (if a test needs one) wouldn't fail — mirrors
+    /// `reconcile.rs`'s own real-git-repo test fixtures. Returns early
+    /// (rather than panicking) if `git` itself isn't on `PATH`, matching how
+    /// the existing `reconcile` tests skip gracefully in that environment.
+    fn init_git_repo(root: &Path) -> bool {
+        let git = |args: &[&str]| Command::new("git").arg("-C").arg(root).args(args).output();
+        let Ok(init) = git(&["init", "-q"]) else {
+            eprintln!("git not available on PATH; skipping");
+            return false;
+        };
+        if !init.status.success() {
+            eprintln!("git init failed; skipping");
+            return false;
+        }
+        for args in [
+            vec!["config", "user.email", "t@t.dev"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(git(&args).unwrap().status.success());
+        }
+        true
+    }
+
+    /// Item 1 (P4 residual): `git check-ignore --stdin -z` must correctly
+    /// distinguish paths ignored via a root `.gitignore`, a *nested*
+    /// `sub/.gitignore`, and `.git/info/exclude` from paths that aren't
+    /// ignored at all — none of the watcher's own lightweight root-only
+    /// matcher can see the nested or info/exclude cases, which is exactly
+    /// why this batch call exists.
+    #[test]
+    fn git_check_ignore_drops_nested_and_info_exclude_ignored_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !init_git_repo(root) {
+            return;
+        }
+
+        write(root, ".gitignore", "build/\n");
+        write(root, "sub/.gitignore", "*.gen.py\n");
+        std::fs::write(root.join(".git/info/exclude"), "excluded_by_info.py\n").unwrap();
+
+        let paths = vec![
+            PathBuf::from("a.py"),
+            PathBuf::from("build/x.py"),
+            PathBuf::from("sub/y.gen.py"),
+            PathBuf::from("sub/z.py"),
+            PathBuf::from("excluded_by_info.py"),
+        ];
+        let ignored =
+            git_check_ignore(root, &paths).expect("git check-ignore must succeed in a real repo");
+
+        assert!(ignored.contains(&PathBuf::from("build/x.py")));
+        assert!(ignored.contains(&PathBuf::from("sub/y.gen.py")));
+        assert!(ignored.contains(&PathBuf::from("excluded_by_info.py")));
+        assert!(!ignored.contains(&PathBuf::from("a.py")));
+        assert!(!ignored.contains(&PathBuf::from("sub/z.py")));
+    }
+
+    /// The exit-code contract `git_check_ignore` relies on: `1` (nothing in
+    /// the batch is ignored) is routine, not a failure — it must still
+    /// return `Some` (an empty set), never fall back to `None`.
+    #[test]
+    fn git_check_ignore_returns_an_empty_set_when_nothing_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !init_git_repo(root) {
+            return;
+        }
+        write(root, ".gitignore", "build/\n");
+
+        let ignored = git_check_ignore(root, &[PathBuf::from("a.py"), PathBuf::from("b.py")])
+            .expect("exit code 1 (nothing ignored) must not be treated as a failure");
+        assert!(ignored.is_empty());
+    }
+
+    /// The hard-failure side of the same contract: outside a git repository
+    /// entirely, `git check-ignore` exits `128` (fatal) — `git_check_ignore`
+    /// must surface that as `None` so its caller falls back to the
+    /// root-matcher, rather than silently treating a `git` failure as "ok,
+    /// nothing's ignored."
+    #[test]
+    fn git_check_ignore_returns_none_outside_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path(); // deliberately never git-init'd
+        assert!(!root.join(".git").exists());
+
+        let result = git_check_ignore(root, &[PathBuf::from("a.py")]);
+        assert!(
+            result.is_none(),
+            "a hard git-check-ignore failure must signal None, not an empty ignore set"
+        );
+    }
+
+    /// Item 1 (P4 residual), end to end: a *real* git repo with a nested
+    /// `sub/.gitignore` — something the watcher's old per-event root-only
+    /// matcher could never see — must still keep a live-created file under
+    /// it out of the index, now that `drain_and_apply` routes git repos
+    /// through `git_check_ignore` instead. A non-ignored sentinel file is
+    /// also written so the assertion on the ignored one actually proves the
+    /// watcher ran at all.
+    #[test]
+    fn watcher_honors_a_nested_gitignore_in_a_real_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        if !init_git_repo(&root) {
+            return;
+        }
+        write(&root, "sub/.gitignore", "*.gen.py\n");
+        write(&root, "a.py", "def helper():\n    return 1\n");
+
+        let db_path = root.join(".vexus/index.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            crate::pipeline::index_repo(&root, &mut store).unwrap();
+        }
+
+        let writer_store = Store::open(&db_path).unwrap();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let handle = spawn_watcher(root.clone(), writer_store, None, shutdown_rx);
+
+        // Give the OS watch a moment to register before writing.
+        thread::sleep(Duration::from_millis(200));
+        std::fs::write(
+            root.join("sub/gadget.gen.py"),
+            "def ignored_symbol():\n    return 1\n",
+        )
+        .unwrap();
+        let sentinel = root.join("live_mod.py");
+        std::fs::write(&sentinel, "def live_symbol():\n    return 2\n").unwrap();
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(5);
+        let mut nudged = false;
+        let mut sentinel_seen = false;
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(150));
+
+            // Same macOS FSEvents flakiness workaround used elsewhere in
+            // this file.
+            if !nudged && start.elapsed() >= Duration::from_secs(1) {
+                let _ =
+                    std::fs::write(&sentinel, "def live_symbol():\n    return 2\n    # nudge\n");
+                nudged = true;
+            }
+
+            let Ok(reader) = Store::open_read_only(&db_path) else {
+                continue;
+            };
+            if let Ok(Resolution::Exact(_)) = reader.resolve_symbol("live_symbol") {
+                sentinel_seen = true;
+                break;
+            }
+        }
+
+        drop(shutdown_tx);
+        handle.join().unwrap();
+
+        assert!(
+            sentinel_seen,
+            "watcher did not pick up the non-ignored sentinel file within 5s"
+        );
+
+        let reader = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(
+            reader.file_hash("sub/gadget.gen.py").unwrap(),
+            None,
+            "a file under a real git repo's nested .gitignore must never be indexed by the \
+             live watcher, even though the old root-only matcher couldn't see it"
+        );
+        assert!(
+            matches!(
+                reader.resolve_symbol("ignored_symbol").unwrap(),
+                Resolution::NotFound { .. }
+            ),
+            "the nested-gitignored file's own symbol must never resolve"
+        );
+    }
+
+    /// Item 3 (P4 residual): a fresh writer-thread start must clear
+    /// `last_event_at` and reset `last_index_failed` to `0`, even with zero
+    /// filesystem events — both keys otherwise carry forward stale meaning
+    /// from whatever a *previous* run of this process (or a previous `vexus
+    /// serve` against the same DB) last wrote.
+    #[test]
+    fn run_writer_start_clears_last_event_at_and_resets_last_index_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        write(&root, "a.py", "def helper():\n    return 1\n");
+
+        let db_path = root.join(".vexus/index.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            crate::pipeline::index_repo(&root, &mut store).unwrap();
+            // Simulate stale state left over from a previous run.
+            store.set_meta("last_event_at", "1234567890").unwrap();
+            store.set_meta("last_index_failed", "7").unwrap();
+        }
+
+        let writer_store = Store::open(&db_path).unwrap();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let handle = spawn_watcher(root, writer_store, None, shutdown_rx);
+
+        // No filesystem event needed: the reset happens unconditionally at
+        // thread start, before the watch loop even begins — this just gives
+        // the thread a moment to actually run that far.
+        thread::sleep(Duration::from_millis(300));
+
+        let reader = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(
+            reader.meta("last_event_at").unwrap(),
+            None,
+            "a fresh writer-thread start must clear any stale last_event_at"
+        );
+        assert_eq!(
+            reader.meta("last_index_failed").unwrap().as_deref(),
+            Some("0"),
+            "a fresh writer-thread start must reset last_index_failed to 0"
+        );
+
+        drop(shutdown_tx);
+        handle.join().unwrap();
+    }
+
     /// Carried finding (Task 4 review): a successful drain must not
     /// unconditionally stamp `Fresh` — only healing `Fresh`/`Degraded`. If a
     /// reconcile (or the initial index build) is in flight and has already
@@ -598,12 +975,18 @@ mod tests {
             let mut debouncer = Debouncer::default();
             let now = Instant::now();
             debouncer.push(PathBuf::from("a.py"), now);
+            let mut gi = GitignoreState {
+                is_git_repo: false,
+                gitignore: Gitignore::empty(),
+                check_ignore_broken_logged: false,
+            };
             drain_and_apply(
                 &mut store,
                 &mut debouncer,
                 None,
                 root,
                 now + crate::debounce::DEBOUNCE_WINDOW,
+                &mut gi,
             );
 
             assert_eq!(
@@ -632,12 +1015,18 @@ mod tests {
             let mut debouncer = Debouncer::default();
             let now = Instant::now();
             debouncer.push(PathBuf::from("a.py"), now);
+            let mut gi = GitignoreState {
+                is_git_repo: false,
+                gitignore: Gitignore::empty(),
+                check_ignore_broken_logged: false,
+            };
             drain_and_apply(
                 &mut store,
                 &mut debouncer,
                 None,
                 root,
                 now + crate::debounce::DEBOUNCE_WINDOW,
+                &mut gi,
             );
 
             assert_eq!(
