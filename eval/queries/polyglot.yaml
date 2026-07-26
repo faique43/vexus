@@ -1,0 +1,216 @@
+# Ground-truth queries for eval/corpora/polyglot (Rust service + TS frontend).
+#
+# Schema: see eval/queries/pyapp.yaml's header comment. Every qualname below
+# was read back from a real `vexus index` run over this corpus
+# (VEXUS_EMBEDDER=mock) — see crates/vexus-cli/tests/eval_corpora_validation.rs.
+
+# --- explore: how-does-X-work -----------------------------------------
+
+- q: "how does order placement work"
+  tool: explore
+  expect:
+    - service.src.services.order_service.place_order
+    - service.src.services.pricing.quote_total
+  graded:
+    service.src.services.order_service.place_order: 3
+    service.src.services.pricing.quote_total: 2
+
+- q: "how do we quote the total price for a cart"
+  tool: explore
+  expect:
+    - service.src.services.pricing.quote_total
+    - service.src.services.pricing.base_price
+  graded:
+    service.src.services.pricing.quote_total: 3
+    service.src.services.pricing.base_price: 2
+
+- q: "how does user registration work end to end, frontend to backend"
+  tool: explore
+  expect:
+    - frontend.src.api.users.registerUser
+    - service.src.services.auth.register_user
+  graded:
+    service.src.services.auth.register_user: 3
+    frontend.src.api.users.registerUser: 2
+
+- q: "how is an inbound payment webhook processed"
+  tool: explore
+  expect:
+    - service.src.handlers.webhooks.handle_payment_succeeded
+    - service.src.services.order_service.mark_order_paid
+  graded:
+    service.src.handlers.webhooks.handle_payment_succeeded: 3
+    service.src.services.order_service.mark_order_paid: 2
+
+- q: "how does the frontend checkout flow work"
+  tool: explore
+  expect:
+    - frontend.src.app.checkout
+    - frontend.src.state.cart.addItem
+    - frontend.src.api.orders.placeOrder
+  graded:
+    frontend.src.app.checkout: 3
+    frontend.src.api.orders.placeOrder: 2
+    frontend.src.state.cart.addItem: 2
+
+- q: "how is an order cancelled"
+  tool: explore
+  expect:
+    - service.src.services.order_service.cancel_order
+    - service.src.services.notifications.notify_order_cancelled
+
+- q: "how does the observable state store notify its subscribers"
+  tool: explore
+  expect:
+    - frontend.src.state.store.Store.setState
+    - frontend.src.state.store.Store.subscribe
+
+- q: "how does client-side order submission avoid a duplicate request"
+  tool: explore
+  expect:
+    - frontend.src.api.orders.placeOrder
+    - frontend.src.utils.idempotency.markIfNew
+
+# --- search: where-is-X -------------------------------------------------
+
+- q: "where is the id generator for new records"
+  expect:
+    - service.src.utils.ids.generate_id
+
+- q: "where is a cent amount formatted as money for display"
+  expect:
+    - frontend.src.utils.format.formatMoney
+
+- q: "where is a session token validated"
+  expect:
+    - service.src.services.auth.validate
+
+- q: "where do we render an order summary line"
+  expect:
+    - frontend.src.views.order_summary.renderOrderSummary
+
+- q: "where is the retry helper for a flaky downstream call"
+  expect:
+    - service.src.utils.retry.retry_with_backoff
+
+- q: "where is the frontend's runtime configuration loaded"
+  expect:
+    - frontend.src.config.loadConfig
+
+- q: "where is an item removed from the cart"
+  expect:
+    - frontend.src.state.cart.removeItem
+
+- q: "where is the shared HTTP request helper used by the api client modules"
+  expect:
+    - frontend.src.api.client.request
+
+# --- search: find-by-concept-not-name (semantic value, not keyword) ----
+
+- q: "throttle API calls made from the client"
+  expect:
+    - frontend.src.utils.rate_limit.rateLimit
+  graded:
+    frontend.src.utils.rate_limit.rateLimit: 3
+
+- q: "discount pricing strategy applied per order"
+  expect:
+    - service.src.services.pricing.Discount
+    - service.src.services.pricing.quote_total
+  graded:
+    service.src.services.pricing.Discount: 3
+    service.src.services.pricing.quote_total: 2
+
+- q: "absorb a replayed network retry so a request isn't double-submitted"
+  expect:
+    - frontend.src.utils.idempotency.markIfNew
+  graded:
+    frontend.src.utils.idempotency.markIfNew: 3
+
+- q: "trait-object dispatch for interchangeable discount strategies"
+  expect:
+    - service.src.services.pricing.Discount.apply
+  graded:
+    service.src.services.pricing.Discount.apply: 3
+
+- q: "why does the retry helper only make a single attempt in this fixture"
+  expect:
+    - service.src.utils.retry.retry_with_backoff
+  graded:
+    service.src.utils.retry.retry_with_backoff: 3
+
+# --- callers (>=5 queries) ----------------------------------------------
+
+- q: service.src.services.order_service.persist_status
+  tool: callers
+  expect:
+    - service.src.services.order_service.mark_order_paid
+    - service.src.services.order_service.cancel_order
+
+- q: frontend.src.api.client.request
+  tool: callers
+  expect:
+    - frontend.src.api.orders.fetchOrder
+    - frontend.src.api.orders.placeOrder
+    - frontend.src.api.users.fetchUser
+    - frontend.src.api.users.registerUser
+
+- q: frontend.src.state.store.Store.getState
+  tool: callers
+  expect:
+    - frontend.src.state.cart.addItem
+    - frontend.src.state.cart.removeItem
+    - frontend.src.state.cart.cartItemCount
+
+- q: service.src.utils.ids.generate_id
+  tool: callers
+  expect:
+    - service.src.services.auth.register_user
+    - service.src.services.order_service.place_order
+
+- q: service.src.services.notifications.send
+  tool: callers
+  expect:
+    - service.src.services.notifications.notify_order_placed
+    - service.src.services.notifications.notify_order_cancelled
+
+- q: service.src.handlers.orders.create_order_endpoint
+  tool: callers
+  expect:
+    - service.src.main.main
+
+# --- callees (>=5 queries) -----------------------------------------------
+
+- q: service.src.services.order_service.place_order
+  tool: callees
+  expect:
+    - service.src.utils.ids.generate_id
+    - service.src.utils.retry.retry_with_backoff
+    - service.src.services.order_service.persist_order
+    - service.src.services.notifications.notify_order_placed
+
+- q: frontend.src.app.checkout
+  tool: callees
+  expect:
+    - frontend.src.state.cart.addItem
+    - frontend.src.state.cart.cartItemCount
+    - frontend.src.api.orders.placeOrder
+    - frontend.src.views.order_summary.renderOrderSummary
+
+- q: service.src.handlers.orders.create_order_endpoint
+  tool: callees
+  expect:
+    - service.src.services.pricing.quote_total
+    - service.src.services.order_service.place_order
+
+- q: frontend.src.views.order_summary.renderOrderSummary
+  tool: callees
+  expect:
+    - frontend.src.utils.format.formatMoney
+    - frontend.src.utils.format.formatDate
+
+- q: service.src.services.order_service.cancel_order
+  tool: callees
+  expect:
+    - service.src.services.order_service.persist_status
+    - service.src.services.notifications.notify_order_cancelled

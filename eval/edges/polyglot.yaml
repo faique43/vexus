@@ -1,0 +1,231 @@
+# Hand-verified caller/callee ground truth for eval/corpora/polyglot
+# (Rust service + TS frontend, indexed together as one corpus).
+#
+# Schema: caller, callee (qualnames), expected: resolved | heuristic — see
+# eval/edges/pyapp.yaml's header comment for what the two labels mean.
+#
+# Every qualname, and every `note` describing actual resolver behavior, was
+# read back from a real `vexus index` run over this corpus
+# (VEXUS_EMBEDDER=mock).
+
+# --- resolved: unambiguous, real call chains crossing files/languages ---
+
+- caller: frontend.src.api.orders.fetchOrder
+  callee: frontend.src.api.client.request
+  expected: resolved
+
+- caller: frontend.src.api.orders.placeOrder
+  callee: frontend.src.api.client.request
+  expected: resolved
+
+- caller: frontend.src.api.orders.placeOrder
+  callee: frontend.src.utils.idempotency.markIfNew
+  expected: resolved
+
+- caller: frontend.src.api.users.fetchUser
+  callee: frontend.src.api.client.request
+  expected: resolved
+
+- caller: frontend.src.api.users.registerUser
+  callee: frontend.src.api.client.request
+  expected: resolved
+
+- caller: frontend.src.app.bootstrap
+  callee: frontend.src.config.loadConfig
+  expected: resolved
+
+- caller: frontend.src.app.checkout
+  callee: frontend.src.state.cart.addItem
+  expected: resolved
+
+- caller: frontend.src.app.checkout
+  callee: frontend.src.state.cart.cartItemCount
+  expected: resolved
+
+- caller: frontend.src.app.checkout
+  callee: frontend.src.api.orders.placeOrder
+  expected: resolved
+
+- caller: frontend.src.app.checkout
+  callee: frontend.src.views.order_summary.renderOrderSummary
+  expected: resolved
+
+- caller: frontend.src.state.cart.addItem
+  callee: frontend.src.utils.validation.validate
+  expected: resolved
+  note: >
+    This bare `validate(sku)` call happens to resolve correctly to this
+    (TS) validate — but the identical bare name also resolves
+    service.src.handlers.orders.create_order_endpoint's and
+    service.src.handlers.webhooks.handle_payment_succeeded's calls to this
+    same TS symbol, which is wrong for both of those (see the heuristic
+    cases below). vexus resolves calls by name across the *entire* index
+    regardless of source language, so this "resolved" pair is only
+    correct by coincidence of symbol id ordering, not by design.
+
+- caller: frontend.src.state.cart.addItem
+  callee: frontend.src.state.store.Store.getState
+  expected: resolved
+
+- caller: frontend.src.state.cart.addItem
+  callee: frontend.src.state.store.Store.setState
+  expected: resolved
+
+- caller: frontend.src.state.cart.cartItemCount
+  callee: frontend.src.state.store.Store.getState
+  expected: resolved
+
+- caller: frontend.src.state.cart.removeItem
+  callee: frontend.src.state.store.Store.getState
+  expected: resolved
+
+- caller: frontend.src.state.cart.removeItem
+  callee: frontend.src.state.store.Store.setState
+  expected: resolved
+
+- caller: frontend.src.views.order_summary.renderOrderSummary
+  callee: frontend.src.utils.format.formatMoney
+  expected: resolved
+
+- caller: frontend.src.views.order_summary.renderOrderSummary
+  callee: frontend.src.utils.format.formatDate
+  expected: resolved
+
+- caller: service.src.handlers.orders.cancel_order_endpoint
+  callee: service.src.services.order_service.cancel_order
+  expected: resolved
+
+- caller: service.src.handlers.orders.create_order_endpoint
+  callee: service.src.services.pricing.quote_total
+  expected: resolved
+
+- caller: service.src.handlers.orders.create_order_endpoint
+  callee: service.src.services.order_service.place_order
+  expected: resolved
+
+- caller: service.src.handlers.users.register_user_endpoint
+  callee: service.src.utils.validation.validate_display_name
+  expected: resolved
+
+- caller: service.src.handlers.users.register_user_endpoint
+  callee: service.src.services.auth.register_user
+  expected: resolved
+
+- caller: service.src.handlers.webhooks.handle_payment_succeeded
+  callee: service.src.services.order_service.mark_order_paid
+  expected: resolved
+
+- caller: service.src.main.main
+  callee: service.src.handlers.users.register_user_endpoint
+  expected: resolved
+
+- caller: service.src.main.main
+  callee: service.src.handlers.orders.create_order_endpoint
+  expected: resolved
+
+- caller: service.src.services.auth.register_user
+  callee: service.src.utils.ids.generate_id
+  expected: resolved
+
+- caller: service.src.services.notifications.notify_order_cancelled
+  callee: service.src.services.notifications.send
+  expected: resolved
+
+- caller: service.src.services.notifications.notify_order_placed
+  callee: service.src.services.notifications.send
+  expected: resolved
+
+- caller: service.src.services.order_service.cancel_order
+  callee: service.src.services.order_service.persist_status
+  expected: resolved
+
+- caller: service.src.services.order_service.cancel_order
+  callee: service.src.services.notifications.notify_order_cancelled
+  expected: resolved
+
+- caller: service.src.services.order_service.mark_order_paid
+  callee: service.src.services.order_service.persist_status
+  expected: resolved
+
+- caller: service.src.services.order_service.place_order
+  callee: service.src.utils.ids.generate_id
+  expected: resolved
+
+- caller: service.src.services.order_service.place_order
+  callee: service.src.models.order.new
+  expected: resolved
+  note: >
+    `Order::new(...)` resolves correctly here because `place_order` is not
+    in the same file as either Order::new or User::new, so the tie-break
+    falls through to lowest symbol id — which happens to be Order::new,
+    the actually-intended target. Contrast with services.auth.register_user
+    below, where the exact same tie-break rule produces the wrong answer.
+
+- caller: service.src.services.order_service.place_order
+  callee: service.src.utils.retry.retry_with_backoff
+  expected: resolved
+
+- caller: service.src.services.order_service.place_order
+  callee: service.src.services.order_service.persist_order
+  expected: resolved
+
+- caller: service.src.services.order_service.place_order
+  callee: service.src.services.notifications.notify_order_placed
+  expected: resolved
+
+- caller: service.src.services.pricing.quote_total
+  callee: service.src.services.pricing.base_price
+  expected: resolved
+
+# --- heuristic-limit cases (>=3, precision < 1.0 is expected) -----------
+
+- caller: service.src.services.auth.register_user
+  callee: service.src.models.user.new
+  expected: heuristic
+  note: >
+    Same-name-different-module: vexus's indexer doesn't nest associated
+    functions under their `impl` block (only free-standing definitions are
+    captured), so `Order::new` and `User::new` both become indistinguishable
+    flat symbols named `new` with the same arity. `register_user` clearly
+    intends `User::new(...)`, but in the indexed corpus the resolver's
+    lowest-id tie-break actually returns service.src.models.order.new
+    instead — a wrong-module false positive.
+
+- caller: service.src.handlers.orders.create_order_endpoint
+  callee: service.src.utils.validation.validate
+  expected: heuristic
+  note: >
+    Same-name-different-module *and* cross-language: `validate(sku)`
+    intends this Rust sku validator, but `services::auth::validate`
+    (Rust, session tokens) and frontend.src.utils.validation.validate (TS,
+    a different language entirely) share the same bare name and arity.
+    vexus resolves calls by name across the whole index regardless of
+    source language, so in the indexed corpus this call actually resolves
+    to the TS symbol — an honest illustration that whole-repo, per-language-
+    blind resolution can cross language boundaries in ways that make no
+    sense at runtime.
+
+- caller: service.src.handlers.webhooks.handle_payment_succeeded
+  callee: service.src.services.auth.validate
+  expected: heuristic
+  note: >
+    The same three-way `validate` collision as above, from a different
+    call site: this one intends services.auth.validate (session-token
+    validation) but the indexed corpus's resolver again lands on the
+    cross-language frontend.src.utils.validation.validate.
+
+- caller: service.src.services.pricing.quote_total
+  callee: service.src.services.pricing.apply
+  expected: heuristic
+  note: >
+    Trait-object dispatch: `discount` is a `Box<dyn Discount>`, so
+    `discount.apply(...)` is runtime-polymorphic between
+    PercentageDiscount::apply and FlatDiscount::apply — a static call-graph
+    can't know which impl a given call site reaches. Compounding this,
+    both impls collapse onto the identical qualname
+    service.src.services.pricing.apply (impl blocks aren't nested, so
+    neither is distinguishable from the other by qualname alone). In the
+    indexed corpus the resolver instead lands on
+    service.src.services.pricing.Discount.apply — the abstract trait
+    method signature, which has no executable body at all, arguably a
+    worse outcome than picking either concrete impl.

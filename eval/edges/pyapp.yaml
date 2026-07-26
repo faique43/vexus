@@ -1,0 +1,290 @@
+# Hand-verified caller/callee ground truth for eval/corpora/pyapp.
+#
+# Schema: caller, callee (qualnames), expected: resolved | heuristic.
+# `resolved` pairs are real call relationships vexus's static resolver is
+# expected to get right. `heuristic` pairs are also real (the caller
+# genuinely reaches the callee, or is the one true intended target among
+# several plausible ones) but are documented cases where vexus's name+arity
+# resolution heuristic cannot reliably land on the correct symbol — because
+# of a same-name collision elsewhere in the corpus, or genuine duck-typed/
+# polymorphic dispatch a static analyzer can't see through. Their presence
+# means edge_precision/edge_recall < 1.0 is the honest, expected outcome,
+# not a bug in the metric.
+#
+# Every qualname was verified against a real `vexus index` run over this
+# corpus (VEXUS_EMBEDDER=mock); the actual resolved-edge behavior quoted in
+# the `note` fields below was read back from that index's `edges` table.
+
+# --- resolved: unambiguous, real call chains crossing files -------------
+
+- caller: app.main
+  callee: app.build_routes
+  expected: resolved
+
+- caller: db.ConnectionPool.acquire
+  callee: db.ConnectionPool._open_new
+  expected: resolved
+
+- caller: db.get_connection_pool
+  callee: config.load_config
+  expected: resolved
+
+- caller: db.get_connection_pool
+  callee: db.ConnectionPool
+  expected: resolved
+
+- caller: handlers.auth.AuthHandler.login
+  callee: services.auth_service.authenticate
+  expected: resolved
+
+- caller: handlers.auth.AuthHandler.login
+  callee: services.auth_service.issue_token
+  expected: resolved
+
+- caller: handlers.auth.AuthHandler.logout
+  callee: services.auth_service.revoke_token
+  expected: resolved
+
+- caller: handlers.auth.AuthHandler.refresh_token
+  callee: services.auth_service.issue_token
+  expected: resolved
+
+- caller: handlers.billing.BillingHandler.charge
+  callee: services.billing_service.charge_card
+  expected: resolved
+
+- caller: handlers.invoices.InvoiceHandler.create
+  callee: services.invoice_service.create_invoice
+  expected: resolved
+
+- caller: handlers.invoices.InvoiceHandler.get
+  callee: services.invoice_service.get_invoice
+  expected: resolved
+
+- caller: handlers.invoices.InvoiceHandler.list
+  callee: services.invoice_service.list_invoices
+  expected: resolved
+
+- caller: handlers.invoices.InvoiceHandler.refund
+  callee: services.invoice_service.refund_invoice
+  expected: resolved
+
+- caller: handlers.reports.ReportHandler.generate_usage_report
+  callee: services.invoice_service.list_invoices
+  expected: resolved
+
+- caller: handlers.reports.ReportHandler.generate_usage_report
+  callee: services.report_service.build_usage_report
+  expected: resolved
+
+- caller: handlers.users.UserHandler.create
+  callee: services.user_service.create_user
+  expected: resolved
+
+- caller: handlers.users.UserHandler.get
+  callee: services.user_service.get_user
+  expected: resolved
+
+- caller: handlers.users.UserHandler.update_profile
+  callee: services.user_service.update_profile
+  expected: resolved
+
+- caller: handlers.webhooks.WebhookHandler._handle_charge_failed
+  callee: services.invoice_service.get_invoice
+  expected: resolved
+
+- caller: handlers.webhooks.WebhookHandler._handle_charge_failed
+  callee: services.notification_service.send_email
+  expected: resolved
+
+- caller: handlers.webhooks.WebhookHandler.receive_stripe_event
+  callee: handlers.webhooks.WebhookHandler._handle_charge_failed
+  expected: resolved
+
+- caller: jobs.cleanup.cleanup_stale_sessions
+  callee: jobs.cleanup.close
+  expected: resolved
+  note: >
+    Same-file call to `close`, so the same-file-first tie-break resolves it
+    correctly even though `close` also collides with
+    services.billing_service.close elsewhere in the corpus (see the
+    heuristic case below for that cross-file collision).
+
+- caller: jobs.invoice_reminders.send_invoice_reminders
+  callee: services.invoice_service.list_invoices
+  expected: resolved
+
+- caller: jobs.invoice_reminders.send_invoice_reminders
+  callee: services.notification_service.send_email
+  expected: resolved
+
+- caller: jobs.subscription_renewals.run_subscription_renewals
+  callee: services.subscription_service.renew_subscription
+  expected: resolved
+
+- caller: jobs.subscription_renewals.run_subscription_renewals
+  callee: services.subscription_service.cancel_subscription
+  expected: resolved
+
+- caller: services.auth_service.authenticate
+  callee: services.rate_limiter.RateLimiter.allow
+  expected: resolved
+
+- caller: services.auth_service.issue_token
+  callee: utils.ids.generate_id
+  expected: resolved
+
+- caller: services.billing_service.charge_card
+  callee: utils.retry.retry_with_backoff
+  expected: resolved
+
+- caller: services.billing_service.charge_card
+  callee: services.billing_service._submit_charge
+  expected: resolved
+
+- caller: services.invoice_service._default_notifier
+  callee: services.notification_service.EmailNotifier
+  expected: resolved
+
+- caller: services.invoice_service.create_invoice
+  callee: utils.validation.validate_amount
+  expected: resolved
+
+- caller: services.invoice_service.create_invoice
+  callee: models.invoice.Invoice
+  expected: resolved
+
+- caller: services.invoice_service.create_invoice
+  callee: utils.ids.generate_id
+  expected: resolved
+
+- caller: services.invoice_service.create_invoice
+  callee: services.notification_service.notify_invoice_created
+  expected: resolved
+
+- caller: services.invoice_service.create_invoice
+  callee: services.invoice_service._default_notifier
+  expected: resolved
+
+- caller: services.invoice_service.refund_invoice
+  callee: services.invoice_service.get_invoice
+  expected: resolved
+
+- caller: services.invoice_service.refund_invoice
+  callee: services.billing_service.charge_card
+  expected: resolved
+
+- caller: services.invoice_service.list_invoices
+  callee: utils.pagination.paginate
+  expected: resolved
+
+- caller: services.notification_service.send_email
+  callee: services.notification_service.EmailNotifier
+  expected: resolved
+
+- caller: services.notification_service.send_email
+  callee: services.notification_service.EmailNotifier.send
+  expected: resolved
+  note: >
+    `send_email` always constructs and calls its own EmailNotifier in the
+    same file, so the same-file tie-break happens to land correctly here —
+    contrast with notify_invoice_created's genuinely polymorphic call below.
+
+- caller: services.report_service.build_usage_report
+  callee: models.report.UsageReport
+  expected: resolved
+
+- caller: services.report_service.build_usage_report
+  callee: utils.time.utcnow
+  expected: resolved
+
+- caller: services.subscription_service.renew_subscription
+  callee: services.billing_service.charge_card
+  expected: resolved
+
+- caller: services.subscription_service.renew_subscription
+  callee: utils.time.utcnow
+  expected: resolved
+
+- caller: services.subscription_service.renew_subscription
+  callee: services.notification_service.send_email
+  expected: resolved
+
+- caller: services.user_service.create_user
+  callee: models.user.User
+  expected: resolved
+
+- caller: services.user_service.create_user
+  callee: utils.ids.generate_id
+  expected: resolved
+
+- caller: services.user_service.create_user
+  callee: utils.validation.sanitize_email
+  expected: resolved
+
+- caller: services.user_service.create_user
+  callee: utils.strings.normalize_name
+  expected: resolved
+
+- caller: services.user_service.update_profile
+  callee: services.user_service.get_user
+  expected: resolved
+
+- caller: services.user_service.update_profile
+  callee: utils.strings.normalize_name
+  expected: resolved
+
+# --- heuristic-limit cases (>=3, precision < 1.0 is expected) -----------
+
+- caller: app.dispatch_create
+  callee: handlers.invoices.InvoiceHandler.create
+  expected: heuristic
+  note: >
+    Duck-typed dispatch: `dispatch_create(handler, req)` calls
+    `handler.create(req)` where `handler` can be any endpoint handler
+    exposing `create(self, req)`. InvoiceHandler.create and
+    UserHandler.create both match by name+arity, so a static call-graph
+    can't know which one a given call site means. In the indexed corpus
+    the same-file/id tie-break actually resolves this call to
+    handlers.users.UserHandler.create instead (see the paired entry below)
+    — both are equally "correct" ground truth, and vexus can only ever
+    find one of them at a time.
+
+- caller: app.dispatch_create
+  callee: handlers.users.UserHandler.create
+  expected: heuristic
+  note: >
+    The other equally-valid target for the same ambiguous call site above;
+    this is the one vexus's resolver actually lands on (lowest symbol id
+    among the name+arity candidates).
+
+- caller: handlers.billing.BillingHandler.close
+  callee: services.billing_service.close
+  expected: heuristic
+  note: >
+    Same-name-different-module: the true call is
+    `billing_service.close(req["period_id"])`, but `close` also names
+    handlers.billing.BillingHandler.close itself (the caller's own method)
+    and jobs.cleanup.close, both with the same arity. In the indexed
+    corpus this is worse than a mere tie: the same-file-first tie-break
+    resolves the call to handlers.billing.BillingHandler.close ITSELF (a
+    self-referential false positive), missing the true external target
+    entirely.
+
+- caller: services.notification_service.notify_invoice_created
+  callee: services.notification_service.EmailNotifier.send
+  expected: heuristic
+  note: >
+    Polymorphic dispatch: `notifier` is duck-typed (EmailNotifier or
+    SmsNotifier, or any future channel exposing `send(self, message)`), so
+    `notifier.send(...)` can't be resolved to one concrete method by static
+    analysis. vexus's same-file tie-break happens to land on
+    EmailNotifier.send (see the paired entry below).
+
+- caller: services.notification_service.notify_invoice_created
+  callee: services.notification_service.SmsNotifier.send
+  expected: heuristic
+  note: >
+    The other equally-valid target for the same polymorphic call site
+    above; vexus's resolver never finds this one (EmailNotifier.send has
+    the lower symbol id and always wins the same-file tie-break).

@@ -1,0 +1,262 @@
+# Ground-truth queries for eval/corpora/pyapp.
+#
+# Schema (see docs/superpowers/plans/2026-07-26-plan-5-eval-bench-distribution.md,
+# Global Constraints):
+#   q       - the natural-language question or, for callers/callees, the
+#             target symbol's qualname
+#   tool    - search | explore | callers | callees (default: search)
+#   expect  - qualnames that must appear in the tool's result
+#   graded  - optional qualname -> 0-3 relevance grade, for nDCG@10
+#
+# Every qualname below was read back from a real `vexus index` run over
+# this corpus (VEXUS_EMBEDDER=mock) — see
+# crates/vexus-cli/tests/eval_corpora_validation.rs, which is the gate that
+# gets to say so authoritatively.
+
+# --- explore: how-does-X-work -----------------------------------------
+
+- q: "how does invoice creation work"
+  tool: explore
+  expect:
+    - services.invoice_service.create_invoice
+    - utils.validation.validate_amount
+    - services.notification_service.notify_invoice_created
+  graded:
+    services.invoice_service.create_invoice: 3
+    utils.validation.validate_amount: 2
+    services.notification_service.notify_invoice_created: 2
+
+- q: "how does user registration work"
+  tool: explore
+  expect:
+    - services.user_service.create_user
+    - utils.validation.sanitize_email
+    - utils.strings.normalize_name
+  graded:
+    services.user_service.create_user: 3
+    utils.validation.sanitize_email: 2
+    utils.strings.normalize_name: 2
+
+- q: "how does login rate limiting protect against brute-force attempts"
+  tool: explore
+  expect:
+    - services.auth_service.authenticate
+    - services.rate_limiter.RateLimiter.allow
+  graded:
+    services.rate_limiter.RateLimiter.allow: 3
+    services.auth_service.authenticate: 2
+
+- q: "how does closing out a billing period work"
+  tool: explore
+  expect:
+    - services.billing_service.close
+    - handlers.billing.BillingHandler.close
+  graded:
+    services.billing_service.close: 3
+    handlers.billing.BillingHandler.close: 1
+
+- q: "how does subscription renewal work end to end"
+  tool: explore
+  expect:
+    - services.subscription_service.renew_subscription
+    - services.billing_service.charge_card
+    - services.notification_service.send_email
+  graded:
+    services.subscription_service.renew_subscription: 3
+    services.billing_service.charge_card: 2
+    services.notification_service.send_email: 1
+
+- q: "how are invoice refunds processed"
+  tool: explore
+  expect:
+    - services.invoice_service.refund_invoice
+    - services.billing_service.charge_card
+  graded:
+    services.invoice_service.refund_invoice: 3
+    services.billing_service.charge_card: 2
+
+- q: "how does the retry helper handle a flaky call"
+  tool: explore
+  expect:
+    - utils.retry.retry_with_backoff
+
+- q: "how do inbound Stripe webhook events get handled"
+  tool: explore
+  expect:
+    - handlers.webhooks.WebhookHandler.receive_stripe_event
+    - handlers.webhooks.WebhookHandler._handle_charge_failed
+
+- q: "how is a usage report generated for a customer"
+  tool: explore
+  expect:
+    - services.report_service.build_usage_report
+    - services.invoice_service.list_invoices
+
+- q: "how does stale session cleanup work"
+  tool: explore
+  expect:
+    - jobs.cleanup.cleanup_stale_sessions
+    - jobs.cleanup.close
+
+# --- search: where-is-X -------------------------------------------------
+
+- q: "where is the database connection pool implemented"
+  expect:
+    - db.ConnectionPool
+
+- q: "where do we generate opaque ids for new records"
+  expect:
+    - utils.ids.generate_id
+
+- q: "where is an email address sanitized before storage"
+  expect:
+    - utils.validation.sanitize_email
+
+- q: "where is pagination applied to list results"
+  expect:
+    - utils.pagination.paginate
+
+- q: "where do we turn arbitrary text into a url slug"
+  expect:
+    - utils.strings.slugify
+
+- q: "where is a session token minted"
+  expect:
+    - services.auth_service.issue_token
+
+- q: "where is a session token invalidated"
+  expect:
+    - services.auth_service.revoke_token
+
+- q: "where is the app's HTTP route table built"
+  expect:
+    - app.build_routes
+
+- q: "where is application configuration loaded from the environment"
+  expect:
+    - config.load_config
+
+- q: "where do we format a timestamp for a human-readable email"
+  expect:
+    - utils.time.format_timestamp
+
+# --- search: find-by-concept-not-name (semantic value, not keyword) ----
+
+- q: "throttle repeated login attempts"
+  expect:
+    - services.rate_limiter.RateLimiter.allow
+  graded:
+    services.rate_limiter.RateLimiter.allow: 3
+    services.rate_limiter.RateLimiter: 2
+
+- q: "prevent header injection in outbound email addresses"
+  expect:
+    - utils.validation.sanitize_email
+  graded:
+    utils.validation.sanitize_email: 3
+
+- q: "avoid a thundering herd when retrying a flaky payment processor"
+  expect:
+    - utils.retry.retry_with_backoff
+  graded:
+    utils.retry.retry_with_backoff: 3
+
+- q: "duck-typed dispatch across endpoint handlers"
+  expect:
+    - app.dispatch_create
+  graded:
+    app.dispatch_create: 3
+
+- q: "polymorphic notification channel abstraction"
+  expect:
+    - services.notification_service.notify_invoice_created
+    - services.notification_service.EmailNotifier
+    - services.notification_service.SmsNotifier
+  graded:
+    services.notification_service.notify_invoice_created: 3
+    services.notification_service.EmailNotifier: 2
+    services.notification_service.SmsNotifier: 2
+
+# --- callers (>=5 queries) ----------------------------------------------
+
+- q: services.invoice_service.get_invoice
+  tool: callers
+  expect:
+    - handlers.invoices.InvoiceHandler.get
+    - handlers.webhooks.WebhookHandler._handle_charge_failed
+    - services.invoice_service.refund_invoice
+
+- q: services.billing_service.charge_card
+  tool: callers
+  expect:
+    - handlers.billing.BillingHandler.charge
+    - services.invoice_service.refund_invoice
+    - services.subscription_service.renew_subscription
+
+- q: utils.strings.normalize_name
+  tool: callers
+  expect:
+    - services.user_service.create_user
+    - services.user_service.update_profile
+
+- q: services.notification_service.send_email
+  tool: callers
+  expect:
+    - handlers.webhooks.WebhookHandler._handle_charge_failed
+    - jobs.invoice_reminders.send_invoice_reminders
+    - services.subscription_service.renew_subscription
+
+- q: utils.ids.generate_id
+  tool: callers
+  expect:
+    - services.auth_service.issue_token
+    - services.invoice_service.create_invoice
+    - services.user_service.create_user
+
+- q: services.user_service.get_user
+  tool: callers
+  expect:
+    - handlers.users.UserHandler.get
+    - services.user_service.update_profile
+
+# --- callees (>=5 queries) -----------------------------------------------
+
+- q: services.invoice_service.create_invoice
+  tool: callees
+  expect:
+    - utils.validation.validate_amount
+    - utils.ids.generate_id
+    - services.notification_service.notify_invoice_created
+    - services.invoice_service._default_notifier
+
+- q: handlers.auth.AuthHandler.login
+  tool: callees
+  expect:
+    - services.auth_service.authenticate
+    - services.auth_service.issue_token
+
+- q: services.subscription_service.renew_subscription
+  tool: callees
+  expect:
+    - services.billing_service.charge_card
+    - utils.time.utcnow
+    - services.notification_service.send_email
+
+- q: handlers.reports.ReportHandler.generate_usage_report
+  tool: callees
+  expect:
+    - services.invoice_service.list_invoices
+    - services.report_service.build_usage_report
+
+- q: services.user_service.create_user
+  tool: callees
+  expect:
+    - utils.ids.generate_id
+    - utils.validation.sanitize_email
+    - utils.strings.normalize_name
+
+- q: services.billing_service.charge_card
+  tool: callees
+  expect:
+    - utils.retry.retry_with_backoff
+    - services.billing_service._submit_charge

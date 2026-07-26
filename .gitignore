@@ -1,3 +1,8 @@
 .vexus/
+# Explicit belt-and-suspenders for eval fixture corpora: index artifacts
+# from ad-hoc `vexus index eval/corpora/...` runs must never be committed
+# (the `.vexus/` pattern above already covers this at any depth, but the
+# eval fixtures get their own line since it's load-bearing for that gate).
+eval/**/.vexus/
 .superpowers/
 /target
