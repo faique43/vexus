@@ -4,7 +4,7 @@
 //! a lazily-built embedder shared for the life of the process.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 use vexus_embed::Embedder;
@@ -27,11 +27,20 @@ impl AppState {
             .clone()
     }
 
+    /// Locks the store, recovering the guard even if a previous holder
+    /// panicked mid-transaction. Safe because rusqlite rolls a transaction
+    /// back on unwind — a poisoned lock here means "some earlier call
+    /// panicked", not "the store is corrupt" — so bricking every subsequent
+    /// tool call over it would turn one bad request into a dead server.
+    pub fn lock_store(&self) -> MutexGuard<'_, vexus_core::Store> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Renders the `status` tool's plain-text report. Kept as a plain method
     /// on `AppState` (rather than inline in the tool handler) so it's
     /// directly unit-testable without going through the MCP transport.
     pub fn status_text(&self) -> Result<String> {
-        let store = self.store.lock().expect("store mutex poisoned");
+        let store = self.lock_store();
         let c = store.counts()?;
         let model_id = store.meta("model_id")?.unwrap_or_else(|| "none".into());
         let backlog = store.embed_backlog()?;
