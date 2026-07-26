@@ -12,10 +12,8 @@ def close(period_id):
     """Close out the billing period identified by `period_id`, locking it
     against further charges.
 
-    Retrieval-challenge note: `jobs.cleanup` also defines a function named
-    `close` (closing a stale session, not a billing period) — see
-    `eval/edges/pyapp.yaml` for the same-name-different-module case this
-    produces for any caller that reaches this through an unqualified name.
+    Note: `jobs.cleanup` also has a `close` (for stale sessions, not
+    billing periods) — same name, different job.
     """
     return {"period_id": period_id, "status": "closed"}
 

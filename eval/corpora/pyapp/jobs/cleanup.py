@@ -4,10 +4,8 @@
 def close(session_id):
     """Close a single stale session, releasing its server-side resources.
 
-    Retrieval-challenge note: `services.billing_service` also defines a
-    function named `close` (closing a billing period, not a session) — see
-    `eval/edges/pyapp.yaml` for the same-name-different-module case this
-    produces for any caller that reaches either through an unqualified name.
+    Note: `services.billing_service` also has a `close` (for billing
+    periods, not sessions) — same name, different job.
     """
     return {"session_id": session_id, "status": "closed"}
 

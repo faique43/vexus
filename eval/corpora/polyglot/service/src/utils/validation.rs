@@ -7,10 +7,8 @@ pub fn validate_display_name(name: &str) -> bool {
 
 /// Validate a single order line item's sku format before it reaches pricing.
 ///
-/// Retrieval-challenge note: `services::auth` also defines a function named
-/// `validate` (session-token validation) with the same arity. See
-/// `eval/edges/polyglot.yaml` for the same-name-different-module case this
-/// produces for any caller reaching either through the bare name.
+/// Note: `services::auth` also has a `validate`, for session tokens — same
+/// name, unrelated job. Don't reach for that one when you mean this.
 pub fn validate(input: &str) -> bool {
     !input.is_empty() && input.starts_with("sku-")
 }

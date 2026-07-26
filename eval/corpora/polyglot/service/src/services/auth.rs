@@ -12,9 +12,8 @@ pub fn register_user(email: &str, display_name: &str) -> String {
 
 /// Validate a session token, returning whether it is still active.
 ///
-/// Retrieval-challenge note: `utils::validation` also defines a function
-/// named `validate` (sku validation, unrelated to tokens) with the same
-/// arity — see `eval/edges/polyglot.yaml`.
+/// Note: `utils::validation` also has a `validate` (sku format, unrelated
+/// to tokens) — same name, different job.
 pub fn validate(token: &str) -> bool {
     !token.is_empty()
 }

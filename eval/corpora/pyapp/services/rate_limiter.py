@@ -1,9 +1,7 @@
 """Per-key request rate limiting for abusive-client protection.
 
-Retrieval-challenge note: callers and product docs usually describe this
-capability as "throttling"; internally it is always called rate limiting,
-so a query for "throttle repeated login attempts" has to rely on semantic
-matching rather than a literal keyword hit against this module.
+Support tickets and product docs usually call this "throttling"; the code
+has always called it rate limiting instead.
 """
 
 import time

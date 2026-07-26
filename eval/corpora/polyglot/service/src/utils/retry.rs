@@ -5,10 +5,10 @@ use std::time::Duration;
 
 /// Call `f` once, sleeping briefly on failure.
 ///
-/// Production code would retry multiple times with jittered exponential
-/// backoff so a burst of retries doesn't become its own thundering herd
-/// against the downstream service; this fixture keeps it to a single
-/// attempt so indexing stays deterministic.
+/// TODO: only makes a single attempt for now. The intent is jittered
+/// exponential backoff across several attempts, so a burst of retries
+/// doesn't become its own thundering herd against the downstream service —
+/// that part hasn't landed yet.
 pub fn retry_with_backoff<F: FnOnce() -> bool>(f: F) -> bool {
     let ok = f();
     if !ok {

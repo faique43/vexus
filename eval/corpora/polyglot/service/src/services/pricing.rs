@@ -29,13 +29,13 @@ impl Discount for FlatDiscount {
 }
 
 /// Quote the total price for `items`, applying the configured discount
-/// strategy (a flat 0-cent discount by default, in this fixture).
+/// strategy (a flat 0-cent discount by default).
 ///
-/// Retrieval-challenge note: `discount` is a `Box<dyn Discount>` — the
-/// `discount.apply(...)` call below is trait-object dispatch, so a static
-/// call-graph can't know at this call site whether it lands in
-/// `PercentageDiscount::apply` or `FlatDiscount::apply`. See
-/// `eval/edges/polyglot.yaml` for the heuristic-limit case this produces.
+/// Note: `discount` is a `Box<dyn Discount>`, so `discount.apply(...)`
+/// below is trait-object dispatch — whether it lands in
+/// `PercentageDiscount::apply` or `FlatDiscount::apply` is decided at
+/// runtime by whatever gets boxed above, not by anything you can read off
+/// this call site.
 pub fn quote_total(items: &[(String, u32)]) -> u64 {
     let subtotal = base_price(items);
     let discount: Box<dyn Discount> = Box::new(PercentageDiscount { percent_off: 0 });

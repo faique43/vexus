@@ -13,9 +13,7 @@ class BillingHandler:
     def close(self, req):
         """Handle POST /billing/close: close out the current billing period.
 
-        Retrieval-challenge note: `services.billing_service` also defines a
-        function named `close` (a different, module-level `close`); see
-        `eval/edges/pyapp.yaml` for the same-name-different-module case this
-        call site produces.
+        Note: delegates to services.billing_service.close, a separate
+        module-level function that happens to share this method's name.
         """
         return billing_service.close(req["period_id"])

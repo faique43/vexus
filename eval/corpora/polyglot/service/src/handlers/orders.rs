@@ -7,11 +7,9 @@ use crate::utils::validation::validate;
 /// Handle a "create order" request: validate the cart, quote the total,
 /// then place the order.
 ///
-/// Retrieval-challenge note: `validate` is a bare, unqualified call —
-/// `services::auth` also defines a function named `validate` (session-token
-/// validation, unrelated to sku validation) with the same arity. See
-/// `eval/edges/polyglot.yaml` for the same-name-different-module case this
-/// produces.
+/// Note: this calls `utils::validation::validate` (sku format) —
+/// `services::auth::validate` (session tokens) is a different function
+/// with the same name, unrelated to this check.
 pub fn create_order_endpoint(customer_id: &str, items: Vec<(String, u32)>) -> String {
     for (sku, _qty) in &items {
         if !validate(sku) {

@@ -9,12 +9,9 @@ pub struct Order {
 impl Order {
     /// Construct a new order for the given total.
     ///
-    /// Retrieval-challenge note: `models::user::User` also defines an
-    /// associated function named `new` with the same arity (two params) —
-    /// vexus's indexer doesn't nest associated functions under their `impl`
-    /// block (only free-standing definitions are captured), so both `new`s
-    /// are indistinguishable flat symbols by name+arity alone. See
-    /// `eval/edges/polyglot.yaml` for the heuristic-limit case this produces.
+    /// Note: `User::new` takes the same two-argument shape as this one —
+    /// same name, different type. Easy to grab the wrong `new` if your
+    /// editor's "go to definition" isn't scoped by type.
     pub fn new(id: String, total_cents: u64) -> Self {
         Self { id, total_cents }
     }

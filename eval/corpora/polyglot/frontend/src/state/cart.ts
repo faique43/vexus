@@ -12,14 +12,9 @@ export const cartStore = new Store<CartItem[]>([]);
 
 /** Add an item to the cart, merging quantities if the sku is already present.
  *
- * Retrieval-challenge note: `validate` is a bare, unqualified call to a
- * frontend-local sku validator — but `service/utils/validation.rs` and
- * `service/services/auth.rs` also define same-arity functions named
- * `validate` in this same indexed corpus. vexus resolves calls by name
- * across the whole index regardless of source language, so this is an
- * honest illustration of a cross-language false-positive risk, not a case
- * automatic resolution is expected to get right. See
- * `eval/edges/polyglot.yaml`.
+ * Note: `validate` here is this module's own local sku format check — the
+ * backend has its own, separate `validate` for session tokens and another
+ * for sku format server-side; don't assume this one covers those.
  */
 export function addItem(sku: string, qty: number): void {
     if (!validate(sku)) {

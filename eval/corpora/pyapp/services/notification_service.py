@@ -20,11 +20,10 @@ class SmsNotifier:
 def notify_invoice_created(invoice, notifier):
     """Notify the customer that `invoice` was created, via whichever `notifier` was configured.
 
-    Retrieval-challenge note: `notifier` is duck-typed — it can be an
-    `EmailNotifier` or `SmsNotifier` (or any future channel exposing
-    `send(self, message)`), so the `notifier.send(...)` call below can't be
-    resolved to one concrete method by static analysis alone. See
-    `eval/edges/pyapp.yaml` for the heuristic-limit case this produces.
+    Note: `notifier` is duck-typed — callers pass an `EmailNotifier`, an
+    `SmsNotifier`, or any future channel exposing `send(self, message)` —
+    so which one actually runs is decided entirely by the caller, not by
+    this function.
     """
     return notifier.send(f"Invoice {invoice.id} for {invoice.amount_cents} created")
 
