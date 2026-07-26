@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
-ignore = "0.4"
+ignore.workspace = true
 notify.workspace = true
 libc.workspace = true
 vexus-core = { path = "../vexus-core" }
