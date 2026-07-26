@@ -27,8 +27,8 @@ use crate::tools::{explore, graph, open, search};
 struct SearchParams {
     /// Free-text query — words, a symbol name, or a short question.
     query: String,
-    /// Max results to return (default 10).
-    #[schemars(description = "Max results to return (default 10).")]
+    /// Max results to return (default 10, max 100).
+    #[schemars(description = "Max results to return (default 10, max 100).")]
     limit: Option<u32>,
     /// Token budget for the rendered result list (default 4000, capped at 20000).
     #[schemars(
@@ -81,8 +81,8 @@ struct ExploreParams {
 struct ImpactParams {
     /// A symbol qualname/name (e.g. `app.util.slug`).
     symbol: String,
-    /// Traversal depth (default 5, max 10).
-    #[schemars(description = "Traversal depth (default 5, max 10).")]
+    /// Traversal depth (default 5, max 5).
+    #[schemars(description = "Traversal depth (default 5, max 5).")]
     max_depth: Option<u32>,
 }
 
@@ -99,7 +99,8 @@ milliseconds. Consult it BEFORE grep/find/read when looking for code.
 - Results wrong or missing? → `status` shows index freshness and coverage.
 
 Use grep only for what an index can't answer: exact string/regex hunts, comments,
-config values, generated files.";
+config values, generated files. The index is a static snapshot until you
+re-run 'vexus index' — check 'status' if results look stale.";
 
 #[derive(Clone)]
 pub struct VexusServer {
@@ -212,7 +213,7 @@ impl VexusServer {
     }
 
     #[tool(
-        description = "Transitive blast radius of changing a symbol — every caller chain that reaches it, plus import dependents."
+        description = "Transitive blast radius of changing a symbol — best-effort caller chains that reach it (capped), plus direct import dependents."
     )]
     async fn impact(&self, Parameters(params): Parameters<ImpactParams>) -> String {
         let state = self.state.clone();
