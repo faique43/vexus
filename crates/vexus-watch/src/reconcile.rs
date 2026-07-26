@@ -35,6 +35,13 @@ use crate::update::{update_file, UpdateOutcome};
 /// sees real movement.
 const PROGRESS_EVERY: usize = 25;
 
+/// `updated + removed` beyond which a reconcile pass flags itself as a
+/// "bulk" reindex via `meta('reconcile_bulk')` (finding I7) — consumed only
+/// by `vexus_mcp::state::freshness_header`'s reconcile-progress detail, to
+/// tell a caller "this is a large structural change, expect the warning to
+/// stick around for a while" apart from "catching up on a couple of edits".
+const BULK_REINDEX_THRESHOLD: usize = 200;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReconcileReport {
     /// Files that were (re)indexed: changed content, or newly appeared on
@@ -48,20 +55,28 @@ pub struct ReconcileReport {
     pub unchanged: usize,
 }
 
-/// Repo-relative paths (forward-slash-normalized) `git` considers tracked
-/// in `root`, via `git ls-files -z` (NUL-separated, so a filename
-/// containing a newline can't corrupt the split the way plain `ls-files`
-/// output could). `None` on any subprocess failure — `git` missing from
-/// `PATH`, `root` not actually a valid repository despite having a `.git`
-/// entry, a non-zero exit, anything — so the caller can fall back to the
-/// `ignore` walk uniformly rather than needing to distinguish failure
-/// modes.
+/// Repo-relative paths (forward-slash-normalized) `git` considers in scope
+/// for `root` — tracked (`--cached`) AND untracked-but-not-ignored
+/// (`--others --exclude-standard`) — via `git ls-files -z` (NUL-separated,
+/// so a filename containing a newline can't corrupt the split the way plain
+/// `ls-files` output could). Without `--others --exclude-standard`, a file
+/// created (and never `git add`ed) while nothing was watching would be
+/// invisible to reconcile even though it's exactly the kind of offline
+/// change reconcile exists to catch up on; `--exclude-standard` still keeps
+/// `.gitignore`'d files out, matching `index_repo`'s own `ignore`-crate walk.
+/// `None` on any subprocess failure — `git` missing from `PATH`, `root` not
+/// actually a valid repository despite having a `.git` entry, a non-zero
+/// exit, anything — so the caller can fall back to the `ignore` walk
+/// uniformly rather than needing to distinguish failure modes.
 fn git_ls_files(root: &Path) -> Option<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
         .arg("ls-files")
         .arg("-z")
+        .arg("--cached")
+        .arg("--others")
+        .arg("--exclude-standard")
         .output()
         .ok()?;
     if !output.status.success() {
@@ -125,11 +140,12 @@ pub fn reconcile(
 /// state into `Stale` either, so nothing would ever move it off
 /// `Reconciling` again short of another reconcile pass succeeding).
 ///
-/// Every write here is best-effort: clears `reconcile_progress`
-/// unconditionally (this also fixes the `reconcile_inner`-internal `?` that
-/// used to skip that clear on any mid-loop error exit), then tries to
-/// persist the *intended* terminal state (`Fresh` on success, `Degraded` on
-/// failure) — and if that specific write itself errors, falls back to
+/// Every write here is best-effort: clears `reconcile_progress` and
+/// `reconcile_bulk` unconditionally (this also fixes the
+/// `reconcile_inner`-internal `?` that used to skip that clear on any
+/// mid-loop error exit), then tries to persist the *intended* terminal
+/// state (`Fresh` on success, `Degraded` on failure) — and if that specific
+/// write itself errors, falls back to
 /// trying `Degraded` too (a no-op if `Degraded` was already the intended
 /// state). `Degraded` is the deliberate fallback target rather than leaving
 /// the state untouched: it's a state `drain_and_apply` CAN heal back to
@@ -140,6 +156,7 @@ pub fn reconcile(
 /// for itself.
 fn finalize(store: &mut Store, succeeded: bool) {
     let _ = store.delete_meta("reconcile_progress");
+    let _ = store.delete_meta("reconcile_bulk");
     let intended = if succeeded {
         Freshness::Fresh
     } else {
@@ -171,6 +188,10 @@ fn reconcile_inner(
 
     let total = all_paths.len();
     let mut report = ReconcileReport::default();
+    // Finding I7: written once, the first time `updated + removed` crosses
+    // `BULK_REINDEX_THRESHOLD` — a `bool` guard so a big reconcile doesn't
+    // pay for a redundant `set_meta` on every later file past that point.
+    let mut bulk_flagged = false;
 
     for (i, rel) in all_paths.iter().enumerate() {
         match update_file(store, embedder, root, rel)? {
@@ -183,6 +204,11 @@ fn reconcile_inner(
             // See this fn's doc comment: a single file's failure degrades
             // gracefully rather than aborting the whole pass.
             UpdateOutcome::Failed(_) => {}
+        }
+
+        if !bulk_flagged && report.updated + report.removed > BULK_REINDEX_THRESHOLD {
+            store.set_meta("reconcile_bulk", "1")?;
+            bulk_flagged = true;
         }
 
         let done = i + 1;
@@ -322,7 +348,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write(root, "tracked.py", "def tracked():\n    return 1\n");
+        // Untracked but not gitignored: per finding I4, `git ls-files` is
+        // called with `--others --exclude-standard`, so this must now be
+        // treated as in scope too — a file created while nothing was
+        // watching (and never `git add`ed) is exactly the kind of offline
+        // change reconcile exists to catch.
         write(root, "untracked.py", "def untracked():\n    return 2\n");
+        write(root, ".gitignore", "ignored.py\n");
+        write(root, "ignored.py", "def ignored():\n    return 3\n");
 
         let git = |args: &[&str]| Command::new("git").arg("-C").arg(root).args(args).output();
         let Ok(init) = git(&["init", "-q"]) else {
@@ -341,6 +374,7 @@ mod tests {
                 "user.name=t",
                 "add",
                 "tracked.py",
+                ".gitignore",
             ],
             vec![
                 "-c",
@@ -364,15 +398,21 @@ mod tests {
         let mut store = Store::open(&root.join(".vexus/index.db")).unwrap();
         let report = reconcile(&mut store, None, root).unwrap();
 
-        // Only the git-tracked file should have been indexed — proves the
-        // git-ls-files path (not a plain directory walk, which would have
-        // also picked up untracked.py) actually ran.
-        assert_eq!(report.updated, 1);
+        // tracked.py (cached) and untracked.py (others, not ignored) both
+        // get indexed; ignored.py (matches .gitignore) does not — proves the
+        // git-ls-files path ran with `--cached --others --exclude-standard`,
+        // not a bare `ls-files` (tracked-only) or a plain directory walk
+        // (which would also have picked up ignored.py).
+        assert_eq!(report.updated, 2);
         assert!(store.file_hash("tracked.py").unwrap().is_some());
+        assert!(
+            store.file_hash("untracked.py").unwrap().is_some(),
+            "untracked but not gitignored files must now be indexed"
+        );
         assert_eq!(
-            store.file_hash("untracked.py").unwrap(),
+            store.file_hash("ignored.py").unwrap(),
             None,
-            "untracked.py must not be indexed when a git repo is present"
+            "gitignored files must still be excluded"
         );
     }
 
@@ -480,5 +520,63 @@ mod tests {
         let mut reader = Store::open_read_only(&db_path).unwrap();
         finalize(&mut reader, true);
         finalize(&mut reader, false);
+    }
+
+    /// Finding I7: crossing `BULK_REINDEX_THRESHOLD` changed files during a
+    /// reconcile pass must flag `meta('reconcile_bulk')` — checked against
+    /// `reconcile_inner` directly (not the public `reconcile` wrapper, which
+    /// calls `finalize` right after and would clear the flag before this
+    /// test could ever observe it set).
+    #[test]
+    fn reconcile_flags_bulk_once_more_than_the_threshold_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..(BULK_REINDEX_THRESHOLD + 1) {
+            write(
+                root,
+                &format!("f{i}.py"),
+                &format!("def f{i}():\n    return {i}\n"),
+            );
+        }
+
+        let mut store = Store::open(&root.join(".vexus/index.db")).unwrap();
+        let report = reconcile_inner(&mut store, None, root).unwrap();
+        assert_eq!(report.updated, BULK_REINDEX_THRESHOLD + 1);
+        assert_eq!(
+            store.meta("reconcile_bulk").unwrap().as_deref(),
+            Some("1"),
+            "more than {BULK_REINDEX_THRESHOLD} changed files must flag a bulk reindex"
+        );
+    }
+
+    #[test]
+    fn reconcile_does_not_flag_bulk_for_a_small_change_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def helper():\n    return 1\n");
+
+        let mut store = Store::open(&root.join(".vexus/index.db")).unwrap();
+        let report = reconcile_inner(&mut store, None, root).unwrap();
+        assert_eq!(report.updated, 1);
+        assert_eq!(
+            store.meta("reconcile_bulk").unwrap(),
+            None,
+            "a small change set must not flag a bulk reindex"
+        );
+    }
+
+    #[test]
+    fn finalize_clears_the_bulk_flag_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join(".vexus/index.db")).unwrap();
+        store.set_meta("reconcile_bulk", "1").unwrap();
+
+        finalize(&mut store, true);
+
+        assert_eq!(
+            store.meta("reconcile_bulk").unwrap(),
+            None,
+            "finalize must clear reconcile_bulk alongside reconcile_progress"
+        );
     }
 }

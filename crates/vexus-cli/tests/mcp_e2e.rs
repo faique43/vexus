@@ -197,12 +197,18 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
         "expected an index-counts line: {status:?}"
     );
 
-    // search: ranked result line.
+    // search: ranked result line. `contains` (not `starts_with`) tolerates
+    // the `⚠ index reconciling ...` freshness header `apply_header` prepends
+    // if this call happens to land while the startup reconcile pass (which
+    // runs on every `serve`, writer or not) is still in flight — a real,
+    // valid state (see the watcher e2e test below, which documents the same
+    // tolerance), not a race worth papering over by making `serve` block
+    // tool calls until reconcile finishes.
     let mut search_args = serde_json::Map::new();
     search_args.insert("query".to_string(), json!("alpha_process"));
     let search = call_tool(&client, "search", Some(search_args)).await;
     assert!(
-        search.starts_with("1. "),
+        search.contains("1. app.alpha_process"),
         "expected a ranked line: {search:?}"
     );
     assert!(search.contains("app.py"), "got: {search:?}");
