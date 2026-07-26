@@ -85,6 +85,13 @@ impl Store {
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Finding I8: without this, two writers racing for the same SQLite
+        // lock (e.g. a `vexus serve` writer thread and a concurrently
+        // launched `vexus index`) get an immediate `SQLITE_BUSY` instead of
+        // a bounded wait — 5s is generous enough to ride out any single
+        // write transaction this codebase does, without hanging indefinitely
+        // if something is actually stuck.
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         Self::init_if_empty(&conn)?;
         let vec_available = conn
             .query_row("SELECT vec_version()", [], |_| Ok(()))
@@ -110,6 +117,10 @@ impl Store {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        // Finding I8: a read-only connection can still hit SQLITE_BUSY
+        // establishing its WAL read snapshot while a writer holds the lock
+        // mid-transaction — worth a bounded wait here too, same as `open`.
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         let vec_available = conn
             .query_row("SELECT vec_version()", [], |_| Ok(()))
             .is_ok();
@@ -663,6 +674,29 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "missing table {t}");
         }
+    }
+
+    /// Finding I8: both `open` and `open_read_only` must set a real
+    /// `busy_timeout` — otherwise a writer and reader (or two writers)
+    /// racing for the same SQLite lock get an immediate `SQLITE_BUSY`
+    /// instead of a bounded wait.
+    #[test]
+    fn open_and_open_read_only_both_set_a_nonzero_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        let writer = Store::open(&db).unwrap();
+        let timeout: i64 = writer
+            .conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "writer busy_timeout must be set");
+
+        let reader = Store::open_read_only(&db).unwrap();
+        let timeout: i64 = reader
+            .conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "reader busy_timeout must be set");
     }
 
     #[test]

@@ -48,7 +48,10 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, question);
 
-    let store = state.lock_store_fresh();
+    let store = match state.lock_store_fresh() {
+        Ok(s) => s,
+        Err(msg) => return msg,
+    };
     let fresh_header = freshness_header(&store);
     let hits = match store.search_hybrid(question, query_vec.as_deref(), ENTRY_LIMIT) {
         Ok(h) => h,
@@ -182,7 +185,7 @@ mod tests {
             OnceLock::new();
         let _ = embedder_slot.set(None);
         AppState {
-            store: Mutex::new(store),
+            store: Mutex::new(Some(store)),
             embedder: embedder_slot,
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),
@@ -294,8 +297,8 @@ mod tests {
         assert!(out_fresh.starts_with("explore: \"alpha_process\"\n\n"));
 
         {
-            let mut store = state.store.lock().unwrap();
-            set_freshness(&mut store, Freshness::Reconciling).unwrap();
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Reconciling).unwrap();
         }
         let out_reconciling = explore_text(&state, "alpha_process", None);
         assert!(

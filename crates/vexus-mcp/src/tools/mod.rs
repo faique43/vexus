@@ -88,7 +88,11 @@ pub(crate) fn resolve_or_text(store: &Store, target: &str) -> Result<SymbolInfo,
 pub(crate) fn embed_query(state: &AppState, query: &str) -> Option<Vec<f32>> {
     let embedder = state.embedder()?;
     let same_model = {
-        let store = state.lock_store_fresh();
+        // Not ready yet (finding C3) degrades the same as "no embedder" —
+        // the caller's own `lock_store_fresh` call for the tool's main body
+        // will report the real "not ready" text; this one just needs to not
+        // panic.
+        let store = state.lock_store_fresh().ok()?;
         let indexed_id = store.meta("model_id").ok().flatten();
         let indexed_dim = store.meta("model_dim").ok().flatten();
         indexed_id.as_deref() == Some(embedder.id())

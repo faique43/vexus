@@ -148,6 +148,28 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Index { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
+            // Finding I8: hold the same advisory writer lock `vexus serve`
+            // uses for the whole run. If something else already holds it —
+            // in practice, almost always an already-running `vexus serve`,
+            // whose writer thread owns this index — refuse outright rather
+            // than risk two processes writing to the same SQLite file at
+            // once; an honest refusal beats corruption (the `busy_timeout`
+            // pragma alone would just make the two writes race instead of
+            // preventing the race). Holding the lock (rather than a
+            // check-and-release probe) for the whole run also means a
+            // `vexus serve` that starts concurrently correctly sees this
+            // process as the writer and starts in reader mode instead of
+            // racing it.
+            let _lock = match vexus_watch::WriterLock::try_acquire(&root)? {
+                Some(lock) => lock,
+                None => {
+                    eprintln!(
+                        "error: a vexus serve owns this index — indexing skipped \
+                         (stop it or let its watcher handle changes)"
+                    );
+                    std::process::exit(1);
+                }
+            };
             let mut store = open_store(&root)?;
             let r = pipeline::index_repo(&root, &mut store)?;
             println!(

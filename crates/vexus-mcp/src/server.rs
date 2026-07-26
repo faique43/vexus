@@ -263,7 +263,7 @@ mod tests {
         write(root, "a.py", "def f():\n    return 1\n");
         let store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
         let state = Arc::new(AppState {
-            store: Mutex::new(store),
+            store: Mutex::new(Some(store)),
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),

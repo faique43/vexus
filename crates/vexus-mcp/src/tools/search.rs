@@ -31,7 +31,10 @@ pub fn search_text(
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, query);
 
-    let store = state.lock_store_fresh();
+    let store = match state.lock_store_fresh() {
+        Ok(s) => s,
+        Err(msg) => return msg,
+    };
     let fresh_header = freshness_header(&store);
     let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
         Ok(hits) => hits,
@@ -103,7 +106,7 @@ mod tests {
         let _ = embedder_slot.set(Some(std::sync::Arc::new(vexus_embed::MockEmbedder)
             as std::sync::Arc<dyn vexus_embed::Embedder>));
         AppState {
-            store: Mutex::new(store),
+            store: Mutex::new(Some(store)),
             embedder: embedder_slot,
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),
@@ -119,7 +122,7 @@ mod tests {
             OnceLock::new();
         let _ = embedder_slot.set(None);
         AppState {
-            store: Mutex::new(store),
+            store: Mutex::new(Some(store)),
             embedder: embedder_slot,
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),
@@ -264,8 +267,8 @@ mod tests {
         );
 
         {
-            let mut store = state.store.lock().unwrap();
-            set_freshness(&mut store, Freshness::Reconciling).unwrap();
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Reconciling).unwrap();
         }
         let out_reconciling = search_text(&state, "compute_total", None, None);
         assert!(

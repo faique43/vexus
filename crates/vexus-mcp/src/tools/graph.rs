@@ -64,7 +64,10 @@ pub fn callers_text(
     let depth = depth.unwrap_or(1).clamp(1, 3);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let store = state.lock_store_fresh();
+    let store = match state.lock_store_fresh() {
+        Ok(s) => s,
+        Err(msg) => return msg,
+    };
     let fresh_header = freshness_header(&store);
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
@@ -96,7 +99,10 @@ pub fn callees_text(
     let depth = depth.unwrap_or(1).clamp(1, 3);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let store = state.lock_store_fresh();
+    let store = match state.lock_store_fresh() {
+        Ok(s) => s,
+        Err(msg) => return msg,
+    };
     let fresh_header = freshness_header(&store);
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
@@ -126,7 +132,10 @@ pub fn callees_text(
 pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> String {
     let max_depth = max_depth.unwrap_or(5).clamp(1, 5);
 
-    let store = state.lock_store_fresh();
+    let store = match state.lock_store_fresh() {
+        Ok(s) => s,
+        Err(msg) => return msg,
+    };
     let fresh_header = freshness_header(&store);
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
@@ -207,7 +216,7 @@ mod tests {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
         pipeline::index_repo(root, &mut store).unwrap();
         AppState {
-            store: Mutex::new(store),
+            store: Mutex::new(Some(store)),
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: std::sync::atomic::AtomicU64::new(0),

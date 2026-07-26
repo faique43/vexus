@@ -349,6 +349,87 @@ async fn watcher_e2e_search_miss_write_file_status_heals_then_search_hit() {
         .expect("clean MCP shutdown of `vexus serve` failed");
 }
 
+/// A repo of `n` trivially small files — used only to give a `vexus serve`
+/// winning the advisory lock a non-instant first index build, so the
+/// process spawned right after it has a real (not just theoretical) chance
+/// of starting before `index.db` exists at all.
+fn write_many_file_repo(root: &Path, n: usize) {
+    for i in 0..n {
+        write(
+            root,
+            &format!("f{i}.py"),
+            &format!("def fn_{i}():\n    return {i}\n"),
+        );
+    }
+}
+
+/// Finding C3 regression: a `vexus serve` that loses the advisory writer
+/// lock race to another `vexus serve` process — one that is *still
+/// building its very first index*, with no `index.db` on disk at all yet —
+/// used to fail its own startup `open_reader_with_probe` call with a bare
+/// `?` and die before ever completing the MCP `initialize` handshake (see
+/// `vexus_mcp::lib::serve_async`'s doc comments). No `vexus index` run
+/// happens first here — nothing on disk at all — and the winner gets a
+/// deliberately non-trivial fixture so the second process has a real shot
+/// at starting while `index.db` still doesn't exist. Whether or not that
+/// exact race actually lands on a given run, this proves the loser's
+/// `serve` always comes up (real MCP handshake, real `status` call) and
+/// always eventually reports the winner's completed index — never dies,
+/// never gets stuck.
+#[tokio::test(flavor = "multi_thread")]
+async fn loser_serve_survives_racing_the_winners_first_index_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_many_file_repo(root, 200);
+    assert!(!root.join(".vexus/index.db").exists());
+
+    let winner = connect_with_embedder(root, "mock").await;
+    // Spawned immediately after, with no delay: the loser races the
+    // winner's still-in-progress first index build.
+    let loser = connect_with_embedder(root, "mock").await;
+
+    // Both processes having already completed a real MCP `initialize`
+    // handshake (`connect_with_embedder` panics on failure) is itself most
+    // of what this test proves — the pre-fix bug meant the loser's child
+    // process could exit before that handshake ever finished. A `status`
+    // call must also succeed either way: a real report, or (finding C3's
+    // fallback) the "not ready yet" text — never a dead connection.
+    let status = call_tool(&loser, "status", None).await;
+    assert!(
+        status.contains("index:") || status.contains("index not ready"),
+        "loser must answer status — a real report or 'not ready' — not die: {status:?}"
+    );
+
+    // Whichever branch it started in, the loser must catch up once the
+    // winner's first index finishes — proving `status: None` (if it ever
+    // was) self-heals rather than serving a permanently empty/stuck state.
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(10);
+    let mut caught_up = false;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        last = call_tool(&loser, "status", None).await;
+        if last.contains("index: ") && !last.contains("index: 0 files") {
+            caught_up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        caught_up,
+        "loser never saw the winner's completed first index within 10s: {last:?}"
+    );
+
+    winner
+        .cancel()
+        .await
+        .expect("winner clean MCP shutdown failed");
+    loser
+        .cancel()
+        .await
+        .expect("loser clean MCP shutdown failed");
+}
+
 /// Dogfood: point the same real-stdio harness at the vexus repo itself and
 /// ask a real question ("how are edges resolved to symbols") that should
 /// pull in `crates/vexus-core/src/resolve.rs`. Requires `vexus index .` to

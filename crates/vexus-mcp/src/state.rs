@@ -2,6 +2,18 @@
 //! is `Send` but not `Sync`, so tool handlers take the lock inside
 //! `spawn_blocking` rather than holding a `&Store` across an `.await`), plus
 //! a lazily-built embedder shared for the life of the process.
+//!
+//! `store` is `Mutex<Option<Store>>`, not `Mutex<Store>` (finding C3): a
+//! reader process that lost the advisory writer-lock race may start up
+//! before the winner has finished building the index for the very first
+//! time, so `index.db` might not exist yet when this process's own reader
+//! connection would otherwise open. Rather than fail `serve` outright over
+//! that race, `lib.rs`'s `serve_async` hands this `AppState` a `None` in
+//! that case and spawns a background thread that keeps retrying until the
+//! winner's index appears, filling the `Option` in once it does. Every tool
+//! already funnels through `lock_store_fresh`, so `None` becomes one
+//! `Err(INDEX_NOT_READY)` text response at a single call site rather than a
+//! crash.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,8 +25,16 @@ use vexus_watch::{effective_freshness, role_line, Freshness};
 #[cfg(test)]
 use vexus_watch::{pipeline, set_freshness};
 
+/// What every tool returns verbatim (see `AppState::lock_store_fresh`)
+/// while this process's store isn't populated yet — a transient condition
+/// (the winner of the advisory writer lock is still building the index for
+/// the first time), not a real failure, so the message tells a caller to
+/// just retry rather than to give up.
+pub const INDEX_NOT_READY: &str =
+    "index not ready — another vexus serve is building it; retry shortly";
+
 pub struct AppState {
-    pub store: Mutex<vexus_core::Store>,
+    pub store: Mutex<Option<vexus_core::Store>>,
     pub embedder: OnceLock<Option<Arc<dyn Embedder>>>,
     pub root: PathBuf,
     /// Last `Store::generation()` this `AppState` observed. Compared against
@@ -24,6 +44,23 @@ pub struct AppState {
     pub last_generation: AtomicU64,
     /// Whether this process is the writer (owns the advisory lock) or a reader.
     pub is_writer: bool,
+}
+
+/// A `MutexGuard<Option<Store>>` known to be holding `Some` — the invariant
+/// `lock_store_fresh` establishes before ever constructing one. Derefs
+/// straight to `&Store`, so every existing call site (`let store =
+/// state.lock_store_fresh(); ...; store.some_method(...)`) keeps working
+/// unchanged past the one added `?`/`match` for the new `Result`, rather
+/// than every tool needing its own `.as_ref().unwrap()` on the `Option`.
+pub struct StoreGuard<'a>(MutexGuard<'a, Option<vexus_core::Store>>);
+
+impl std::ops::Deref for StoreGuard<'_> {
+    type Target = vexus_core::Store;
+    fn deref(&self) -> &vexus_core::Store {
+        self.0
+            .as_ref()
+            .expect("StoreGuard is only ever constructed over a Some")
+    }
 }
 
 impl AppState {
@@ -43,7 +80,7 @@ impl AppState {
     /// back on unwind — a poisoned lock here means "some earlier call
     /// panicked", not "the store is corrupt" — so bricking every subsequent
     /// tool call over it would turn one bad request into a dead server.
-    pub fn lock_store(&self) -> MutexGuard<'_, vexus_core::Store> {
+    pub fn lock_store(&self) -> MutexGuard<'_, Option<vexus_core::Store>> {
         self.store.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -58,16 +95,24 @@ impl AppState {
     /// be consistent with itself across calls on the same `AppState`, not to
     /// order with unrelated memory operations.
     ///
+    /// `Err(INDEX_NOT_READY)` (finding C3) when the store isn't populated
+    /// yet — see this module's doc comment — rather than panicking or
+    /// blocking; every tool call site already matches on this `Result` and
+    /// returns the message straight through.
+    ///
     /// All tool call sites should use this instead of the raw `lock_store`.
-    pub fn lock_store_fresh(&self) -> MutexGuard<'_, vexus_core::Store> {
+    pub fn lock_store_fresh(&self) -> Result<StoreGuard<'_>, String> {
         let guard = self.lock_store();
+        if guard.is_none() {
+            return Err(INDEX_NOT_READY.to_string());
+        }
         let last = self.last_generation.load(Ordering::Relaxed);
-        let current = guard.generation().unwrap_or(last);
+        let current = guard.as_ref().unwrap().generation().unwrap_or(last);
         if current != last {
-            guard.clear_caches();
+            guard.as_ref().unwrap().clear_caches();
             self.last_generation.store(current, Ordering::Relaxed);
         }
-        guard
+        Ok(StoreGuard(guard))
     }
 
     /// Renders the `status` tool's plain-text report. Kept as a plain method
@@ -76,9 +121,16 @@ impl AppState {
     /// Delegates to the free `status_text` function below — the single
     /// source both the MCP `status` tool and the CLI's `vexus status`
     /// command render through, so CLI/MCP parity is structural rather than
-    /// two hand-copied format strings that can drift.
+    /// two hand-copied format strings that can drift. Unlike the other 6
+    /// tools, `status` treats "not ready yet" (finding C3) as its own
+    /// complete (successful) answer rather than an error — a caller asking
+    /// "what's the state of the index" gets exactly that, even when the
+    /// answer is "not built yet".
     pub fn status_text(&self) -> Result<String> {
-        let store = self.lock_store_fresh();
+        let store = match self.lock_store_fresh() {
+            Ok(store) => store,
+            Err(msg) => return Ok(msg),
+        };
         status_text(&store, Some(self.is_writer))
     }
 }
@@ -205,7 +257,12 @@ fn epoch_to_rfc3339(secs: u64) -> String {
 ///
 /// `detail` is ` ({done}/{total} files)` when the state is `Reconciling` and
 /// `meta('reconcile_progress')` (written by the reconcile pass as
-/// `"done/total"`) is present; otherwise empty.
+/// `"done/total"`) is present — or, when that reconcile pass has also
+/// flagged `meta('reconcile_bulk')` (finding I7: crossed
+/// `reconcile::BULK_REINDEX_THRESHOLD` changed files), ` (bulk reindex
+/// {done}/{total} files)` instead, so a caller can tell "catching up on a
+/// couple of edits" apart from "this is a large structural change, expect
+/// the warning to stick around for a while". Empty otherwise.
 pub fn freshness_header(store: &vexus_core::Store) -> Option<String> {
     let state = effective_freshness(store).unwrap_or(Freshness::Degraded);
     if state == Freshness::Fresh {
@@ -216,7 +273,14 @@ pub fn freshness_header(store: &vexus_core::Store) -> Option<String> {
             .meta("reconcile_progress")
             .ok()
             .flatten()
-            .map(|progress| format!(" ({progress} files)"))
+            .map(|progress| {
+                let is_bulk = store.meta("reconcile_bulk").ok().flatten().as_deref() == Some("1");
+                if is_bulk {
+                    format!(" (bulk reindex {progress} files)")
+                } else {
+                    format!(" ({progress} files)")
+                }
+            })
             .unwrap_or_default()
     } else {
         String::new()
@@ -244,7 +308,7 @@ mod tests {
         store.set_model(embedder.id(), embedder.dim()).unwrap();
         pipeline::embed_pending(&mut store, &embedder).unwrap();
         AppState {
-            store: Mutex::new(store),
+            store: Mutex::new(Some(store)),
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: AtomicU64::new(0),
@@ -268,7 +332,14 @@ mod tests {
         write(root, "a.py", "def f():\n    return 1\n");
 
         let state = indexed_state(root);
-        let c = state.store.lock().unwrap().counts().unwrap();
+        let c = state
+            .store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .counts()
+            .unwrap();
         assert_eq!(
             c.files, 1,
             "sanity: exactly one file was indexed for this fixture"
@@ -303,6 +374,8 @@ mod tests {
         state
             .store
             .lock()
+            .unwrap()
+            .as_mut()
             .unwrap()
             .set_meta("last_index_failed", "2")
             .unwrap();
@@ -346,8 +419,9 @@ mod tests {
         write(root, "a.py", "def f():\n    return 1\n");
 
         let state = indexed_state(root);
-        let store = state.store.lock().unwrap();
-        let text = status_text(&store, None).unwrap();
+        let guard = state.store.lock().unwrap();
+        let store = guard.as_ref().unwrap();
+        let text = status_text(store, None).unwrap();
 
         assert!(!text.contains("role:"), "got: {text:?}");
         let expected = format!(
@@ -377,6 +451,8 @@ mod tests {
         state
             .store
             .lock()
+            .unwrap()
+            .as_mut()
             .unwrap()
             .set_meta("last_event_at", "1753488000")
             .unwrap();
@@ -409,14 +485,14 @@ mod tests {
         // vec_chunks doesn't exist yet.
         let reader = vexus_core::Store::open_read_only(&db_path).unwrap();
         let state = AppState {
-            store: Mutex::new(reader),
+            store: Mutex::new(Some(reader)),
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
             last_generation: AtomicU64::new(0),
             is_writer: true,
         };
         {
-            let store = state.lock_store_fresh();
+            let store = state.lock_store_fresh().unwrap();
             assert!(
                 !store.vec_table_exists().unwrap(),
                 "vec table shouldn't exist yet"
@@ -431,7 +507,7 @@ mod tests {
 
         // lock_store_fresh must notice the generation change and clear the
         // reader's stale cache before returning the guard.
-        let store = state.lock_store_fresh();
+        let store = state.lock_store_fresh().unwrap();
         assert!(
             store.vec_table_exists().unwrap(),
             "lock_store_fresh must clear the stale cache after the generation bump"
@@ -458,6 +534,48 @@ mod tests {
         );
     }
 
+    /// Finding C3: an `AppState` whose store isn't populated yet (the
+    /// reader/lock-loser path, before the winner's first index build has
+    /// produced `index.db`) must degrade every tool call to a plain text
+    /// error rather than panicking or blocking — `lock_store_fresh` is the
+    /// single funnel every tool goes through, so this is the one place that
+    /// guarantee needs to hold.
+    #[test]
+    fn lock_store_fresh_errs_with_index_not_ready_when_store_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState {
+            store: Mutex::new(None),
+            embedder: OnceLock::new(),
+            root: dir.path().to_path_buf(),
+            last_generation: AtomicU64::new(0),
+            is_writer: false,
+        };
+
+        let err = match state.lock_store_fresh() {
+            Ok(_) => panic!("a None store must not yield a StoreGuard"),
+            Err(msg) => msg,
+        };
+        assert_eq!(err, INDEX_NOT_READY);
+    }
+
+    /// The `status` tool specifically must still answer (successfully) with
+    /// that same text, rather than surfacing it as a tool error the way the
+    /// other 6 tools do — `status_text` is exactly the tool a caller reaches
+    /// for to ask "what's going on with the index".
+    #[test]
+    fn status_text_reports_index_not_ready_as_a_successful_answer_when_store_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState {
+            store: Mutex::new(None),
+            embedder: OnceLock::new(),
+            root: dir.path().to_path_buf(),
+            last_generation: AtomicU64::new(0),
+            is_writer: false,
+        };
+
+        assert_eq!(state.status_text().unwrap(), INDEX_NOT_READY);
+    }
+
     #[test]
     fn status_text_shows_real_non_fresh_state_with_since_and_hint() {
         let dir = tempfile::tempdir().unwrap();
@@ -466,8 +584,8 @@ mod tests {
 
         let state = indexed_state(root);
         {
-            let mut store = state.store.lock().unwrap();
-            set_freshness(&mut store, Freshness::Degraded).unwrap();
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Degraded).unwrap();
         }
 
         let text = state.status_text().unwrap();
@@ -497,8 +615,8 @@ mod tests {
 
         let state = indexed_state(root);
         {
-            let mut store = state.store.lock().unwrap();
-            set_freshness(&mut store, Freshness::Fresh).unwrap();
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Fresh).unwrap();
         }
 
         let text = state.status_text().unwrap();
@@ -567,6 +685,26 @@ mod tests {
         assert_eq!(
             freshness_header(&store).as_deref(),
             Some("⚠ index reconciling (50/200 files) — results may miss recent changes")
+        );
+    }
+
+    /// Finding I7: once a reconcile pass has also flagged
+    /// `meta('reconcile_bulk')`, the progress detail must say "bulk reindex"
+    /// rather than the plain `(50/200 files)` form.
+    #[test]
+    fn freshness_header_labels_a_bulk_reconcile_distinctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        set_freshness(&mut store, Freshness::Reconciling).unwrap();
+        store.set_meta("reconcile_progress", "50/500").unwrap();
+        store.set_meta("reconcile_bulk", "1").unwrap();
+
+        assert_eq!(
+            freshness_header(&store).as_deref(),
+            Some(
+                "⚠ index reconciling (bulk reindex 50/500 files) — results may miss recent changes"
+            )
         );
     }
 
