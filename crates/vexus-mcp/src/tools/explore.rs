@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
 use vexus_watch::pipeline;
 
 use crate::bundle::{pack, BundleItem};
@@ -47,7 +48,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, question);
 
-    let store = state.lock_store();
+    let store = state.lock_store_fresh();
     let hits = match store.search_hybrid(question, query_vec.as_deref(), ENTRY_LIMIT) {
         Ok(h) => h,
         Err(e) => return format!("explore error: {e:#}"),
@@ -180,6 +181,7 @@ mod tests {
             store: Mutex::new(store),
             embedder: embedder_slot,
             root: root.to_path_buf(),
+            last_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

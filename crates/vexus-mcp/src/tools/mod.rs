@@ -73,7 +73,7 @@ pub(crate) fn resolve_or_text(store: &Store, target: &str) -> Result<SymbolInfo,
 pub(crate) fn embed_query(state: &AppState, query: &str) -> Option<Vec<f32>> {
     let embedder = state.embedder()?;
     let same_model = {
-        let store = state.lock_store();
+        let store = state.lock_store_fresh();
         let indexed_id = store.meta("model_id").ok().flatten();
         let indexed_dim = store.meta("model_dim").ok().flatten();
         indexed_id.as_deref() == Some(embedder.id())

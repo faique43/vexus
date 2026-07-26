@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use vexus_core::model::estimate_tokens;
 use vexus_core::query::{EdgeHit, IMPACT_ROW_CAP};
+#[cfg(test)]
 use vexus_watch::pipeline;
 
 use crate::format::render_edge_tree;
@@ -63,7 +64,7 @@ pub fn callers_text(
     let depth = depth.unwrap_or(1).clamp(1, 3);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let store = state.lock_store();
+    let store = state.lock_store_fresh();
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
         Err(text) => return text,
@@ -94,7 +95,7 @@ pub fn callees_text(
     let depth = depth.unwrap_or(1).clamp(1, 3);
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
-    let store = state.lock_store();
+    let store = state.lock_store_fresh();
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
         Err(text) => return text,
@@ -123,7 +124,7 @@ pub fn callees_text(
 pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> String {
     let max_depth = max_depth.unwrap_or(5).clamp(1, 5);
 
-    let store = state.lock_store();
+    let store = state.lock_store_fresh();
     let info = match resolve_or_text(&store, symbol) {
         Ok(info) => info,
         Err(text) => return text,
@@ -206,6 +207,7 @@ mod tests {
             store: Mutex::new(store),
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
+            last_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use vexus_core::model::estimate_tokens;
+#[cfg(test)]
 use vexus_watch::pipeline;
 
 use crate::bundle::{pack, BundleItem};
@@ -22,7 +23,7 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
         return open_path_slice(&state.root, rel_path, start, end, budget_tokens);
     }
 
-    let store = state.lock_store();
+    let store = state.lock_store_fresh();
     let info = match resolve_or_text(&store, target) {
         Ok(info) => info,
         Err(text) => return text,
@@ -218,6 +219,7 @@ mod tests {
             store: Mutex::new(store),
             embedder: OnceLock::new(),
             root: root.to_path_buf(),
+            last_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

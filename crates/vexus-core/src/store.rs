@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 pub const SCHEMA_VERSION: &str = "1";
 const SCHEMA: &str = include_str!("schema.sql");
@@ -64,6 +64,30 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::init_if_empty(&conn)?;
+        let vec_available = conn
+            .query_row("SELECT vec_version()", [], |_| Ok(()))
+            .is_ok();
+        Ok(Self {
+            conn,
+            vec_available,
+            vec_table_cached: std::cell::Cell::new(None),
+        })
+    }
+
+    /// Opens an existing index read-only: no schema init, no corrupt-rebuild
+    /// — a missing or corrupt DB is an error the caller decides how to
+    /// handle, rather than something this constructor silently repairs (that
+    /// asymmetry is the point: only a writer is allowed to create/heal the
+    /// file). sqlite-vec is still registered so KNN reads work; write
+    /// methods called on the resulting `Store` return the underlying
+    /// "attempt to write a readonly database" sqlite error — tools never
+    /// call them, so no read-only guard is needed on every method.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        register_sqlite_vec();
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         let vec_available = conn
             .query_row("SELECT vec_version()", [], |_| Ok(()))
             .is_ok();
@@ -368,6 +392,36 @@ impl Store {
             [key, value],
         )?;
         Ok(())
+    }
+
+    /// Monotonically increasing counter bumped by a writer on any change
+    /// that could invalidate a reader's cached state (currently:
+    /// `vec_table_cached`). Absent (fresh DB, or written by a build predating
+    /// this field) reads as 0, so a never-bumped store never looks "changed"
+    /// to a reader whose baseline also starts at 0.
+    pub fn generation(&self) -> Result<u64> {
+        Ok(self
+            .meta("index_generation")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Increments and persists the generation counter. Callers (e.g. the
+    /// watcher, or startup indexing) invoke this after any write a reader's
+    /// cache needs to know about; readers compare it against their own
+    /// last-seen value (see `vexus-mcp`'s `lock_store_fresh`) and call
+    /// `clear_caches` on a mismatch.
+    pub fn bump_generation(&mut self) -> Result<()> {
+        let next = self.generation()? + 1;
+        self.set_meta("index_generation", &next.to_string())
+    }
+
+    /// Resets cached derived state (currently `vec_table_cached`) so the next
+    /// read re-probes the schema instead of trusting a possibly-stale cache.
+    /// Called by a reader after it observes `generation()` has moved past
+    /// its last-seen value.
+    pub fn clear_caches(&self) {
+        self.vec_table_cached.set(None);
     }
 
     pub fn file_hash(&self, path: &str) -> Result<Option<[u8; 32]>> {
@@ -1046,5 +1100,119 @@ mod tests {
                 // Err is also acceptable if the implementation catches the mismatch
             }
         }
+    }
+
+    #[test]
+    fn open_read_only_reads_fine_but_write_attempts_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store
+                .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+                .unwrap();
+        }
+
+        let mut reader = Store::open_read_only(&db).unwrap();
+        // Reads work fine.
+        assert_eq!(reader.file_hash("a.py").unwrap(), Some([1u8; 32]));
+        assert_eq!(reader.counts().unwrap().files, 1);
+        assert_eq!(
+            reader.meta("schema_version").unwrap().as_deref(),
+            Some(SCHEMA_VERSION)
+        );
+
+        // Writes must error rather than silently succeed or panic.
+        assert!(
+            reader.set_meta("foo", "bar").is_err(),
+            "write on a read-only store must return an error"
+        );
+    }
+
+    #[test]
+    fn open_read_only_errs_when_db_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("does-not-exist.db");
+        let result = Store::open_read_only(&db);
+        assert!(
+            result.is_err(),
+            "read-only open of a missing DB must error, never create one"
+        );
+        assert!(!db.exists(), "read-only open must never create the DB file");
+    }
+
+    #[test]
+    fn generation_bump_and_read_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        assert_eq!(
+            store.generation().unwrap(),
+            0,
+            "absent generation reads as 0"
+        );
+        store.bump_generation().unwrap();
+        assert_eq!(store.generation().unwrap(), 1);
+        store.bump_generation().unwrap();
+        store.bump_generation().unwrap();
+        assert_eq!(store.generation().unwrap(), 3);
+    }
+
+    /// The scenario `lock_store_fresh` (vexus-mcp) exists to fix: a reader
+    /// connection opened before `vec_chunks` existed caches "table absent".
+    /// A writer then creates the table, embeds, and bumps the generation.
+    /// Without an explicit `clear_caches`, the reader's stale cached `false`
+    /// would keep reporting no vec table / no KNN hits forever. Clearing the
+    /// cache after observing the generation change must make the reader see
+    /// the writer's data.
+    #[test]
+    fn stale_vec_table_cache_is_cleared_by_generation_bump_coherence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+
+        // Writer creates the schema and indexes a file, but hasn't set a
+        // model yet, so vec_chunks doesn't exist.
+        let mut writer = Store::open(&db).unwrap();
+        writer
+            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
+            .unwrap();
+
+        // Reader opens while vec_chunks is still absent and caches that fact.
+        let reader = Store::open_read_only(&db).unwrap();
+        assert!(
+            !reader.vec_table_exists().unwrap(),
+            "vec table shouldn't exist yet"
+        );
+        assert_eq!(reader.generation().unwrap(), 0);
+
+        // Writer creates vec_chunks (via set_model), embeds a chunk, and
+        // bumps the generation to signal the change.
+        assert!(writer.set_model("mock", 4).unwrap());
+        let (chunk_id, _content, _hash) = writer.chunks_missing_embedding(100).unwrap()[0].clone();
+        writer
+            .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        writer.bump_generation().unwrap();
+
+        // The reader's cached "false" is now stale.
+        assert!(
+            !reader.vec_table_exists().unwrap(),
+            "cache not yet invalidated — still reporting the old (wrong) answer"
+        );
+
+        // Simulate what `lock_store_fresh` does: notice the generation
+        // changed, then clear caches.
+        assert_eq!(reader.generation().unwrap(), 1);
+        reader.clear_caches();
+
+        assert!(
+            reader.vec_table_exists().unwrap(),
+            "cache cleared: table is now visible"
+        );
+        let hits = reader.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.0),
+            Some(chunk_id),
+            "reader must see the writer's embeddings after the cache clear"
+        );
     }
 }

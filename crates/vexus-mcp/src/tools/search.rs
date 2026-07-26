@@ -3,6 +3,7 @@
 //! carries no full symbol bodies — that's what `open`/`explore` are for.
 
 use vexus_core::model::estimate_tokens;
+#[cfg(test)]
 use vexus_watch::pipeline;
 
 use crate::state::AppState;
@@ -30,7 +31,7 @@ pub fn search_text(
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, query);
 
-    let store = state.lock_store();
+    let store = state.lock_store_fresh();
     let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
         Ok(hits) => hits,
         Err(e) => return format!("search error: {e:#}"),
@@ -101,6 +102,7 @@ mod tests {
             store: Mutex::new(store),
             embedder: embedder_slot,
             root: root.to_path_buf(),
+            last_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -115,6 +117,7 @@ mod tests {
             store: Mutex::new(store),
             embedder: embedder_slot,
             root: root.to_path_buf(),
+            last_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
