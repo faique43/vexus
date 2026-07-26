@@ -2,7 +2,7 @@
 
 use vexus_core::query::{EdgeHit, SymbolInfo};
 
-use crate::bundle::BundleItem;
+use crate::bundle::{BundleItem, OmittedItem};
 
 /// Find the longest run of consecutive backticks in a string.
 /// Used to determine fence size for code blocks that might contain backticks.
@@ -23,8 +23,12 @@ fn longest_backtick_run(s: &str) -> usize {
 /// Render a bundle of selected items with an optional omitted footer.
 /// Groups by path (in order of first appearance), adds `## <path>` headers,
 /// and per-item shows `<path>:<start>-<end>` with triple-backtick fenced code.
-/// Omitted list is capped at 15 names.
-pub fn render_bundle(selected: &[BundleItem], omitted: &[(String, f64)]) -> String {
+/// Omitted list is capped at 15 `name:start-end` entries, deduped: several
+/// omitted chunks that share a qualname (e.g. multiple chunks of the same
+/// function) would otherwise render as an uninformative run of repeated bare
+/// names — the range disambiguates which occurrence was left out, and exact
+/// repeats (same name, same range) collapse to one entry.
+pub fn render_bundle(selected: &[BundleItem], omitted: &[OmittedItem]) -> String {
     let mut output = String::new();
 
     // Group items by path (preserving order of first appearance)
@@ -70,11 +74,18 @@ pub fn render_bundle(selected: &[BundleItem], omitted: &[(String, f64)]) -> Stri
 
     // Add omitted footer if needed
     if !omitted.is_empty() {
-        let mut names: Vec<String> = omitted.iter().map(|(name, _)| name.clone()).collect();
-        names.truncate(15);
+        let mut seen = std::collections::HashSet::new();
+        let mut labels: Vec<String> = Vec::new();
+        for (name, _score, start, end) in omitted {
+            let label = format!("{name}:{start}-{end}");
+            if seen.insert(label.clone()) {
+                labels.push(label);
+            }
+        }
+        labels.truncate(15);
 
         output.push_str("Related (not included, raise budget_tokens or use `open`): ");
-        output.push_str(&names.join(", "));
+        output.push_str(&labels.join(", "));
         output.push('\n');
     }
 
@@ -207,12 +218,42 @@ mod tests {
     #[test]
     fn render_bundle_omitted_footer() {
         let selected = vec![make_bundle_item("a.rs", Some("aaa"), 1, 10, "x")];
-        let omitted = vec![("func1".to_string(), 0.9), ("func2".to_string(), 0.8)];
+        let omitted = vec![
+            ("func1".to_string(), 0.9, 10, 20),
+            ("func2".to_string(), 0.8, 30, 40),
+        ];
 
         let output = render_bundle(&selected, &omitted);
 
         assert!(output.contains("Related (not included, raise budget_tokens or use `open`): "));
-        assert!(output.contains("func1, func2"));
+        assert!(output.contains("func1:10-20, func2:30-40"));
+    }
+
+    #[test]
+    fn render_bundle_omitted_footer_dedupes_same_name_and_range() {
+        let selected = vec![];
+        // Two chunks of the same function omitted at different ranges must
+        // both show up (disambiguated by range); an exact duplicate entry
+        // (same name, same range) must collapse to one.
+        let omitted = vec![
+            ("helper".to_string(), 0.9, 1, 10),
+            ("helper".to_string(), 0.8, 20, 30),
+            ("helper".to_string(), 0.8, 20, 30),
+        ];
+
+        let output = render_bundle(&selected, &omitted);
+
+        assert!(
+            output.contains("helper:1-10, helper:20-30"),
+            "expected both distinct ranges shown once each: {output:?}"
+        );
+        let footer_start = output.find("Related").unwrap();
+        let footer = &output[footer_start..];
+        assert_eq!(
+            footer.matches("helper:20-30").count(),
+            1,
+            "exact duplicate (same name, same range) must be deduped: {output:?}"
+        );
     }
 
     #[test]
@@ -220,7 +261,7 @@ mod tests {
         let selected = vec![];
         let mut omitted = vec![];
         for i in 0..20 {
-            omitted.push((format!("func{}", i), 1.0 - (i as f64 * 0.01)));
+            omitted.push((format!("func{}", i), 1.0 - (i as f64 * 0.01), i, i + 10));
         }
 
         let output = render_bundle(&selected, &omitted);

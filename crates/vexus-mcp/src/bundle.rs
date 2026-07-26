@@ -15,11 +15,18 @@ pub struct BundleItem {
     pub chunk_id: i64, // -1 for non-chunk sources (file slices)
 }
 
+/// One item left out of the packed bundle: its display name (qualname, or
+/// path when there's no symbol), its score, and the line range it would
+/// have covered — the range travels along so the rendered footer can show
+/// *which* occurrence of a name was left out, not just its bare name.
+pub type OmittedItem = (String, f64, u32, u32);
+
 /// Greedy fill by score desc until budget_tokens exhausted.
 /// Per-item cost = estimate_tokens(content) + 20-token overhead.
 /// Dedupes identical chunk_ids (keeps highest score).
-/// Returns (selected sorted by (path, start_line), omitted as (qualname/path, score) sorted by score desc).
-pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec<(String, f64)>) {
+/// Returns (selected sorted by (path, start_line), omitted sorted by score
+/// desc).
+pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec<OmittedItem>) {
     if items.is_empty() {
         return (vec![], vec![]);
     }
@@ -66,21 +73,27 @@ pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Greedily pack items by score
+    // Greedily pack items by score. An item that doesn't fit is skipped
+    // (`continue`), not treated as end-of-budget (`break`): scores aren't
+    // sized, so one big high-score item sitting ahead of several small ones
+    // must not starve every smaller item behind it in the sort order.
     let mut selected_indices = std::collections::HashSet::new();
-    let mut remaining: Vec<(usize, &BundleItem)> = sorted_items;
     let mut used_tokens: u32 = 0;
-
-    while !remaining.is_empty() {
-        let item = remaining[0].1;
+    for &(idx, item) in &sorted_items {
         let item_cost = estimate_tokens(&item.content) + 20;
         if used_tokens + item_cost <= budget_tokens {
-            let (idx, _) = remaining.remove(0);
             selected_indices.insert(idx);
             used_tokens += item_cost;
-        } else {
-            // Budget exhausted
-            break;
+        }
+    }
+
+    // Guarantee at least one item survives when there's anything to show at
+    // all: an empty bundle reads as "nothing relevant found", which is a
+    // worse outcome for the caller than one over-budget item they can still
+    // read (and know to raise budget_tokens for the rest).
+    if selected_indices.is_empty() {
+        if let Some(&(idx, _)) = sorted_items.first() {
+            selected_indices.insert(idx);
         }
     }
 
@@ -94,7 +107,7 @@ pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec
 
     // Build omitted list: items that made it through dedup but weren't selected (budget-exhausted only).
     // Deduplicated losers are omitted entirely and don't appear as "related".
-    let mut omitted: Vec<(String, f64)> = deduped
+    let mut omitted: Vec<OmittedItem> = deduped
         .iter()
         .filter(|&&idx| !selected_indices.contains(&idx))
         .map(|&idx| {
@@ -104,7 +117,7 @@ pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| item.path.clone());
-            (name, item.score)
+            (name, item.score, item.start_line, item.end_line)
         })
         .collect();
     omitted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -223,5 +236,58 @@ mod tests {
         let (selected, omitted) = pack(vec![], 700);
         assert_eq!(selected.len(), 0);
         assert_eq!(omitted.len(), 0);
+    }
+
+    /// Regression: a `break` on the first over-budget item (in score order)
+    /// used to stop packing entirely, starving every smaller item behind
+    /// it — even when several of them would comfortably fit. `pack` must
+    /// skip past the oversized item and keep trying the rest.
+    #[test]
+    fn pack_skips_over_budget_item_instead_of_stopping() {
+        // Item costs: 320 tokens each for "small" (80 chars -> 20 + 20
+        // overhead), and a big 2020-token item (8000 chars -> 2000 + 20).
+        let small = "a".repeat(80); // 20 + 20 = 40 tokens
+        let big = "a".repeat(8000); // 2000 + 20 = 2020 tokens
+
+        let items = vec![
+            // Highest score, but alone blows almost the whole budget.
+            make_item("big.rs", Some("big"), 1, 10, &big, 10.0, 1),
+            make_item("a.rs", Some("small_a"), 1, 10, &small, 5.0, 2),
+            make_item("b.rs", Some("small_b"), 1, 10, &small, 4.0, 3),
+        ];
+
+        // Budget fits both small items (80 tokens) but not the big one on
+        // top of them.
+        let (selected, omitted) = pack(items, 100);
+
+        assert_eq!(
+            selected.len(),
+            2,
+            "both small items must be packed even though a higher-score item didn't fit: {selected:?}"
+        );
+        assert!(selected.iter().any(|i| i.path == "a.rs"));
+        assert!(selected.iter().any(|i| i.path == "b.rs"));
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(omitted[0].0, "big");
+    }
+
+    /// Regression: an empty selection reads as "nothing relevant" to a
+    /// caller, which is worse than showing one item that happens to blow
+    /// the budget. The single highest-score item must always survive when
+    /// there's anything to pack at all.
+    #[test]
+    fn pack_guarantees_at_least_one_item_even_when_over_budget() {
+        let huge = "a".repeat(40_000); // 10_000 + 20 tokens, way over any small budget.
+        let items = vec![make_item("huge.rs", Some("huge"), 1, 10, &huge, 1.0, 1)];
+
+        let (selected, omitted) = pack(items, 50);
+
+        assert_eq!(
+            selected.len(),
+            1,
+            "the only item must still be selected despite blowing the budget"
+        );
+        assert_eq!(selected[0].path, "huge.rs");
+        assert!(omitted.is_empty());
     }
 }
