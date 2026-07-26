@@ -40,8 +40,8 @@ fn index_status_search_flow() {
         .stdout(
             predicate::str::contains("index: 1 files")
                 .and(predicate::str::contains("symbols"))
-                .and(predicate::str::contains("role: writer"))
-                .and(predicate::str::contains("last event: none")),
+                .and(predicate::str::contains("last event: none"))
+                .and(predicate::str::contains("serve: not running")),
         );
 
     Command::cargo_bin("vexus")
@@ -55,13 +55,15 @@ fn index_status_search_flow() {
         );
 }
 
-/// `vexus status`'s `role:` line reflects the same advisory `.vexus/lock`
-/// `vexus serve` uses: while another process holds it, `status` reports
-/// `reader`; once released, `status` (winning the now-uncontested lock
-/// itself, briefly) reports `writer` — matching what a real `vexus serve`
-/// process's own `status` tool would say in each case.
+/// `vexus status` never claims a `role:` of its own (that line is reserved
+/// for an actual in-`serve` process — see `status_text`'s doc comment) but
+/// does report whether one is currently running, via a probe-and-release of
+/// the same advisory `.vexus/lock` `vexus serve` uses: while another
+/// process holds it, `status` reports `serve: running`; once released,
+/// `status` (winning the now-uncontested lock itself, briefly, then
+/// releasing it again) reports `serve: not running`.
 #[test]
-fn status_role_line_reflects_the_advisory_writer_lock() {
+fn status_serve_line_reflects_the_advisory_writer_lock() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write(
@@ -89,9 +91,10 @@ fn status_role_line_reflects_the_advisory_writer_lock() {
             .args(["status", root.to_str().unwrap()])
             .assert()
             .success()
-            .stdout(predicate::str::contains(
-                "role: reader (another vexus serve owns the index)",
-            ));
+            .stdout(
+                predicate::str::contains("serve: running")
+                    .and(predicate::str::contains("role:").not()),
+            );
         // `_held` drops (and releases the lock) at the end of this block.
     }
 
@@ -101,7 +104,10 @@ fn status_role_line_reflects_the_advisory_writer_lock() {
         .args(["status", root.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("role: writer"));
+        .stdout(
+            predicate::str::contains("serve: not running")
+                .and(predicate::str::contains("role:").not()),
+        );
 }
 
 #[test]

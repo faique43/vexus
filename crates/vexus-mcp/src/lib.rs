@@ -6,6 +6,7 @@ pub mod format;
 pub mod server;
 pub mod state;
 pub mod tools;
+mod writer;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -16,6 +17,7 @@ use rmcp::ServiceExt;
 use vexus_watch::{pipeline, WriterLock};
 
 use crate::state::AppState;
+use crate::writer::{start_writer, WriterHandle};
 
 /// Entry point for `vexus serve [PATH]`. Blocks for the lifetime of the
 /// stdio MCP session (until the client disconnects); builds its own tokio
@@ -112,43 +114,17 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         is_writer,
     });
 
-    // Only spawn the writer thread if we won the lock.
-    // The WriterLock is moved into the thread closure and held for the
-    // thread's lifetime; it's released when the thread exits.
-    //
-    // `writer_shutdown` (the sender half) is declared out here, *outside*
-    // the `if is_writer` block, and deliberately never sent on — only
-    // dropped once `serve` itself is done (see the explicit `drop` below).
-    // The watcher loop's very first iteration checks `shutdown_rx.try_recv()`
-    // before it ever touches the `notify` channel, and treats a disconnected
-    // sender exactly like an explicit shutdown signal (see vexus-watch's
-    // `run_writer`): if `shutdown_tx` were scoped to *inside* `if is_writer`
-    // instead, it would drop at that block's closing brace — nowhere near
-    // "when serve is done" — disconnecting `shutdown_rx` before the watch
-    // loop's first tick and making the writer thread exit immediately, having
-    // never read a single filesystem event. (This was exactly that bug: the
-    // watcher thread ran, reconcile completed, freshness read `fresh`, but
-    // the loop had already broken out on iteration one, so `last_event_at`
-    // never got stamped no matter how long anything waited afterward.)
-    let mut writer_shutdown: Option<std::sync::mpsc::Sender<()>> = None;
-    if is_writer {
-        let writer_store = vexus_core::Store::open(&db_path)
-            .with_context(|| format!("failed to open writer index at {}", db_path.display()))?;
+    // Only start the writer thread if we won the lock. `writer_handle` is
+    // held across *both* awaits below (the `serve` handshake and the
+    // `waiting` loop) and only dropped once they're done — see `writer.rs`'s
+    // module doc for the real bug this structure exists to make impossible
+    // to reintroduce: an earlier version's shutdown channel was scoped to
+    // end inside this `if` block, disconnecting (and so signalling
+    // shutdown) long before `serve` itself was actually done.
+    let mut writer_handle: Option<WriterHandle> = None;
+    if let Some(lock) = writer_lock {
         let embedder = state.embedder();
-        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-        writer_shutdown = Some(shutdown_tx);
-        // Not joined: the writer thread runs for the life of the process, and
-        // the whole point of the read-only `AppState` above is that tool
-        // handlers never wait on it.
-        let writer_root = root.clone();
-        let _writer_handle = std::thread::spawn(move || {
-            // Hold the WriterLock for the duration of this thread
-            let _lock = writer_lock;
-            // Run the actual writer logic and wait for it to complete
-            let inner_handle =
-                vexus_watch::spawn_writer(writer_root, writer_store, embedder, shutdown_rx);
-            let _ = inner_handle.join();
-        });
+        writer_handle = Some(start_writer(root.clone(), &db_path, embedder, lock)?);
     }
 
     let server = server::VexusServer::new(state);
@@ -157,11 +133,12 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         .await?
         .waiting()
         .await?;
-    // Explicit, even though it would happen anyway when `writer_shutdown`
+    // Explicit, even though it would happen anyway when `writer_handle`
     // goes out of scope at the end of the function: this is the actual
-    // "tell the writer thread to shut down" signal, and it belongs right
-    // here — once serving is genuinely done — not any earlier.
-    drop(writer_shutdown);
+    // "tell the writer thread to shut down, then wait for it" step, and it
+    // belongs right here — once serving is genuinely done — not any
+    // earlier.
+    drop(writer_handle);
     Ok(())
 }
 

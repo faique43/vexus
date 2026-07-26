@@ -197,16 +197,31 @@ fn main() -> Result<()> {
             let store = vexus_core::Store::open(&db_path(&root))?;
             // Renders through the exact same `vexus_mcp::state::status_text`
             // the MCP `status` tool uses — CLI/MCP parity is structural
-            // (one format string, not two hand-copied ones). `role` here is
-            // a one-shot probe of the same advisory `.vexus/lock` `vexus
-            // serve` uses: acquiring it (and releasing it again once this
-            // `Store` — and the lock — drop at the end of this arm) means no
-            // `vexus serve` currently holds it, so this invocation reports
-            // `writer`; losing the race to a running `vexus serve` reports
-            // `reader`, the same as that server's own `status` would.
-            let writer_lock = vexus_watch::WriterLock::try_acquire(&root)?;
-            let is_writer = writer_lock.is_some();
-            println!("{}", vexus_mcp::state::status_text(&store, is_writer)?);
+            // (one format string, not two hand-copied ones). `role: None`:
+            // the `role:` line is an in-`serve` claim ("I am the writer/
+            // reader for as long as this process runs"), which a one-shot
+            // command briefly touching the lock and letting go isn't
+            // entitled to make — see `status_text`'s doc comment.
+            let text = vexus_mcp::state::status_text(&store, None)?;
+
+            // Instead, report whether a `vexus serve` is currently running
+            // at all, via a probe-and-release of the same advisory
+            // `.vexus/lock`: winning it means nothing currently holds it
+            // (so no server is running); losing it means something else
+            // does. Drop the lock IMMEDIATELY on the winning path — there is
+            // a microscopic race between that drop and the `println!` below
+            // (a `vexus serve` could start in between, making this line
+            // stale the instant it's printed), which is fine for a
+            // best-effort diagnostic command but is exactly why the lock
+            // must never be held across the print, let alone longer.
+            let serve_line = match vexus_watch::WriterLock::try_acquire(&root)? {
+                Some(lock) => {
+                    drop(lock);
+                    "serve: not running"
+                }
+                None => "serve: running (another process is keeping the index fresh)",
+            };
+            println!("{text}\n{serve_line}");
         }
         Cmd::Search { query, path, limit } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));

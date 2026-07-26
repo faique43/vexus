@@ -79,7 +79,7 @@ impl AppState {
     /// two hand-copied format strings that can drift.
     pub fn status_text(&self) -> Result<String> {
         let store = self.lock_store_fresh();
-        status_text(&store, self.is_writer)
+        status_text(&store, Some(self.is_writer))
     }
 }
 
@@ -95,11 +95,22 @@ impl AppState {
 /// skipped files: {n}                  # only when >0
 /// ```
 ///
-/// `is_writer` is the caller's own outcome from probing the advisory
-/// `.vexus/lock` (`serve`'s long-held `WriterLock`, or the CLI's own
-/// one-shot acquire-then-release) — this function only renders the result,
-/// it never touches the lock itself.
-pub fn status_text(store: &vexus_core::Store, is_writer: bool) -> Result<String> {
+/// `role` is `Some(is_writer)` — the caller's own outcome from probing the
+/// advisory `.vexus/lock` — when the `role:` line applies, `None` to omit
+/// it entirely. This function only renders the result, it never touches the
+/// lock itself.
+///
+/// The `role:` line belongs to an actual in-`serve` process, which is why
+/// the MCP `status` tool always passes `Some` (it holds the lock, or knows
+/// it lost the race to whatever does, for as long as the process runs) while
+/// the CLI's one-shot `vexus status` passes `None`: acquiring the lock just
+/// to print a `status` line and releasing it a moment later isn't "being the
+/// writer" in any sense a caller should rely on — a real `vexus serve`
+/// started microseconds later would legitimately win the race instead. The
+/// CLI renders its own `serve: running|not running` line from that same
+/// probe instead (see `vexus-cli`'s `Cmd::Status` handler) — a claim about
+/// whether a server is running, not about this one-shot command's own role.
+pub fn status_text(store: &vexus_core::Store, role: Option<bool>) -> Result<String> {
     let c = store.counts()?;
     let model_id = store.meta("model_id")?.unwrap_or_else(|| "none".into());
     let backlog = store.embed_backlog()?;
@@ -148,8 +159,10 @@ pub fn status_text(store: &vexus_core::Store, is_writer: bool) -> Result<String>
         format!("model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"),
         freshness_line,
     ];
-    if let Some(role) = role_line(is_writer) {
-        lines.push(role);
+    if let Some(is_writer) = role {
+        if let Some(role) = role_line(is_writer) {
+            lines.push(role);
+        }
     }
     lines.push(format!("last event: {last_event}"));
     if failed > 0 {
@@ -320,6 +333,34 @@ mod tests {
             text.contains("\nrole: reader (another vexus serve owns the index)\n"),
             "got: {text:?}"
         );
+    }
+
+    /// `role: None` (what the CLI's one-shot `vexus status` passes — see
+    /// the free `status_text` fn's doc comment for why a bare command isn't
+    /// entitled to claim a `role:` of its own) omits the line entirely,
+    /// rather than rendering a bogus default.
+    #[test]
+    fn status_text_omits_role_line_when_role_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f():\n    return 1\n");
+
+        let state = indexed_state(root);
+        let store = state.store.lock().unwrap();
+        let text = status_text(&store, None).unwrap();
+
+        assert!(!text.contains("role:"), "got: {text:?}");
+        let expected = format!(
+            "index: {} files, {} symbols, {} edges, {} chunks\n\
+             model: mock  embed backlog: 0  vec: available\n\
+             freshness: fresh\n\
+             last event: none",
+            store.counts().unwrap().files,
+            store.counts().unwrap().symbols,
+            store.counts().unwrap().edges,
+            store.counts().unwrap().chunks,
+        );
+        assert_eq!(text, expected);
     }
 
     /// `last event:` reads `meta('last_event_at')` (stamped by the
