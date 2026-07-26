@@ -156,26 +156,38 @@ impl Store {
     /// with a synthetic `SymbolInfo` (id -1, qualname = dst_name) and
     /// confidence None. `depth` walks callees-of-callees over resolved
     /// edges only (an unresolved callee has no real id to keep walking from).
+    ///
+    /// Same node-vs-path fix as `walk_callers` (see its doc comment): `reach`
+    /// dedupes the *resolved* frontier by `(id, depth)` — seeded with
+    /// `symbol_id` itself at depth 0 — so recursing deeper costs proportional
+    /// to the node count, not the (combinatorially larger) path count. The
+    /// final `SELECT` re-derives every actual output row — resolved *and*
+    /// unresolved alike — by joining each deduped parent's own edges
+    /// directly; this isn't a summarizing join (unlike `walk_callers`'
+    /// min-edge-id pick), so a parent with two distinct edges to the same
+    /// callee (two call sites) still produces two rows, matching the
+    /// original per-edge semantics. Only the recursion's *internal* state
+    /// is node-deduped, never the emitted rows.
     pub fn callees_of(&self, symbol_id: i64, depth: u32, limit: u32) -> Result<Vec<EdgeHit>> {
         let max_depth = depth.max(1);
-        let sql = "WITH RECURSIVE callees(dst_id, dst_name, confidence, depth) AS (
-                SELECT e.dst_id, e.dst_name, e.confidence, 1
-                FROM edges e
-                WHERE e.kind = 'calls' AND e.src_id = ?1
+        let sql = "WITH RECURSIVE reach(id, depth) AS (
+                SELECT ?1, 0
 
-                UNION ALL
+                UNION
 
-                SELECT e.dst_id, e.dst_name, e.confidence, c.depth + 1
+                SELECT e.dst_id, r.depth + 1
                 FROM edges e
-                JOIN callees c ON e.src_id = c.dst_id
-                WHERE e.kind = 'calls' AND c.depth < ?2
+                JOIN reach r ON e.src_id = r.id
+                WHERE e.kind = 'calls' AND e.dst_id IS NOT NULL AND r.depth < ?2
             )
-            SELECT c.dst_id, s.id, s.name, s.qualname, s.kind, s.sig, f.path,
-                   s.start_line, s.end_line, c.dst_name, c.confidence, c.depth
-            FROM callees c
-            LEFT JOIN symbols s ON s.id = c.dst_id
+            SELECT e.dst_id, s.id, s.name, s.qualname, s.kind, s.sig, f.path,
+                   s.start_line, s.end_line, e.dst_name, e.confidence, r.depth + 1
+            FROM reach r
+            JOIN edges e ON e.src_id = r.id AND e.kind = 'calls'
+            LEFT JOIN symbols s ON s.id = e.dst_id
             LEFT JOIN files f ON f.id = s.file_id
-            ORDER BY c.depth ASC, c.dst_id ASC
+            WHERE r.depth < ?2
+            ORDER BY r.depth + 1 ASC, e.dst_id ASC
             LIMIT ?3";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt
@@ -974,6 +986,25 @@ mod tests {
             hits.len() <= super::IMPACT_ROW_CAP as usize,
             "result must still respect the row cap, got {}",
             hits.len()
+        );
+
+        // `callees_of` shares the same node-vs-path pathology (its own
+        // recursive CTE walks the forward call direction): measured on this
+        // exact fixture, the pre-fix path-enumerating query took ~19ms at
+        // depth 3 and ~7.6s at depth 5 — a hub symbol at the tool-layer's
+        // depth-3 clamp alone wasn't safe. Bound it the same way.
+        let start = std::time::Instant::now();
+        let callee_hits = store.callees_of(target_id, 3, 500).unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs_f64() < 2.0,
+            "callees_of on a dense {N}-node mutual-call graph at depth 3 must stay fast \
+             (node-deduped CTE, not path enumeration); took {elapsed:?}"
+        );
+        assert!(
+            callee_hits.len() <= 500,
+            "result must respect the explicit limit, got {}",
+            callee_hits.len()
         );
     }
 }
