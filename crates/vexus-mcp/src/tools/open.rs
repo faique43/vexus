@@ -21,7 +21,7 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
         return open_path_slice(&state.root, rel_path, start, end, budget_tokens);
     }
 
-    let store = state.store.lock().expect("store mutex poisoned");
+    let store = state.lock_store();
     let info = match resolve_or_text(&store, target) {
         Ok(info) => info,
         Err(text) => return text,
@@ -38,6 +38,7 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
             info.qualname, info.path, info.start_line, info.end_line
         );
     }
+    let total_chunks = chunks.len();
     let items: Vec<BundleItem> = chunks
         .into_iter()
         .map(|(chunk_id, start_line, end_line, content)| BundleItem {
@@ -51,7 +52,20 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
         })
         .collect();
     let (selected, omitted) = pack(items, budget_tokens);
-    render_bundle(&selected, &omitted)
+    let mut out = render_bundle(&selected, &omitted);
+    if selected.len() < total_chunks {
+        let ranges = selected
+            .iter()
+            .map(|item| format!("{}-{}", item.start_line, item.end_line))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "symbol truncated: {} of {} chunks shown (lines {ranges}); raise budget_tokens\n",
+            selected.len(),
+            total_chunks
+        ));
+    }
+    out
 }
 
 /// Recognizes the `path:start-end` form (equivalent to the regex
@@ -220,6 +234,42 @@ mod tests {
         assert!(
             out.contains("```"),
             "expected a fenced source block: {out:?}"
+        );
+    }
+
+    /// Regression: a symbol big enough to be chunked into several pieces
+    /// (per `vexus_index::chunk`'s `MAX_TOKENS` splitting) must say so when
+    /// a tight budget only lets some of those pieces through — silently
+    /// showing a truncated body with no indication reads as the whole
+    /// symbol, which it isn't.
+    #[test]
+    fn open_symbol_truncation_note_when_chunks_dropped_by_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // ~300 short statements comfortably exceeds MAX_TOKENS (512),
+        // forcing `big` to be indexed as multiple chunks.
+        let body: String = (0..300).map(|i| format!("    line_{i:04} = 0\n")).collect();
+        write(root, "big.py", &format!("def big():\n{body}"));
+
+        let state = indexed_state(root);
+
+        // A budget that only fits the first chunk.
+        let out = open_text(&state, "big.big", Some(700));
+        assert!(
+            out.contains("symbol truncated:"),
+            "expected a truncation note when chunks are dropped by budget: {out:?}"
+        );
+        assert!(
+            out.contains("of ") && out.contains("chunks shown"),
+            "got: {out:?}"
+        );
+        assert!(out.contains("raise budget_tokens"), "got: {out:?}");
+
+        // A generous budget fits every chunk — no truncation note.
+        let out_full = open_text(&state, "big.big", Some(20_000));
+        assert!(
+            !out_full.contains("symbol truncated:"),
+            "no chunks dropped, so no truncation note expected: {out_full:?}"
         );
     }
 
