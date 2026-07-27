@@ -22,8 +22,8 @@ Runs entirely on your machine. Indexing and embedding cost zero agent tokens.
 
 ## The problem
 
-Ask an agent "how does billing work?" in a repo it doesn't know, and watch what
-happens:
+Ask an agent "how does an invoice get created?" in a repo it doesn't know, and
+watch what happens:
 
 ```text
 Grep "invoice"              → matches across a dozen files
