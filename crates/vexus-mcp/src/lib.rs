@@ -59,6 +59,17 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     let writer_lock = WriterLock::try_acquire(&root)?;
     let is_writer = writer_lock.is_some();
 
+    // Straight away, before any (possibly long) startup indexing: run by
+    // hand in a terminal, a stdio server that prints nothing and waits on
+    // stdin is indistinguishable from a hang. One stderr line (never stdout
+    // — that's the MCP transport) says what the silence is.
+    eprintln!(
+        "vexus: MCP server for {} over stdio ({} mode) — normally launched by an agent via \
+         .mcp.json, not by hand; it waits silently for a client. Ctrl-C stops it.",
+        root.display(),
+        if is_writer { "writer" } else { "reader" }
+    );
+
     // Only the writer does startup indexing.
     if is_writer {
         let mut store = vexus_core::Store::open(&db_path)

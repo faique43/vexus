@@ -98,7 +98,8 @@ case ":$PATH:" in
 esac
 
 echo
-echo "next:"
-echo "  vexus index .                 # build the index for a repo"
-echo "  vexus init --agent claude-code  # install the steering pack"
-echo "  vexus serve .                 # run the MCP server"
+echo "next, inside the repo you want indexed:"
+echo "  vexus index .                    # build the index (first run downloads a ~160 MB model; large repos take minutes)"
+echo "  vexus init --agent claude-code   # install the steering pack + register the MCP server in .mcp.json"
+echo
+echo "no need to run 'vexus serve' yourself — your agent launches it via .mcp.json"
