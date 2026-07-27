@@ -162,7 +162,7 @@ pub fn eval_corpus(
 /// `eval_corpus`'s `_db_dir` binding) since dropping it deletes the
 /// directory `index.db` lives in, which a live WAL-mode connection may still
 /// need to (re)create `-wal`/`-shm` companion files in.
-fn index_into_temp_state(
+pub fn index_into_temp_state(
     corpus_root: &Path,
     embedder: &Arc<dyn Embedder>,
 ) -> Result<(AppState, tempfile::TempDir)> {

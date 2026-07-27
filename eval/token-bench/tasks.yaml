@@ -1,0 +1,92 @@
+# Token-efficiency benchmark tasks.
+#
+# Each task states a question an agent would actually be asked, then gives
+# two ways of answering it against the same corpus:
+#
+#   grep_sim — an ordered transcript of the shell/file steps a competent
+#              agent would run WITHOUT an index. These are executed literally
+#              (the greps are real regex passes over the corpus; the reads
+#              really read those line ranges), and every line of output the
+#              agent would have to take into its context is counted.
+#              They deliberately include the wrong turns a real session has:
+#              a first grep that is too broad, a file opened that turns out
+#              to be the wrong layer. A transcript that went straight to the
+#              answer would not be an honest baseline.
+#
+#   vexus    — the tool call(s) an agent makes with the index available.
+#              Executed through the same functions `vexus serve` exposes,
+#              and the full response text is counted.
+#
+# Token counts use vexus's own chars/4 estimate on both sides, so the ratio
+# is not sensitive to a particular tokenizer.
+
+- task: "How does an invoice get created end to end?"
+  corpus: pyapp
+  grep_sim:
+    - grep: "invoice"
+    - read: { path: "handlers/invoices.py" }
+    - read: { path: "services/invoice_service.py" }
+  vexus:
+    - explore: "how does an invoice get created end to end"
+
+- task: "Where is the retry/backoff logic and what uses it?"
+  corpus: pyapp
+  grep_sim:
+    - grep: "retry"
+    - grep: "backoff"
+    - read: { path: "utils/retry.py" }
+  vexus:
+    - explore: "retry with exponential backoff helper and its callers"
+
+- task: "What would break if charge_card changed?"
+  corpus: pyapp
+  grep_sim:
+    - grep: "charge_card"
+    - read: { path: "services/billing_service.py" }
+    - read: { path: "handlers/billing.py" }
+  vexus:
+    - callers: "charge_card"
+
+- task: "How are repeated login attempts throttled?"
+  corpus: pyapp
+  grep_sim:
+    - grep: "throttle"
+    - grep: "limit"
+    - read: { path: "services/rate_limiter.py" }
+  vexus:
+    - explore: "how are repeated login attempts throttled"
+
+- task: "Show me the email validation helper."
+  corpus: pyapp
+  grep_sim:
+    - grep: "def validate"
+    - read: { path: "utils/validation.py" }
+  vexus:
+    - search: "email validation helper"
+    - open: "utils.validation.sanitize_email"
+
+- task: "How does placing an order flow through the service?"
+  corpus: polyglot
+  grep_sim:
+    - grep: "place_order"
+    - read: { path: "service/src/handlers/orders.rs" }
+    - read: { path: "service/src/services/order_service.rs" }
+  vexus:
+    - explore: "how does placing an order flow through the service"
+
+- task: "Where does the frontend talk to the orders API?"
+  corpus: polyglot
+  grep_sim:
+    - grep: "orders"
+    - read: { path: "frontend/src/api/orders.ts" }
+    - read: { path: "frontend/src/api/client.ts" }
+  vexus:
+    - explore: "where does the frontend call the orders API"
+
+- task: "What calls the pricing quote function?"
+  corpus: polyglot
+  grep_sim:
+    - grep: "quote_total"
+    - read: { path: "service/src/services/pricing.rs" }
+  vexus:
+    - callers: "quote_total"

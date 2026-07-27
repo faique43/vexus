@@ -143,7 +143,15 @@ fn synth_file(i: usize) -> (String, String) {
 /// is `i`-derived arithmetic and string formatting — so two calls (even
 /// from different processes) always produce byte-identical trees.
 pub fn generate_synthetic_corpus(root: &Path) -> Result<()> {
-    for i in 0..FILE_COUNT {
+    generate_synthetic_corpus_sized(root, FILE_COUNT)
+}
+
+/// Same generator, with an explicit file count — used by the token-efficiency
+/// benchmark's scaling section, which needs the *same* corpus shape at
+/// several sizes to show how each approach's cost responds to repository
+/// size. Still fully deterministic and randomness-free.
+pub fn generate_synthetic_corpus_sized(root: &Path, file_count: usize) -> Result<()> {
+    for i in 0..file_count {
         let (rel, content) = synth_file(i);
         let path = root.join(&rel);
         if let Some(parent) = path.parent() {

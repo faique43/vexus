@@ -10,6 +10,7 @@ mod corpus;
 mod metrics;
 mod perf;
 mod queries;
+mod tokenbench;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,16 @@ enum Cmd {
         /// job never passes this (it's advisory, continue-on-error: true).
         #[arg(long)]
         enforce: bool,
+    },
+    /// Measure how many tokens answering each `eval/token-bench/tasks.yaml`
+    /// question costs with grep+read versus with vexus, and regenerate
+    /// docs/BENCHMARKS.md from the result.
+    TokenBench {
+        /// Use the real ONNX embedder instead of the mock one. The grep side
+        /// is unaffected; only vexus's retrieval quality (and so how much it
+        /// needs to return) changes.
+        #[arg(long)]
+        real: bool,
     },
 }
 
@@ -389,7 +400,51 @@ fn main() -> Result<()> {
         Cmd::Check { real } => check(real),
         Cmd::Bless { real } => bless(real),
         Cmd::Perf { enforce } => perf::run(enforce),
+        Cmd::TokenBench { real } => token_bench(real),
     }
+}
+
+/// Run the token-efficiency benchmark and rewrite docs/BENCHMARKS.md. The
+/// doc is committed (unlike eval/last-run.json) because it's the public
+/// claim — a reader should be able to see the number and the method that
+/// produced it without running anything.
+fn token_bench(real: bool) -> Result<()> {
+    let root = eval_root()?;
+    let embedder: Arc<dyn Embedder> = if real {
+        corpus::build_real_embedder()?
+    } else {
+        Arc::new(vexus_embed::MockEmbedder)
+    };
+    let results = tokenbench::run(&root, embedder.clone(), real)?;
+    let scaling = tokenbench::run_scaling(embedder)?;
+
+    for r in &results {
+        let ratio = match r.ratio() {
+            Some(x) => format!("{x:.1}x"),
+            None => "-".to_string(),
+        };
+        println!(
+            "  {:<8} grep {:>7}  vexus {:>6}  {:>6}   {}",
+            r.corpus, r.grep_tokens, r.vexus_tokens, ratio, r.task
+        );
+    }
+
+    let doc = root
+        .parent()
+        .context("eval/ has no parent directory")?
+        .join("docs")
+        .join("BENCHMARKS.md");
+    for p in &scaling {
+        println!(
+            "  scaling {:>4} files  grep {:>7}  vexus {:>6}",
+            p.files, p.grep_tokens, p.vexus_tokens
+        );
+    }
+
+    std::fs::write(&doc, tokenbench::render_markdown(&results, &scaling, real))
+        .with_context(|| format!("write {}", doc.display()))?;
+    eprintln!("vexus-eval: wrote {}", doc.display());
+    Ok(())
 }
 
 #[cfg(test)]
