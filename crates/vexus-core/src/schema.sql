@@ -47,8 +47,16 @@ CREATE TABLE chunks (
   end_line INTEGER NOT NULL,
   content TEXT NOT NULL,
   content_hash BLOB NOT NULL,
-  token_count INTEGER NOT NULL
+  token_count INTEGER NOT NULL,
+  -- 1 once this chunk's vector has been written to vec_chunks. Kept here,
+  -- in an ordinary indexed column, rather than derived by anti-joining
+  -- vec_chunks: vec0 is a virtual table, so `LEFT JOIN vec_chunks ... WHERE
+  -- chunk_id IS NULL` degrades to a scan of the whole vector table per
+  -- candidate row. That made "is anything left to embed?" — asked after
+  -- every single-file watcher update — cost ~1.1s on a 500-file repo.
+  embedded INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX idx_chunks_embedded ON chunks(embedded) WHERE embedded = 0;
 
 CREATE VIRTUAL TABLE fts_chunks USING fts5(
   content, content='chunks', content_rowid='id'

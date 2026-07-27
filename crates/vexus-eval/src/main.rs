@@ -8,6 +8,7 @@
 
 mod corpus;
 mod metrics;
+mod perf;
 mod queries;
 
 use std::collections::BTreeMap;
@@ -61,6 +62,16 @@ enum Cmd {
         /// eval/baseline-mock.json from a mock run.
         #[arg(long)]
         real: bool,
+    },
+    /// Time indexing/incremental-update/reconcile/search/explore against a
+    /// deterministic synthetic 500-file corpus, print a table, append
+    /// bench/history.jsonl, and compare against bench/budgets.json.
+    Perf {
+        /// Exit 1 if any budget is exceeded (otherwise perf always exits 0
+        /// locally — a budget violation is printed either way). CI's perf
+        /// job never passes this (it's advisory, continue-on-error: true).
+        #[arg(long)]
+        enforce: bool,
     },
 }
 
@@ -377,6 +388,7 @@ fn main() -> Result<()> {
         Cmd::Run { real, corpus } => run(real, corpus),
         Cmd::Check { real } => check(real),
         Cmd::Bless { real } => bless(real),
+        Cmd::Perf { enforce } => perf::run(enforce),
     }
 }
 

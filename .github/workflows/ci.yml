@@ -37,3 +37,27 @@ jobs:
       # any corpus or overall. Never runs --real (no model downloads in PR
       # CI) — see eval/README.md for the pre-release --real --check workflow.
       - run: cargo run -p vexus-eval -- check
+
+  perf:
+    name: perf (advisory)
+    runs-on: ubuntu-latest
+    # Advisory only: GH runner variance (and, currently, real algorithmic
+    # variance in the incremental-update path — see bench/budgets.json's
+    # comment and the Task 3/4 report) mean this must never block a merge.
+    # continue-on-error makes the job show a non-blocking neutral/red
+    # indicator instead of failing the required checks.
+    continue-on-error: true
+    env:
+      VEXUS_EMBEDDER: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run perf harness (never --enforce; advisory only)
+        run: |
+          {
+            echo '## vexus-eval perf (advisory — never blocks merge)'
+            echo '```'
+            cargo run -p vexus-eval -- perf
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

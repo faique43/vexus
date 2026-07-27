@@ -597,8 +597,26 @@ mod tests {
     use super::*;
     use vexus_core::query::Resolution;
 
+    /// Held for the duration of any test that spawns a real watcher.
+    ///
+    /// A vexus process runs exactly one watcher, but `cargo test` runs the
+    /// whole module in one process across many threads. Several concurrent
+    /// FSEvents/inotify streams in a single process starve each other badly
+    /// enough that a stream can go tens of seconds without delivering — so
+    /// watcher tests failed in parallel while passing individually. This
+    /// serializes only those tests against each other; the rest of the suite
+    /// still runs in parallel.
+    static WATCHER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant: one panicking watcher test must not cascade into
+    /// every other watcher test failing on a poisoned lock.
+    fn watcher_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        WATCHER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn watcher_indexes_a_new_file_and_marks_the_index_fresh() {
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::write(root.join("a.py"), "def helper():\n    return 1\n").unwrap();
@@ -620,7 +638,7 @@ mod tests {
         std::fs::write(&new_file, "def brand_new_symbol():\n    return 42\n").unwrap();
 
         let start = Instant::now();
-        let deadline = start + Duration::from_secs(5);
+        let deadline = start + Duration::from_secs(20);
         let mut nudged = false;
         let mut found = false;
         while Instant::now() < deadline {
@@ -657,7 +675,7 @@ mod tests {
 
         assert!(
             found,
-            "watcher did not pick up new_mod.py's new symbol within 5s"
+            "watcher did not pick up new_mod.py's new symbol within 20s"
         );
     }
 
@@ -679,6 +697,7 @@ mod tests {
     /// events at all, and that dropping it stops the thread promptly.
     #[test]
     fn writer_thread_stays_alive_while_shutdown_sender_is_held_and_exits_once_dropped() {
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::write(root.join("a.py"), "def helper():\n    return 1\n").unwrap();
@@ -828,6 +847,7 @@ mod tests {
     /// watcher ran at all.
     #[test]
     fn watcher_honors_a_nested_gitignore_in_a_real_git_repo() {
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         if !init_git_repo(&root) {
@@ -857,7 +877,7 @@ mod tests {
         std::fs::write(&sentinel, "def live_symbol():\n    return 2\n").unwrap();
 
         let start = Instant::now();
-        let deadline = start + Duration::from_secs(5);
+        let deadline = start + Duration::from_secs(20);
         let mut nudged = false;
         let mut sentinel_seen = false;
         while Instant::now() < deadline {
@@ -885,7 +905,7 @@ mod tests {
 
         assert!(
             sentinel_seen,
-            "watcher did not pick up the non-ignored sentinel file within 5s"
+            "watcher did not pick up the non-ignored sentinel file within 20s"
         );
 
         let reader = Store::open_read_only(&db_path).unwrap();
@@ -944,6 +964,7 @@ mod tests {
     /// test does it).
     #[test]
     fn watcher_honors_a_nested_gitignore_in_a_non_git_repo_and_converges_with_a_full_reindex() {
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         assert!(!root.join(".git").exists());
@@ -979,7 +1000,7 @@ mod tests {
         std::fs::write(&sentinel, "def live_symbol():\n    return 3\n").unwrap();
 
         let start = Instant::now();
-        let deadline = start + Duration::from_secs(5);
+        let deadline = start + Duration::from_secs(20);
         let mut nudged = false;
         let mut sentinel_seen = false;
         while Instant::now() < deadline {
@@ -1007,7 +1028,7 @@ mod tests {
 
         assert!(
             sentinel_seen,
-            "watcher did not pick up the non-ignored sub/ok.py within 5s"
+            "watcher did not pick up the non-ignored sub/ok.py within 20s"
         );
 
         let reader = Store::open_read_only(&db_path).unwrap();
@@ -1248,6 +1269,7 @@ mod tests {
     /// applied.
     #[test]
     fn watcher_never_indexes_a_gitignored_file() {
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::write(root.join(".gitignore"), "build/\n").unwrap();
@@ -1275,7 +1297,7 @@ mod tests {
         std::fs::write(&sentinel, "def live_symbol():\n    return 2\n").unwrap();
 
         let start = Instant::now();
-        let deadline = start + Duration::from_secs(5);
+        let deadline = start + Duration::from_secs(20);
         let mut nudged = false;
         let mut sentinel_seen = false;
         while Instant::now() < deadline {
@@ -1302,7 +1324,7 @@ mod tests {
 
         assert!(
             sentinel_seen,
-            "watcher did not pick up the non-ignored sentinel file within 5s"
+            "watcher did not pick up the non-ignored sentinel file within 20s"
         );
 
         let reader = Store::open_read_only(&db_path).unwrap();
@@ -1330,6 +1352,7 @@ mod tests {
     /// find/exploit an actual bug.
     #[test]
     fn writer_panic_marks_the_index_degraded_and_the_thread_exits_cleanly() {
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::write(root.join("a.py"), "def helper():\n    return 1\n").unwrap();

@@ -1,0 +1,7 @@
+{
+  "index_500_ms": 30000.0,
+  "incremental_ms": 1000.0,
+  "reconcile_100_ms": 10000.0,
+  "search_p99_ms": 200.0,
+  "explore_p99_ms": 600.0
+}

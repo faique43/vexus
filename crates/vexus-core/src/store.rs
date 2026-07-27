@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use rusqlite::{Connection, OpenFlags};
 
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 const SCHEMA: &str = include_str!("schema.sql");
 
 static VEC_INIT: std::sync::Once = std::sync::Once::new();
@@ -236,6 +236,9 @@ impl Store {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM embed_cache", [])?;
         tx.execute("DROP TABLE IF EXISTS vec_chunks", [])?;
+        // Every vector just went away with the table, so nothing is embedded
+        // under the new model until it's re-embedded.
+        tx.execute("UPDATE chunks SET embedded = 0", [])?;
         if vec_available {
             tx.execute_batch(&format!(
                 "CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
@@ -263,14 +266,14 @@ impl Store {
         if !self.vec_available {
             return Ok(vec![]);
         }
-        let sql = if self.vec_table_exists()? {
+        // `chunks.embedded` rather than an anti-join against `vec_chunks`:
+        // see the column's comment in schema.sql. Holds whether or not the
+        // vec table exists yet — no chunk can be marked embedded before
+        // `put_embeddings` (the only writer of the flag) has run.
+        let mut stmt = self.conn.prepare(
             "SELECT c.id, c.content, c.content_hash FROM chunks c
-             LEFT JOIN vec_chunks v ON v.chunk_id = c.id
-             WHERE v.chunk_id IS NULL LIMIT ?1"
-        } else {
-            "SELECT c.id, c.content, c.content_hash FROM chunks c LIMIT ?1"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
+             WHERE c.embedded = 0 LIMIT ?1",
+        )?;
         let rows = stmt.query_map([limit], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -349,8 +352,12 @@ impl Store {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
             )?;
+            // Same transaction as the vector write, so the flag and the
+            // vector it describes can never disagree.
+            let mut mark = tx.prepare("UPDATE chunks SET embedded = 1 WHERE id = ?1")?;
             for (chunk_id, v) in rows {
                 stmt.execute(rusqlite::params![chunk_id, f32s_to_blob(v)])?;
+                mark.execute([chunk_id])?;
             }
         }
         tx.commit()?;
@@ -382,18 +389,14 @@ impl Store {
                 .conn
                 .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?);
         }
-        let n: i64 = if self.vec_table_exists()? {
-            self.conn.query_row(
-                "SELECT count(*) FROM chunks c
-                 LEFT JOIN vec_chunks v ON v.chunk_id = c.id
-                 WHERE v.chunk_id IS NULL",
-                [],
-                |r| r.get(0),
-            )?
-        } else {
+        // Indexed column, not an anti-join against the vec0 virtual table —
+        // see `chunks.embedded` in schema.sql. A missing vec table needs no
+        // special case: nothing can be flagged embedded without one.
+        let n: i64 =
             self.conn
-                .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?
-        };
+                .query_row("SELECT count(*) FROM chunks WHERE embedded = 0", [], |r| {
+                    r.get(0)
+                })?;
         Ok(n)
     }
 
