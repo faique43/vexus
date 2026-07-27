@@ -146,8 +146,11 @@ VEXUS_VERSION=0.1.0 VEXUS_INSTALL_DIR=/usr/local/bin \
   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
-Prebuilt binaries: macOS (Apple Silicon) and Linux (x64, arm64). Intel macOS
-and Windows aren't supported — see [Limitations](#limitations).
+Prebuilt binaries: macOS (Apple Silicon) and Linux (x64, arm64, **glibc 2.35 or
+newer** — Ubuntu 22.04, Debian 12, and anything more recent). ONNX Runtime is
+linked statically, so there is nothing to install alongside the binary.
+
+Intel macOS and Windows aren't supported — see [Limitations](#limitations).
 
 </details>
 
