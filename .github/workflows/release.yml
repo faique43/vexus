@@ -29,16 +29,19 @@ jobs:
           # runner image. Adding it back means vendoring an ONNX Runtime
           # build or switching backends, not just restoring a matrix line.
           #
-          # The Linux runners are pinned to the OLDEST supported image on
-          # purpose. A glibc-linked binary runs on the build machine's glibc
-          # and newer, never older, so building on ubuntu-24.04 produced
-          # binaries requiring GLIBC_2.39 — dead on Ubuntu 22.04, Debian 12,
-          # and RHEL 9 with an error that reads like a broken build. 22.04
-          # drops the floor to 2.35. Do not "modernise" these to
-          # ubuntu-latest; the glibc-floor step below fails the build if the
-          # floor creeps up again.
-          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          # ubuntu-24.04 is the OLDEST image these targets can build on, and
+          # the floor is set by the dependency, not by this choice. The
+          # prebuilt ONNX Runtime that ort downloads is itself compiled
+          # against glibc 2.38+ and references __isoc23_strtol /
+          # __isoc23_strtoull, which do not exist before 2.38. Building on
+          # ubuntu-22.04 (glibc 2.35) therefore fails at link time with
+          # "undefined symbol: __isoc23_strtol" rather than producing a more
+          # portable binary. Lowering the floor means building ONNX Runtime
+          # from source or switching backends. The step below pins the
+          # resulting floor so a jump to a newer image cannot raise it
+          # silently.
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,12 +56,15 @@ jobs:
 
       # A binary that needs a newer glibc than the user has fails at exec
       # with "version `GLIBC_2.xx' not found" and looks like a broken
-      # release. Nothing else in CI would catch a runner bump raising it.
+      # release. 2.39 is what ubuntu-24.04 produces and what the README
+      # promises; this catches a newer runner image pushing it higher
+      # without anyone noticing. It is a drift alarm, not an aspiration —
+      # see the matrix comment for why the floor cannot simply be lowered.
       - name: Check the glibc floor
         if: runner.os == 'Linux'
         shell: bash
         env:
-          MAX_GLIBC: "2.35"
+          MAX_GLIBC: "2.39"
         run: |
           set -euo pipefail
           need="$(readelf -V target/release/vexus \
@@ -66,7 +72,7 @@ jobs:
           echo "highest required: ${need:-none} (allowed: GLIBC_$MAX_GLIBC)"
           [ -n "$need" ] || exit 0
           if [ "$(printf '%s\n' "GLIBC_$MAX_GLIBC" "$need" | sort -V | tail -n 1)" != "GLIBC_$MAX_GLIBC" ]; then
-            echo "::error::$need exceeds the GLIBC_$MAX_GLIBC floor — this binary will not run on Ubuntu 22.04 or Debian 12. Build on an older runner image." >&2
+            echo "::error::$need exceeds the documented GLIBC_$MAX_GLIBC floor. The runner image probably moved. Either pin it back or update the floor in the README, CONTRIBUTING and CHANGELOG to match." >&2
             exit 1
           fi
 
