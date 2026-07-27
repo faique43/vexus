@@ -2,7 +2,7 @@
 //! rendered as an edge tree (`callers`/`callees`) or a depth-grouped summary
 //! (`impact`).
 //!
-//! Per the Task 2 review note: `EdgeHit`s carry a fully hydrated
+//! Note: `EdgeHit`s carry a fully hydrated
 //! `SymbolInfo` already (including the synthetic `id: -1` placeholder for
 //! unresolved callees) — nothing here re-fetches `symbol_info` for them.
 //! Rendering always goes straight off the `EdgeHit` itself.
@@ -126,9 +126,8 @@ pub fn callees_text(
 
 /// Pure inner implementation of the `impact` tool: the transitive caller
 /// graph (per `impact_of`) plus module-level import dependents (the
-/// incoming side of `imports_of`) — "blast radius" per the tool's shipped
-/// description covers both, even though the plan's interface line only
-/// spelled out the call-graph half.
+/// incoming side of `imports_of`) — "blast radius" in the tool's shipped
+/// description covers both halves, not just the call graph.
 pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> String {
     let max_depth = max_depth.unwrap_or(5).clamp(1, 5);
 

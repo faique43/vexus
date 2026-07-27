@@ -88,7 +88,7 @@ pub(crate) fn classify_file(root: &Path, rel: &str) -> FileClass {
 /// rules rather than risk the two ever drifting on which files are "in
 /// scope" for the index.
 ///
-/// Item 1 (P4 residual): `require_git(false)` — `ignore::WalkBuilder`
+/// `require_git(false)` — `ignore::WalkBuilder`
 /// otherwise only honors `.gitignore`/`.git/info/exclude`/the global
 /// excludesfile when `root` is actually inside a git repository (a `.git`
 /// entry present), silently ignoring every `.gitignore` file otherwise. A
@@ -217,7 +217,7 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
 
     store.resolve_all_edges()?;
 
-    // Item 6 (P4 residual): embed_cache is keyed purely by content hash with
+    // embed_cache is keyed purely by content hash with
     // no foreign key back to any chunk, so a chunk that's deleted or edited
     // into different content leaves its old cached embedding behind with
     // nothing else left to ever clean it up. A full reindex is the natural
@@ -424,7 +424,7 @@ mod tests {
         );
     }
 
-    /// Item 6 (P4 residual): a full reindex that changes a file's chunk
+    /// A full reindex that changes a file's chunk
     /// content (so its old chunks, and the embed_cache rows keyed to their
     /// content hash, are now orphaned) must prune those rows away — nothing
     /// else in the system ever revisits `embed_cache` by anything other than
@@ -466,8 +466,8 @@ mod tests {
         );
     }
 
-    /// Item 2 (P4 residual): the regression class that kept recurring across
-    /// Plan 4 — growing the *same* final index two structurally different
+    /// The regression class that kept recurring here: growing the *same*
+    /// final index two structurally different
     /// ways must converge on an identical final structural state
     /// (files/symbols/edges/chunks counts), regardless of which path built
     /// it.

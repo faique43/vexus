@@ -1,6 +1,6 @@
 //! `eval/queries/{repo}.yaml` and `eval/edges/{repo}.yaml` schemas.
 //!
-//! This is the same shape Plan 5 Task 1's
+//! This is the same shape
 //! `crates/vexus-cli/tests/eval_corpora_validation.rs` already validates
 //! every qualname against — kept as an independent copy here (not a shared
 //! dependency) since that file lives in a different crate's `tests/`
@@ -31,7 +31,7 @@ pub struct Query {
 
 /// One `eval/edges/{repo}.yaml` row — just the two qualnames the runner
 /// actually scores. The yaml also carries `expected` (`resolved`|
-/// `heuristic`) and a `note`, read by Task 1's own validation test
+/// `heuristic`) and a `note`, read by the corpora validation test
 /// (`crates/vexus-cli/tests/eval_corpora_validation.rs`, which checks every
 /// `heuristic` row carries a non-empty `note`); this runner scores every row
 /// identically regardless of `expected` (see `metrics::edge_counts`'s doc

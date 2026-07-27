@@ -8,10 +8,10 @@
 //!
 //! Lives in `vexus-cli` (not `vexus-mcp`) because `assert_cmd::cargo_bin`
 //! only resolves binaries owned by the crate under test, and the `vexus`
-//! binary lives in this crate (see the Task 8 brief).
+//! binary lives in this crate.
 //!
-//! rmcp 3.0.0-beta.2 client API notes (this crate's `rmcp` client feature is
-//! stale on crates.io at "0.3" per earlier plan docs; the resolved version is
+//! rmcp 3.0.0-beta.2 client API notes (the crates.io listing is stale at
+//! "0.3"; the resolved version is
 //! `3.0.0-beta.2`, whose client shape follows its own
 //! `tests/test_with_python.rs`):
 //! - `ServiceExt::serve` performs the `initialize` handshake as part of
@@ -180,7 +180,7 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
     assert_eq!(
         names,
         vec!["callees", "callers", "explore", "impact", "open", "search", "status",],
-        "expected exactly the 7 tools from the spec, got: {names:?}"
+        "expected exactly the 7 documented tools, got: {names:?}"
     );
     for tool in &tools {
         assert!(
@@ -305,8 +305,8 @@ async fn watcher_e2e_search_miss_write_file_status_heals_then_search_hit() {
     // window, an incremental reindex, and a fresh MCP round-trip — more
     // hops than the in-process watcher unit test's 5s budget covers).
     // macOS FSEvents can be slow to deliver a brand-new file's first event;
-    // nudge with a rewrite after 3s (documented in the Task 8 brief) rather
-    // than tightening the budget and risking flakiness.
+    // nudge with a rewrite after 3s rather than tightening the budget and
+    // risking flakiness.
     let start = Instant::now();
     let deadline = start + Duration::from_secs(15);
     let mut nudged = false;

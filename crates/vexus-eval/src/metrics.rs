@@ -6,7 +6,7 @@
 //! `vexus_core::Store`/`vexus_mcp` — it fetches the raw data and feeds it
 //! through the functions below.
 //!
-//! ## Aggregation scheme (binding, see the Plan 5 Global Constraints)
+//! ## Aggregation scheme (binding)
 //!
 //! Every metric is "aggregated per corpus + overall". Two shapes of pooling
 //! are used, and both share one rule: **overall is never a mean of per-corpus
@@ -76,7 +76,7 @@ impl Accum {
 ///
 /// `0.0` when `expected` is empty (never happens for real ground truth —
 /// `eval/queries/*.yaml` rows always carry a non-empty `expect`, enforced by
-/// Plan 5 Task 1's validation test — but a division by zero here would be
+/// the corpora validation test — but a division by zero here would be
 /// worse than a defensive `0.0`).
 pub fn recall_at_k(ranked: &[String], expected: &[String], k: usize) -> f64 {
     if expected.is_empty() {
@@ -147,7 +147,7 @@ pub fn ndcg_at_10(ranked: &[String], graded: &HashMap<String, u8>) -> f64 {
 /// doesn't resolve or resolves to a symbol with zero owned chunks — either
 /// way that counts as "not found" for that symbol (failing the whole query),
 /// never a vacuous pass. `false` when `expect` is empty (shouldn't happen —
-/// same Task 1 validation guarantee as `recall_at_k`).
+/// same corpora-validation guarantee as `recall_at_k`).
 pub fn answer_in_bundle(
     bundle_text: &str,
     expect: &[String],
@@ -197,7 +197,7 @@ impl EdgeCounts {
 
     /// `found / labeled`; `0.0` on an empty labeled set (never happens for
     /// real ground truth — `eval/edges/*.yaml` requires >= 40 rows per
-    /// corpus, per Task 1 — but avoids a `0/0` division).
+    /// corpus, enforced by validation — but avoids a `0/0` division).
     pub fn recall(&self) -> f64 {
         if self.labeled == 0 {
             0.0
@@ -240,8 +240,8 @@ impl EdgeCounts {
 /// to one query per distinct caller, not literal correctness).
 ///
 /// `returned` is a deduped set of `(caller, callee)` pairs pooled across
-/// every distinct caller's depth-1 result — "total edges returned across
-/// those [depth-1] queries (deduped)", per the Plan 5 Task 2 brief.
+/// every distinct caller's depth-1 result: the total edges returned across
+/// those depth-1 queries, deduped.
 pub fn edge_counts(
     labeled: &[LabeledEdge],
     mut depth1_callees: impl FnMut(&str) -> Vec<String>,
@@ -269,13 +269,13 @@ pub fn edge_counts(
     }
 }
 
-/// The exact seven metrics named in the Plan 5 Global Constraints ("Metrics
-/// exactly: `recall@5`, `recall@10`, `mrr`, `ndcg@10` (search);
-/// `answer_in_bundle` (explore); `edge_precision`, `edge_recall` (callers/
-/// callees vs labeled ground truth)"), each already rounded to 4 decimal
+/// The exact seven metrics reported: `recall@5`, `recall@10`, `mrr`,
+/// `ndcg@10` (search); `answer_in_bundle` (explore); `edge_precision`,
+/// `edge_recall` (callers/callees vs labeled ground truth). Each is
+/// already rounded to 4 decimal
 /// places via [`round4`] — the shape written to `eval/last-run.json`, both
 /// per corpus and for "overall". Field names are renamed on serialization to
-/// match the plan's literal metric names (`@` is a valid JSON string-key
+/// match the literal metric names (`@` is a valid JSON string-key
 /// character).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MetricSet {
@@ -291,8 +291,8 @@ pub struct MetricSet {
     pub edge_recall: f64,
 }
 
-/// Rounds to 4 decimal places (half away from zero) — the Plan 5 Global
-/// Constraints' "All floats 0..1, 4 decimal places in JSON" rule. Applied to
+/// Rounds to 4 decimal places (half away from zero) — the "all floats
+/// 0..1, 4 decimal places in JSON" rule. Applied to
 /// every metric value right before it's placed in the JSON-serializable
 /// report struct; `serde_json` then renders it via its normal (shortest
 /// round-trip) float formatting, so e.g. `1.0` prints as `1.0`, not

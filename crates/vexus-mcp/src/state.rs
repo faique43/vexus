@@ -251,8 +251,7 @@ fn epoch_to_rfc3339(secs: u64) -> String {
 
 /// The `⚠ index {state}{detail} — results may miss recent changes` warning
 /// line prepended (as `header + "\n\n"`) to every non-`status` tool's
-/// response when the index isn't `Fresh` (see the plan's Global
-/// Constraints). `None` on `Fresh` — the common case — so call sites skip
+/// response when the index isn't `Fresh`. `None` on `Fresh` — the common case — so call sites skip
 /// the prepend entirely rather than concatenating an empty string.
 ///
 /// `detail` is ` ({done}/{total} files)` when the state is `Reconciling` and
@@ -316,7 +315,7 @@ mod tests {
         }
     }
 
-    /// Exact-format regression test per the Task 8 brief (final `status`
+    /// Exact-format regression test for the final `status` shape (
     /// shape: index counts / model+backlog+vec / real freshness line / role
     /// / last event / optional skipped-files line), built from the store's
     /// own counts so the assertion tracks real indexed content rather than a
@@ -748,9 +747,8 @@ mod tests {
 
     /// Every vector here was cross-checked against `date -u -r <secs>
     /// +%Y-%m-%dT%H:%M:%SZ` on macOS before being hardcoded — not just
-    /// hand-derived — per the Task 8 brief's instruction to verify rather
-    /// than assume. Covers the epoch, a recent date (the one the brief
-    /// itself names), a leap day, a non-midnight time crossing a
+    /// hand-derived, to verify rather than assume. Covers the epoch, a
+    /// recent date, a leap day, a non-midnight time crossing a
     /// year/month/day boundary (1999-12-31 -> 2000-01-01 in UTC, one second
     /// before that), and the mp>=10 branch of the civil-from-days algorithm
     /// (November/December, and January/February needing the `y+1`

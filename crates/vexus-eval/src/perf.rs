@@ -1,7 +1,7 @@
 //! Deterministic synthetic 500-file corpus generator + timing harness for
-//! Plan 5 Task 4's perf budgets: index-500, a single-file incremental
+//! the perf budgets: index-500, a single-file incremental
 //! update, reconcile-100-changed, and search/explore p50/p99 latency (mock
-//! embedder only — "embed throughput excluded from gating" per the Global
+//! embedder only — embed throughput is excluded from gating; see the
 //! Constraints, since a real ONNX model's throughput is hardware-dependent,
 //! not something vexus's own code can regress or fix).
 //!
@@ -211,8 +211,8 @@ pub struct Timings {
 }
 
 /// `bench/budgets.json`'s shape — the committed thresholds `Timings` are
-/// compared against (all in milliseconds, per the Plan 5 Global
-/// Constraints: index-500 < 30s, incremental < 1s, reconcile-100 < 10s,
+/// compared against (all in milliseconds: index-500 < 30s,
+/// incremental < 1s, reconcile-100 < 10s,
 /// search p99 < 200ms, explore p99 < 600ms).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Budgets {
@@ -239,10 +239,10 @@ pub struct BudgetViolation {
 /// Which measured [`Timings`] exceed their [`Budgets`] counterpart —
 /// strictly greater-than, so a measurement exactly equal to its budget
 /// passes (mirrors the ratchet gate's own strict "> 0.02", not ">="). Only
-/// the 5 fields the Global Constraints actually gate are compared here —
+/// only the 5 gated fields are compared here —
 /// `embed_500_ms` and both p50s are informational/printed only, never
 /// budgeted (embed throughput is explicitly excluded from gating; p50 has
-/// no named budget in the plan, only p99 does).
+/// no named budget, only p99 does).
 pub fn check_budgets(timings: &Timings, budgets: &Budgets) -> Vec<BudgetViolation> {
     let pairs: [(&'static str, f64, f64); 5] = [
         ("index_500_ms", timings.index_500_ms, budgets.index_500_ms),

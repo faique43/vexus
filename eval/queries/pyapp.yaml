@@ -1,7 +1,6 @@
 # Ground-truth queries for eval/corpora/pyapp.
 #
-# Schema (see docs/superpowers/plans/2026-07-26-plan-5-eval-bench-distribution.md,
-# Global Constraints):
+# Schema:
 #   q       - the natural-language question or, for callers/callees, the
 #             target symbol's qualname
 #   tool    - search | explore | callers | callees (default: search)

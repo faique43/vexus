@@ -20,8 +20,8 @@ eval/
 
 ## Why the corpora are hand-authored, not vendored real repos
 
-Plan 5 originally considered vendoring real open-source repos as fixtures.
-We chose hand-authored fixtures instead:
+Vendoring real open-source repos as fixtures was considered and rejected in
+favour of hand-authored ones:
 
 - **No licensing/redistribution risk** — every file in `eval/corpora/` is
   original content written for this repo, so there's nothing to attribute,
@@ -74,7 +74,7 @@ zero semantic signal, so it's a pure regression detector for the
 *structural* pipeline (chunking, keyword/FTS ranking, RRF fusion, call-graph
 resolution), not a measure of real search quality.
 
-Rule (see the Plan 5 Global Constraints): **any** of the 7 metrics
+Rule: **any** of the 7 metrics
 (`recall@5`, `recall@10`, `mrr`, `ndcg@10`, `answer_in_bundle`,
 `edge_precision`, `edge_recall`), in any corpus or in the pooled "overall"
 row, dropping by **more than 0.02 absolute** against the baseline fails the

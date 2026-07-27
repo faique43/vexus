@@ -1,9 +1,9 @@
 //! The rmcp `ServerHandler` implementation: tool registration + the
 //! steering-layer `instructions` text served on `initialize`.
 //!
-//! rmcp 3.0.0-beta.2 API notes (the version resolved from the brief's
-//! `rmcp = "0.3"`, which is stale on crates.io — the crate is at
-//! `3.0.0-beta.2`): tool methods live in an `impl` block annotated
+//! rmcp 3.0.0-beta.2 API notes (the `rmcp = "0.3"` line on crates.io is
+//! stale — the crate is at `3.0.0-beta.2`): tool methods live in an
+//! `impl` block annotated
 //! `#[tool_router]`; `ServerHandler` is wired up with `#[tool_handler]` on
 //! its `impl` block, which auto-generates `call_tool`/`list_tools` from the
 //! router but leaves a hand-written `get_info()` alone if one is present
@@ -86,7 +86,7 @@ struct ImpactParams {
     max_depth: Option<u32>,
 }
 
-/// Steering layer 1 (see plan doc §5): shipped verbatim per the Task 3 brief.
+/// Steering layer 1: the `instructions` text served on `initialize`.
 const INSTRUCTIONS: &str =
     "Vexus is a pre-built semantic + structural index of this repository. Reads are
 milliseconds. Consult it BEFORE grep/find/read when looking for code.

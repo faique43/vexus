@@ -1,5 +1,5 @@
 //! `vexus-eval`: retrieval-metric runner over the hand-authored fixture
-//! corpora under `eval/` (Plan 5 Task 2). Indexes each corpus into a fresh
+//! corpora under `eval/`. Indexes each corpus into a fresh
 //! temp-directory index, runs every applicable query through the same code
 //! paths the MCP tools use, computes `recall@5`/`recall@10`/`mrr`/`ndcg@10`/
 //! `answer_in_bundle`/`edge_precision`/`edge_recall` (see `metrics.rs` for
@@ -100,7 +100,7 @@ struct Report {
 
 /// `crates/vexus-eval` -> repo root's `eval/` — resolved from the crate's
 /// build-time manifest dir (not the process's current working directory),
-/// same as Task 1's `eval_corpora_validation.rs::eval_root()`, so this works
+/// same as `eval_corpora_validation.rs::eval_root()`, so this works
 /// regardless of where `cargo run -p vexus-eval` is invoked from within the
 /// workspace.
 fn eval_root() -> Result<PathBuf> {
@@ -191,8 +191,8 @@ fn run(real: bool, only_corpus: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Plan 5 Global Constraints' ratchet rule: "ANY metric dropping > 0.02
-/// absolute" fails the gate. Strict `>` (not `>=`) — a drop of exactly 0.02
+/// The ratchet rule: ANY metric dropping more than 0.02 absolute fails
+/// the gate. Strict `>` (not `>=`) — a drop of exactly 0.02
 /// passes.
 const REGRESSION_THRESHOLD: f64 = 0.02;
 
@@ -220,7 +220,7 @@ impl MetricDelta {
     }
 }
 
-/// The 7 named metrics (see the Plan 5 Global Constraints) paired up
+/// The 7 named metrics paired up
 /// between `base` and `cur` for one scope (a corpus name, or "overall").
 fn metric_pairs(
     base: &metrics::MetricSet,
@@ -492,7 +492,7 @@ mod tests {
         assert!(format!("{err:#}").contains("no corpora"));
     }
 
-    // ---- ratchet gate (Plan 5 Task 3): diff_reports / load_baseline --------
+    // ---- ratchet gate: diff_reports / load_baseline -----------------------
 
     fn metric_set(v: f64) -> metrics::MetricSet {
         metrics::MetricSet {

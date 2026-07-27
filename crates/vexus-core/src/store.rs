@@ -112,7 +112,7 @@ impl Store {
     /// "attempt to write a readonly database" sqlite error — tools never
     /// call them, so no read-only guard is needed on every method.
     ///
-    /// Item 5 (P4 residual): unlike `open`, this constructor can never
+    /// Unlike `open`, this constructor can never
     /// rebuild a version-mismatched DB (only a writer is allowed to touch
     /// the file at all) — so instead, right after opening, it compares
     /// `meta('schema_version')` against this build's `SCHEMA_VERSION` and
@@ -1145,7 +1145,7 @@ mod tests {
         assert!(!store.set_model("other-model", 4).unwrap()); // same model: no wipe
     }
 
-    /// Item 6 (P4 residual): `embed_cache` rows are keyed purely by content
+    /// `embed_cache` rows are keyed purely by content
     /// hash, with no foreign key back to any chunk — a hash that no current
     /// chunk references anymore (its chunk was deleted, or edited into
     /// different content) is an orphan `prune_orphaned_embed_cache` must
@@ -1440,7 +1440,7 @@ mod tests {
         );
     }
 
-    /// Item 5 (P4 residual): a DB whose persisted `schema_version` doesn't
+    /// A DB whose persisted `schema_version` doesn't
     /// match this build's `SCHEMA_VERSION` must fail `open_read_only` with a
     /// message telling the caller how to recover, rather than silently
     /// reading (and possibly misinterpreting) a schema this build doesn't

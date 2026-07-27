@@ -6,12 +6,12 @@
 //! `Store::callees_of`) against the pure math in `metrics.rs`.
 //!
 //! Only `queries.yaml` rows with `tool: search` and `tool: explore` feed a
-//! named metric — per the Plan 5 Global Constraints, "Metrics exactly:
-//! recall@5, recall@10, mrr, ndcg@10 (search); answer_in_bundle (explore);
-//! edge_precision, edge_recall (callers/callees vs **labeled ground
-//! truth**)". The `tool: callers`/`tool: callees` rows in `queries.yaml`
-//! exist for query-corpus diversity and are validated for resolvability by
-//! Task 1's gate test, but edge_precision/edge_recall are computed
+//! named metric. The metrics are exactly: recall@5, recall@10, mrr,
+//! ndcg@10 (search); answer_in_bundle (explore); edge_precision,
+//! edge_recall (callers/callees vs **labeled ground truth**). The
+//! `tool: callers`/`tool: callees` rows in `queries.yaml` exist for
+//! query-corpus diversity and are validated for resolvability by the
+//! corpora gate test, but edge_precision/edge_recall are computed
 //! exclusively from `eval/edges/{repo}.yaml`'s labeled pairs, not from those
 //! rows — so they're loaded (to keep `serde_yaml` happy parsing the whole
 //! file) but deliberately don't feed any metric here.
@@ -249,8 +249,8 @@ fn score_search_query(
 }
 
 /// Scores one `tool: explore` query at the DEFAULT budget (`None` —
-/// `explore_text`'s own default, per the Task 2 brief's "Explore at default
-/// budget"), pushing `1.0`/`0.0` into `accum.answer_in_bundle`.
+/// `explore_text`'s own default), pushing `1.0`/`0.0` into
+/// `accum.answer_in_bundle`.
 fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut CorpusAccum) {
     let bundle = explore_text(state, &query.q, None);
     let passed = metrics::answer_in_bundle(&bundle, &query.expect, |qualname| {
@@ -279,7 +279,7 @@ fn first_chunk_content(state: &AppState, qualname: &str) -> Option<String> {
 /// qualified ground-truth qualname, so including it could only ever produce
 /// a false match by pure string coincidence. Returns an empty `Vec` (rather
 /// than propagating an error) when `caller` doesn't resolve to exactly one
-/// symbol — Task 1's validation test already guarantees every `edges.yaml`
+/// symbol — the corpora validation test already guarantees every `edges.yaml`
 /// caller resolves `Exact` against this same corpus, so this is a defensive
 /// fallback, not an expected path.
 fn depth1_resolved_callees(state: &AppState, caller: &str) -> Vec<String> {

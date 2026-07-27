@@ -1,4 +1,4 @@
-//! Gate for Plan 5 Task 1: every qualname named in `eval/queries/*.yaml`
+//! Gate: every qualname named in `eval/queries/*.yaml`
 //! (as an `expect` or a `graded` key) and `eval/edges/*.yaml` (as a `caller`
 //! or `callee`) must resolve to a real, unambiguous symbol in its corpus.
 //!
@@ -7,9 +7,8 @@
 //! corpus it claims to describe. A typo'd qualname, a symbol renamed after
 //! the yaml was written, or a qualname format that drifts from how the
 //! indexer actually derives them — all of those would otherwise sit
-//! silently wrong forever, since nothing else in the workspace reads these
-//! yaml files yet (the runner that will, `vexus-eval`, doesn't exist until
-//! a later Plan 5 task).
+//! silently wrong forever. The `vexus-eval` runner consumes the same
+//! files, but this gate is what keeps them honest.
 //!
 //! Each corpus is indexed once (mock embedder — no model download, fully
 //! deterministic) into a `tempfile::tempdir()` database. Pointing the

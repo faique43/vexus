@@ -1,5 +1,5 @@
 //! `explore` tool (the flagship): answer a question about the codebase in
-//! one call. Pipeline (binding, per the Task 7 brief):
+//! one call. Pipeline (binding):
 //!
 //! 1. `search_hybrid(question, embed(question), 12)` → entry chunks,
 //!    rendered as `BundleItem`s carrying their RRF score.

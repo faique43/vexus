@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// How long a path must go quiet (no new event) before `drain_ready` will
-/// emit it. Fixed per the spec rather than configurable in production; tests
+/// emit it. Fixed rather than configurable in production; tests
 /// still exercise the exact boundary via injected `Instant`s.
 pub const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 

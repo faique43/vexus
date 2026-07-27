@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 # Not yet used by any tool in this crate (the `status` tool takes no
 # parameters), but every later tool (search/open/callers/...) needs a
 # schemars-derived `Parameters<T>` struct per rmcp's tool macro, so these are
-# declared now to match the dependency shape the rest of the plan expects.
+# declared now to match the dependency shape those tools need.
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 

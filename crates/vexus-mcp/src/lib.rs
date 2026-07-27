@@ -1,4 +1,4 @@
-//! Vexus MCP server: exposes the Plan 1+2 index (structural + semantic) as
+//! Vexus MCP server: exposes the index (structural + semantic) as
 //! MCP tools over stdio for `vexus serve`.
 
 pub mod bundle;
@@ -55,7 +55,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     let db_path = root.join(".vexus/index.db");
 
     // Try to acquire the advisory writer lock. If another process holds it,
-    // we'll run as a reader with no writer thread (Task 6).
+    // we'll run as a reader with no writer thread.
     let writer_lock = WriterLock::try_acquire(&root)?;
     let is_writer = writer_lock.is_some();
 
@@ -181,7 +181,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
 /// start at all — `status` still reports the truth, and tools simply have
 /// less to work with until the caller re-runs `vexus index`.
 ///
-/// Item 4 (P4 residual): marks the index `Indexing` before any of this
+/// Marks the index `Indexing` before any of this
 /// runs, and deliberately does **not** transition it to `Fresh`/`Degraded`
 /// itself once done — that's left to the writer thread's own reconcile pass
 /// (`spawn_writer`'s `do_reconcile: true`, started later in `serve_async`),
@@ -317,7 +317,7 @@ fn spawn_background_reader_retry(state: Arc<AppState>, db_path: PathBuf, root: P
 /// against it so a specific class of failure surfaces here, with a clear
 /// hint, instead of confusing the first real tool call.
 ///
-/// Carried finding (Task 1 review): `Store::open_read_only` can succeed
+/// `Store::open_read_only` can succeed
 /// even when `root`'s containing directory can't be written to, because
 /// opening a connection doesn't by itself need to touch anything beyond the
 /// `.db` file. The first *query* is a different story — this index was
@@ -332,10 +332,10 @@ fn spawn_background_reader_retry(state: Arc<AppState>, db_path: PathBuf, root: P
 /// function (rather than inlined into `serve_async`) so it's unit-testable
 /// on its own — `serve_async`'s mandatory startup writer-open tends to
 /// surface most on-disk permission problems earlier anyway, but this
-/// becomes the *first* thing to open the DB at all once Task 6's advisory
+/// becomes the *first* thing to open the DB at all once the advisory
 /// lock lets a losing process skip that writer-open step entirely.
 ///
-/// Since item 5 (P4 residual), `Store::open_read_only` itself runs a real
+/// `Store::open_read_only` itself runs a real
 /// query right after opening (comparing `meta('schema_version')`) — so the
 /// same WAL-creation failure this whole function exists to explain can now
 /// surface from *that* call instead of from the `counts()` probe below. The
@@ -544,7 +544,7 @@ mod tests {
         );
     }
 
-    /// Carried finding (Task 1 review): a directory that can't be written
+    /// A directory that can't be written
     /// to makes `open_read_only` succeed but the very next query fail
     /// confusingly (SQLite needing to create fresh `-wal`/`-shm` companion
     /// files it can't). Reproduced directly against
@@ -597,7 +597,7 @@ mod tests {
         );
     }
 
-    /// Item 4 (P4 residual): `build_startup_index_if_empty` must mark the
+    /// `build_startup_index_if_empty` must mark the
     /// index `Indexing` before it starts, and — this is the property that
     /// actually matters here — must NOT itself transition it onward once
     /// the build finishes; only the writer thread's later reconcile pass

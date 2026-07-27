@@ -61,7 +61,7 @@ fn mark_degraded(store: &mut Store) {
 /// whole life of the writer thread's event loop.
 ///
 /// - `is_git_repo`: whether `root` is a git repo, checked once at watcher
-///   start (item 1, P4 residual) — a root becoming (or ceasing to be) one
+///   start — a root becoming (or ceasing to be) one
 ///   mid-run is out of scope for this fix.
 /// - `fallback`: an `ignore::IncrementalIgnore` — the *same* hierarchical,
 ///   per-directory `.gitignore`-matching engine `pipeline::index_repo`'s
@@ -114,7 +114,7 @@ fn build_fallback_matcher(root: &Path) -> ignore::IncrementalIgnore {
 /// ignored up front (no paths returned) — they fire on reads, not writes,
 /// and carry no information `update_file` needs to act on.
 ///
-/// Gitignore filtering does NOT happen here (item 1, P4 residual): it's
+/// Gitignore filtering does NOT happen here: it's
 /// done once per drain batch instead, in `drain_and_apply`, uniformly for
 /// both the git-repo case (`git_check_ignore`) and the non-git/fallback
 /// case (`GitignoreState::fallback`) — see that function's doc comment.
@@ -274,7 +274,7 @@ fn filter_via_fallback<'a>(gi: &mut GitignoreState, ready: &'a [PathBuf]) -> Vec
 /// *which* paths just settled — `run_writer` uses this to notice a
 /// `.gitignore` edit and rebuild `GitignoreState::fallback` (finding C2).
 ///
-/// Item 1 (P4 residual): every drained batch is filtered for gitignore
+/// Every drained batch is filtered for gitignore
 /// scope before any of it reaches `update_file`.
 ///
 /// - In a git repo (`gi.is_git_repo`), the batch goes through
@@ -421,7 +421,7 @@ fn run_writer_inner(
         panic!("test-injected writer panic");
     }
 
-    // Item 3 (P4 residual): a fresh writer-thread start clears any
+    // A fresh writer-thread start clears any
     // `last_event_at` left over from a previous run of this process (or a
     // previous `vexus serve` against the same DB) — it describes "the last
     // time THIS run's watcher applied a successful drain," which this run
@@ -470,10 +470,9 @@ fn run_writer_inner(
         drain_embed_backlog(store, embedder.as_deref());
     }
 
-    // Item 1 (P4 residual): `is_git_repo` is checked once, here, rather than
-    // per-drain — the brief's own scoping ("check once at watcher start"),
-    // since a root becoming (or ceasing to be) a git repository mid-run is
-    // out of scope for this fix.
+    // `is_git_repo` is checked once, here, rather than per-drain: a root
+    // becoming (or ceasing to be) a git repository mid-run is out of
+    // scope.
     let mut gi = GitignoreState {
         is_git_repo: root.join(".git").exists(),
         fallback: build_fallback_matcher(&root),
@@ -773,7 +772,7 @@ mod tests {
         true
     }
 
-    /// Item 1 (P4 residual): `git check-ignore --stdin -z` must correctly
+    /// `git check-ignore --stdin -z` must correctly
     /// distinguish paths ignored via a root `.gitignore`, a *nested*
     /// `sub/.gitignore`, and `.git/info/exclude` from paths that aren't
     /// ignored at all — none of the watcher's own lightweight root-only
@@ -843,7 +842,7 @@ mod tests {
         );
     }
 
-    /// Item 1 (P4 residual), end to end: a *real* git repo with a nested
+    /// End to end: a *real* git repo with a nested
     /// `sub/.gitignore` — something the watcher's old per-event root-only
     /// matcher could never see — must still keep a live-created file under
     /// it out of the index, now that `drain_and_apply` routes git repos
@@ -1090,7 +1089,7 @@ mod tests {
         );
     }
 
-    /// Item 3 (P4 residual): a fresh writer-thread start must clear
+    /// A fresh writer-thread start must clear
     /// `last_event_at` and reset `last_index_failed` to `0`, even with zero
     /// filesystem events — both keys otherwise carry forward stale meaning
     /// from whatever a *previous* run of this process (or a previous `vexus
@@ -1139,7 +1138,7 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Carried finding (Task 4 review): a successful drain must not
+    /// A successful drain must not
     /// unconditionally stamp `Fresh` — only healing `Fresh`/`Degraded`. If a
     /// reconcile (or the initial index build) is in flight and has already
     /// set `Reconciling`/`Indexing`, a drain succeeding concurrently must

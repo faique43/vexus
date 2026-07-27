@@ -6,13 +6,12 @@
 eval/**/.vexus/
 # Written by `vexus-eval run` on every invocation (local + CI eval-gate) —
 # a fresh, regeneratable artifact, not ground truth (unlike
-# eval/baseline-mock.json, which a later Plan 5 task commits deliberately).
+# eval/baseline-mock.json, which is committed deliberately).
 eval/last-run.json
 # Appended to by `vexus-eval perf` on every invocation (local + the CI perf
 # advisory job) — a running log of raw timings, not a committed artifact;
 # bench/budgets.json (the thresholds those timings are compared against) IS
 # committed.
 bench/history.jsonl
-.superpowers/
 /target
 eval/agent/results/
