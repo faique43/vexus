@@ -14,7 +14,7 @@ blake3 = "1"
 tempfile = "3"
 ureq = "2"
 sha2 = "0.10"
-notify = "6"
+notify = "8"
 libc = "0.2"
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }

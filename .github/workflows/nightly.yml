@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -23,7 +23,7 @@ jobs:
       # vexus-embed's manifest, so the cache key can be the manifest itself:
       # change the pinned revision and the cache correctly misses.
       - name: Cache the ONNX model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.vexus/models
           key: vexus-model-${{ hashFiles('crates/vexus-embed/src/download.rs') }}
@@ -86,7 +86,7 @@ jobs:
     # has-key job above exists to work around.)
     if: github.event_name == 'workflow_dispatch' && needs.has-key.outputs.configured == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the binary the agent will talk to
