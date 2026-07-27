@@ -164,7 +164,13 @@ cd your-repo
 vexus index .     # first run also fetches the embedding model (~160 MB, once)
 ```
 
-Point your MCP client at it. **Claude Code** — `.mcp.json` in your repo:
+Point your MCP client at it. **Claude Code**:
+
+```sh
+vexus init --agent claude-code   # registers the MCP server in .mcp.json + installs the steering pack
+```
+
+Or add it by hand — `.mcp.json` in your repo:
 
 ```json
 {

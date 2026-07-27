@@ -8,6 +8,9 @@ pub struct ModelFile {
     pub name: &'static str,
     pub sha256: &'static str,
     pub url_path: &'static str,
+    /// Rough size shown in the download message ("~150 MB"), so a first-run
+    /// user knows why the terminal went quiet. `""` omits the hint.
+    pub size_hint: &'static str,
 }
 
 pub struct ModelManifest {
@@ -30,11 +33,13 @@ pub static JINA_CODE_V2: ModelManifest = ModelManifest {
             name: "model_quantized.onnx",
             sha256: "ed45870251c9f0cf656e78aab0d37a23489066df8a222bb1c8caf8a45f2cb16d",
             url_path: "onnx/model_quantized.onnx",
+            size_hint: "~160 MB",
         },
         ModelFile {
             name: "tokenizer.json",
             sha256: "b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5",
             url_path: "tokenizer.json",
+            size_hint: "~2 MB",
         },
     ],
 };
@@ -127,7 +132,12 @@ pub fn ensure_model(manifest: &ModelManifest, models_root: &Path) -> Result<Path
         }
         let part = dir.join(format!("{}.part", file.name));
         let url = format!("{base}{}", file.url_path);
-        eprintln!("vexus: downloading {} …", file.name);
+        let size = if file.size_hint.is_empty() {
+            String::new()
+        } else {
+            format!(" ({}, one-time)", file.size_hint)
+        };
+        eprintln!("vexus: downloading {}{size} …", file.name);
         let result = (|| -> Result<()> {
             fetch(&url, &part)?;
             let got = file_sha256(&part)?;
@@ -173,11 +183,13 @@ mod tests {
                 name: "model.bin",
                 sha256: Box::leak(sha256_hex(b"weights").into_boxed_str()),
                 url_path: "onnx/model.bin",
+                size_hint: "",
             },
             ModelFile {
                 name: "tok.json",
                 sha256: Box::leak(sha256_hex(b"tokens").into_boxed_str()),
                 url_path: "tok.json",
+                size_hint: "",
             },
         ];
         let manifest = ModelManifest {
@@ -232,6 +244,7 @@ mod tests {
                     name: "model.bin",
                     sha256: "00",
                     url_path: "onnx/model.bin",
+                    size_hint: "",
                 }]
                 .into_boxed_slice(),
             ),

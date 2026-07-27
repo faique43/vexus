@@ -355,6 +355,106 @@ fn init_claude_code_with_force_overwrites() {
 }
 
 #[test]
+fn version_flag_accepts_all_spellings() {
+    for flag in ["-v", "-V", "--version"] {
+        Command::cargo_bin("vexus")
+            .unwrap()
+            .arg(flag)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+    }
+}
+
+#[test]
+fn init_claude_code_writes_mcp_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"]["vexus"]["command"], "vexus");
+    assert_eq!(
+        mcp["mcpServers"]["vexus"]["args"],
+        serde_json::json!(["serve", "."])
+    );
+}
+
+#[test]
+fn init_claude_code_merges_into_existing_mcp_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".mcp.json"),
+        r#"{"mcpServers": {"other": {"command": "x", "args": []}}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        mcp["mcpServers"]["other"]["command"], "x",
+        "existing servers must survive the merge"
+    );
+    assert_eq!(mcp["mcpServers"]["vexus"]["command"], "vexus");
+}
+
+#[test]
+fn init_claude_code_keeps_customized_vexus_entry_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let custom =
+        r#"{"mcpServers": {"vexus": {"command": "/opt/custom/vexus", "args": ["serve", "."]}}}"#;
+    std::fs::write(root.join(".mcp.json"), custom).unwrap();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--force"));
+
+    assert_eq!(
+        std::fs::read_to_string(root.join(".mcp.json")).unwrap(),
+        custom,
+        "a customized vexus entry must not be clobbered without --force"
+    );
+}
+
+#[test]
+fn init_claude_code_leaves_malformed_mcp_json_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".mcp.json"), "{not json").unwrap();
+
+    // init must still succeed (pack files matter more) and must not
+    // destroy the user's file, however broken it is
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mcpServers"));
+
+    assert_eq!(
+        std::fs::read_to_string(root.join(".mcp.json")).unwrap(),
+        "{not json"
+    );
+}
+
+#[test]
 fn init_generic_prints_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

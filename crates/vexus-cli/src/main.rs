@@ -28,9 +28,16 @@ const _: () = assert!(
     name = "vexus",
     version,
     long_version = LONG_VERSION,
+    disable_version_flag = true,
     about = "Local code intelligence for coding agents"
 )]
 struct Cli {
+    /// Print version
+    // Hand-rolled (with the default -V/--version disabled) only to also
+    // accept `-v` — the first thing people actually type, per field reports.
+    #[arg(short = 'V', short_alias = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -95,6 +102,94 @@ fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The MCP server entry `init --agent claude-code` registers — the same
+/// snippet the README tells people to paste by hand.
+fn vexus_mcp_entry() -> serde_json::Value {
+    serde_json::json!({ "command": "vexus", "args": ["serve", "."] })
+}
+
+#[derive(Debug)]
+enum McpMerge {
+    /// New `.mcp.json` content to write (entry added or force-replaced).
+    Write(String),
+    /// A `vexus` entry identical to ours is already there — nothing to do.
+    AlreadyConfigured,
+    /// A *different* `vexus` entry is there and `force` is off — keep the
+    /// user's customization.
+    KeptExisting,
+}
+
+/// Merges the vexus server entry into the (possibly absent) `.mcp.json`
+/// content. Pure: no filesystem access, so every edge is unit-testable.
+/// Errors mean "this file can't be safely rewritten" (malformed JSON, or a
+/// shape we don't understand) — the caller degrades to printing the snippet
+/// rather than clobbering whatever is there.
+fn merge_mcp_json(existing: Option<&str>, force: bool) -> Result<McpMerge> {
+    use serde_json::{Map, Value};
+    let mut root: Map<String, Value> = match existing {
+        None => Map::new(),
+        Some(s) => match serde_json::from_str::<Value>(s)? {
+            Value::Object(m) => m,
+            _ => anyhow::bail!("top level is not a JSON object"),
+        },
+    };
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Value::Object(servers) = servers else {
+        anyhow::bail!(r#""mcpServers" is not a JSON object"#);
+    };
+    let entry = vexus_mcp_entry();
+    match servers.get("vexus") {
+        Some(current) if *current == entry => return Ok(McpMerge::AlreadyConfigured),
+        Some(_) if !force => return Ok(McpMerge::KeptExisting),
+        _ => {}
+    }
+    servers.insert("vexus".into(), entry);
+    let mut out = serde_json::to_string_pretty(&Value::Object(root))?;
+    out.push('\n');
+    Ok(McpMerge::Write(out))
+}
+
+/// Registers the vexus MCP server in `<root>/.mcp.json`, creating or merging
+/// as needed. Never fails `init`: a file we can't safely rewrite degrades to
+/// printing the snippet for the user to paste, matching the old behavior.
+fn register_mcp_server(root: &Path, force: bool) -> Result<()> {
+    let mcp_path = root.join(".mcp.json");
+    let existing = match std::fs::read_to_string(&mcp_path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context(format!("read {}", mcp_path.display())))
+        }
+    };
+    match merge_mcp_json(existing.as_deref(), force) {
+        Ok(McpMerge::Write(content)) => {
+            std::fs::write(&mcp_path, content)?;
+            println!("{}", mcp_path.display());
+        }
+        Ok(McpMerge::AlreadyConfigured) => {
+            println!("skip: {} (vexus already registered)", mcp_path.display());
+        }
+        Ok(McpMerge::KeptExisting) => {
+            println!(
+                "skip: {} (existing \"vexus\" entry differs — rerun with --force to replace it)",
+                mcp_path.display()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "vexus: could not update {} ({e:#}) — add this yourself:",
+                mcp_path.display()
+            );
+            println!(
+                r#"{{ "mcpServers": {{ "vexus": {{ "command": "vexus", "args": ["serve", "."] }} }} }}"#
+            );
+        }
+    }
+    Ok(())
+}
+
 fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
     match agent {
         "claude-code" => {
@@ -131,16 +226,15 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
                 force,
             )?;
 
+            register_mcp_server(root, force)?;
+
             println!(
                 "\nClaude Code loads this from the LAUNCH directory's .claude/skills — start \
                  Claude Code from {} (or a directory it's later trusted from) for it to be \
                  picked up. The first session that finds it will show a workspace-trust \
-                 dialog (it bundles a hook); accept it to enable the nudge + skill.",
+                 dialog (it bundles a hook); accept it to enable the nudge + skill. The MCP \
+                 server is registered in .mcp.json; Claude Code will ask once to approve it.",
                 root.display()
-            );
-            println!("\nAdd this to .mcp.json:");
-            println!(
-                r#"{{ "mcpServers": {{ "vexus": {{ "command": "vexus", "args": ["serve", "."] }} }} }}"#
             );
         }
         "cursor" => {
@@ -344,4 +438,79 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(m: &McpMerge) -> serde_json::Value {
+        match m {
+            McpMerge::Write(s) => serde_json::from_str(s).unwrap(),
+            other => panic!("expected Write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_creates_file_from_scratch() {
+        let v = parsed(&merge_mcp_json(None, false).unwrap());
+        assert_eq!(v["mcpServers"]["vexus"]["command"], "vexus");
+        assert_eq!(
+            v["mcpServers"]["vexus"]["args"],
+            serde_json::json!(["serve", "."])
+        );
+    }
+
+    #[test]
+    fn merge_preserves_unrelated_keys_and_servers() {
+        let existing = r#"{"zeta": 1, "mcpServers": {"other": {"command": "x"}}, "alpha": 2}"#;
+        let m = merge_mcp_json(Some(existing), false).unwrap();
+        let v = parsed(&m);
+        assert_eq!(v["zeta"], 1);
+        assert_eq!(v["alpha"], 2);
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["mcpServers"]["vexus"]["command"], "vexus");
+        // key order preserved, not alphabetized: user's file shouldn't be
+        // reshuffled just because vexus touched it
+        let McpMerge::Write(s) = m else {
+            unreachable!()
+        };
+        let zeta = s.find("zeta").unwrap();
+        let alpha = s.find("alpha").unwrap();
+        assert!(zeta < alpha, "key order must be preserved: {s}");
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let McpMerge::Write(first) = merge_mcp_json(None, false).unwrap() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            merge_mcp_json(Some(&first), false).unwrap(),
+            McpMerge::AlreadyConfigured
+        ));
+    }
+
+    #[test]
+    fn merge_keeps_a_differing_vexus_entry_without_force() {
+        let existing = r#"{"mcpServers": {"vexus": {"command": "custom"}}}"#;
+        assert!(matches!(
+            merge_mcp_json(Some(existing), false).unwrap(),
+            McpMerge::KeptExisting
+        ));
+    }
+
+    #[test]
+    fn merge_replaces_a_differing_vexus_entry_with_force() {
+        let existing = r#"{"mcpServers": {"vexus": {"command": "custom"}}}"#;
+        let v = parsed(&merge_mcp_json(Some(existing), true).unwrap());
+        assert_eq!(v["mcpServers"]["vexus"]["command"], "vexus");
+    }
+
+    #[test]
+    fn merge_refuses_to_touch_malformed_json() {
+        assert!(merge_mcp_json(Some("{not json"), false).is_err());
+        assert!(merge_mcp_json(Some("[1, 2]"), false).is_err());
+        assert!(merge_mcp_json(Some(r#"{"mcpServers": 42}"#), false).is_err());
+    }
 }

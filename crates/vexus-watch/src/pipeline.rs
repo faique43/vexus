@@ -252,15 +252,33 @@ pub struct EmbedReport {
     pub from_cache: usize,
 }
 
+/// Backlogs at or below this stay silent. The watcher calls `embed_pending`
+/// on every save (a handful of chunks); only a first index / big reindex —
+/// where minutes of silence read as a hang — is worth narrating.
+const EMBED_PROGRESS_MIN_BACKLOG: i64 = 256;
+
 /// Embed every chunk missing a vector, in batches, reusing `embed_cache` hits
 /// (keyed by content hash) so unchanged content across re-indexes never pays
 /// for a fresh model call. A no-op (vec unavailable, or nothing missing)
 /// returns an empty report immediately.
+///
+/// Large backlogs report progress to stderr: the first index of a real repo
+/// embeds for minutes on CPU, and with no output that is indistinguishable
+/// from a hang (users ^C it — the exact first-run failure this line exists
+/// to prevent).
 pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<EmbedReport> {
     let mut report = EmbedReport {
         embedded: 0,
         from_cache: 0,
     };
+    let total = store.embed_backlog()?;
+    let announce = total > EMBED_PROGRESS_MIN_BACKLOG;
+    if announce {
+        eprintln!(
+            "vexus: embedding {total} chunks — this can take a few minutes on a large repo \
+             (safe to interrupt; it resumes where it left off)"
+        );
+    }
     loop {
         let backlog_before = store.embed_backlog()?;
         let missing = store.chunks_missing_embedding(256)?;
@@ -300,6 +318,12 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
             }
         }
         store.put_embeddings(&ready)?;
+        if announce {
+            eprintln!(
+                "vexus: embedded {}/{total} chunks",
+                report.embedded + report.from_cache
+            );
+        }
 
         // Defensive: we just processed a non-empty batch of missing rows, so
         // the total backlog must have shrunk. If it somehow didn't (e.g.
