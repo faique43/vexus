@@ -88,12 +88,14 @@ parser code:
 
 ## Platform reality
 
-- **Supported:** Linux (x64, arm64, glibc 2.35+), macOS on Apple Silicon.
-  Release Linux builds run on the *oldest* supported runner image on purpose.
-  A glibc-linked binary runs on its build machine's glibc and newer, never
-  older, so building on a current image silently drops every user on an older
-  distro. A step in the release workflow fails the build if the required
-  glibc creeps above 2.35.
+- **Supported:** Linux (x64, arm64, glibc 2.39+), macOS on Apple Silicon.
+  The glibc floor is set by the prebuilt ONNX Runtime `ort` downloads, not by
+  our runner choice: it is compiled against glibc 2.38 and references
+  `__isoc23_strtol`, so building on ubuntu-22.04 fails at link time with
+  `undefined symbol: __isoc23_strtol` instead of producing a more portable
+  binary. ubuntu-24.04 is the oldest image that links, which is where 2.39
+  comes from. A step in the release workflow fails if the floor drifts above
+  2.39, so a newer runner image cannot raise it unnoticed.
 - **Windows:** unsupported. The advisory writer lock is `flock`, and the
   non-unix stub hands every `serve` a writer lock, so concurrent instances
   would race. Real support means a Windows locking implementation, not a

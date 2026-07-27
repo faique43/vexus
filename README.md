@@ -146,11 +146,14 @@ VEXUS_VERSION=0.1.1 VEXUS_INSTALL_DIR=/usr/local/bin \
   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
-Prebuilt binaries: macOS (Apple Silicon) and Linux (x64, arm64, **glibc 2.35 or
-newer** — Ubuntu 22.04, Debian 12, and anything more recent). ONNX Runtime is
-linked statically, so there is nothing to install alongside the binary.
+Prebuilt binaries: macOS (Apple Silicon) and Linux (x64, arm64, **glibc 2.39 or
+newer** — Ubuntu 24.04+, Debian 13+, Fedora 39+). ONNX Runtime is linked
+statically, so there is nothing to install alongside the binary.
 
-Intel macOS and Windows aren't supported — see [Limitations](#limitations).
+On an older distro the binary will not start. Ubuntu 22.04, Debian 12 and
+RHEL 9 are all below the floor, and building from source does not help there;
+see [Limitations](#limitations). Intel macOS and Windows aren't supported
+either.
 
 </details>
 
@@ -293,11 +296,17 @@ The things worth knowing before you rely on it:
   same-named methods, duck typing, and dynamic dispatch resolve to a best guess
   or not at all. Every edge carries a confidence label, and unresolved ones say
   `unresolved` rather than guessing quietly.
-- **Apple Silicon macOS and Linux only.** Windows is out because the writer
-  lock uses `flock`. Intel macOS is out for a harder reason: the ONNX Runtime
-  build vexus embeds has no `x86_64-apple-darwin` target, so building from
-  source fails there too — supporting it means vendoring a runtime or
-  switching backends.
+- **Apple Silicon macOS and recent Linux only.** Windows is out because the
+  writer lock uses `flock`. The other two limits both come from the embedded
+  ONNX Runtime rather than from vexus, which means building from source does
+  not work around either:
+  - **Intel macOS** has no prebuilt runtime at all, so the build fails.
+  - **Linux needs glibc 2.39+.** The prebuilt runtime is compiled against
+    glibc 2.38 and references `__isoc23_strtol`, so it will not even link
+    against anything older. Ubuntu 22.04, Debian 12 and RHEL 9 are out.
+
+  Lifting either one means vendoring an ONNX Runtime build or switching
+  backends. Both are open for contribution.
 - **First run needs network.** The model is fetched from Hugging Face (pinned
   revision, checksum-verified). Without it vexus still runs keyword-and-graph
   only, and `status` tells you so.

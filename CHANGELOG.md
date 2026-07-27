@@ -1,20 +1,26 @@
 # Changelog
 
-## v0.1.1 — Linux binaries that actually run
+## v0.1.1 — document the real Linux floor, unpin a deprecated runner
 
-The v0.1.0 Linux artifacts were built on Ubuntu 24.04 and so required
-`GLIBC_2.39`. A glibc-linked binary runs on its build machine's glibc and
-newer, never older, which left them failing at exec on Ubuntu 22.04, Debian 12,
-RHEL 9 and Amazon Linux 2023 with `version 'GLIBC_2.39' not found`.
+The Linux binaries require **glibc 2.39**, so they do not start on Ubuntu
+22.04, Debian 12, RHEL 9 or Amazon Linux 2023. v0.1.0 shipped without saying
+so; the docs now state it up front.
 
-- Linux targets now build on Ubuntu 22.04, dropping the floor to **glibc 2.35**.
-- The release workflow fails if the required glibc rises above 2.35, so a
-  future runner bump cannot reintroduce this quietly.
+This floor is not a packaging choice. The prebuilt ONNX Runtime that `ort`
+downloads is compiled against glibc 2.38 and references `__isoc23_strtol`, so
+building on an older image fails at link time rather than producing a more
+portable binary. Ubuntu 24.04 is the oldest image that links. Lowering the
+floor means building ONNX Runtime from source or switching backends, and
+`cargo install` hits the same wall.
+
+- README, CONTRIBUTING and the limitations section state the glibc floor and
+  why building from source does not work around it.
+- The release workflow fails if the required glibc drifts above 2.39, so a
+  newer runner image cannot raise it unnoticed.
 - The Apple Silicon build moved off the deprecated `macos-14` image. A retired
   runner does not fail, it stays queued until the run times out.
 
-No code changes. macOS users are unaffected; if you are on Linux and v0.1.0
-would not start, this is the fix.
+No code changes. macOS users are unaffected.
 
 ## v0.1.0 — first release
 
@@ -37,6 +43,6 @@ repository, served over MCP.
 - **Measurement.** Retrieval metrics gated in CI against hand-labelled
   corpora, performance budgets, and a token-cost benchmark versus grep.
 
-Apple Silicon macOS and Linux (x64, arm64, glibc 2.35+) in this release.
+Apple Silicon macOS and Linux (x64, arm64, glibc 2.39+) in this release.
 Windows needs a non-`flock` writer lock; Intel macOS needs an ONNX Runtime
 build that the embedding backend does not ship. See the README's limitations.
