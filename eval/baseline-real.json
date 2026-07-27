@@ -1,0 +1,32 @@
+{
+  "mode": "real",
+  "per_corpus": {
+    "polyglot": {
+      "recall@5": 0.7692,
+      "recall@10": 1.0,
+      "mrr": 0.4753,
+      "ndcg@10": 0.5215,
+      "answer_in_bundle": 0.625,
+      "edge_precision": 0.8837,
+      "edge_recall": 0.9048
+    },
+    "pyapp": {
+      "recall@5": 0.8222,
+      "recall@10": 0.8444,
+      "mrr": 0.6167,
+      "ndcg@10": 0.5855,
+      "answer_in_bundle": 1.0,
+      "edge_precision": 0.8852,
+      "edge_recall": 0.9474
+    }
+  },
+  "overall": {
+    "recall@5": 0.7976,
+    "recall@10": 0.9167,
+    "mrr": 0.551,
+    "ndcg@10": 0.5535,
+    "answer_in_bundle": 0.8333,
+    "edge_precision": 0.8846,
+    "edge_recall": 0.9293
+  }
+}

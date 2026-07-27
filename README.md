@@ -1,16 +1,89 @@
+<div align="center">
+
 # vexus
 
-Local code intelligence for coding agents. Vexus indexes a repository into a
-semantic + structural graph and serves it over MCP, so an agent asks one
-question and gets back the relevant source — instead of grepping its way
-there a file at a time.
+**Stop letting your coding agent grep its way around your codebase.**
 
-Everything runs on your machine. Indexing and embedding cost zero agent
-tokens, and the index keeps itself current while the server is running.
+Vexus indexes your repo into a semantic + call-graph index and serves it over MCP.
+Your agent asks one question and gets the relevant source back — instead of
+burning ten tool calls narrowing in on it.
 
-Existing tools tend to be one half or the other: a structural graph with no
-semantics, or vector search with no call graph. Vexus is both, incrementally
-maintained by a file watcher, in one zero-config binary.
+Runs entirely on your machine. Indexing and embedding cost zero agent tokens.
+
+[![CI](https://github.com/faique43/vexus/actions/workflows/ci.yml/badge.svg)](https://github.com/faique43/vexus/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+
+[Install](#install) · [Quickstart](#quickstart) · [Benchmarks](#benchmarks) · [How it works](#how-it-works) · [Limitations](#limitations)
+
+</div>
+
+---
+
+## The problem
+
+Ask an agent "how does billing work?" in a repo it doesn't know, and watch what
+happens:
+
+```text
+Grep "invoice"              → matches across a dozen files
+Read handlers/invoices.py   → the wrong layer; it just forwards
+Grep "create_invoice"       → more matches
+Read services/invoice_service.py  → closer
+Read models/invoice.py      → needed this too
+```
+
+Several round trips, most of the pulled-in text irrelevant, and the
+notification hook hanging off the end of that flow still got missed. The agent
+is doing full-text search because that is the only tool it has.
+
+## The fix
+
+```text
+explore "how does an invoice get created"
+```
+
+One call. Vexus finds the entry points semantically, walks one hop through the
+call graph to pull in what they depend on, and returns verbatim source grouped
+by file. Real output, trimmed for length:
+
+````text
+explore: "how does an invoice get created"
+
+## handlers/invoices.py
+handlers/invoices.py:14-18
+```
+    def create(self, req):
+        """Handle POST /invoices: create a new invoice for the customer."""
+        return create_invoice(
+            req["customer_id"], req["amount_cents"], req.get("currency", "usd")
+        )
+```
+## services/invoice_service.py
+services/invoice_service.py:13-25
+```
+def create_invoice(customer_id, amount_cents, currency="usd"):
+    ...
+    _INVOICES[invoice.id] = invoice
+    notify_invoice_created(invoice, _default_notifier())
+    return invoice
+```
+## services/notification_service.py
+services/notification_service.py:20-28
+```
+def notify_invoice_created(invoice, notifier):
+    """Notify the customer that `invoice` was created, via whichever `notifier` was configured.
+    ...
+    """
+    return notifier.send(f"Invoice {invoice.id} for {invoice.amount_cents} created")
+```
+Related (not included, raise budget_tokens or use `open`): services.invoice_service.get_invoice:28-30,
+models.invoice.Invoice:6-14, services.invoice_service.refund_invoice:39-47, ...
+````
+
+Note the third file. Nothing in the question mentions notifications — vexus
+pulled it in because `create_invoice` calls it. That hop is the difference
+between "here are some matches" and "here is the flow."
 
 ## Install
 
@@ -18,105 +91,168 @@ maintained by a file watcher, in one zero-config binary.
 curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
-Or from source (Rust stable):
+Downloads the release binary for your platform, verifies it against the
+release checksums, and installs to `~/.local/bin`.
+
+<details>
+<summary>Other ways to install</summary>
+
+**From source** (Rust stable):
 
 ```sh
 cargo install --git https://github.com/faique43/vexus vexus-cli
 ```
 
+**Pin a version / change the location:**
+
+```sh
+VEXUS_VERSION=0.1.0 VEXUS_INSTALL_DIR=/usr/local/bin \
+  curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
+```
+
+Prebuilt binaries: macOS (arm64, x64) and Linux (x64, arm64). Windows isn't
+supported yet — see [Limitations](#limitations).
+
+</details>
+
 ## Quickstart
 
 ```sh
 cd your-repo
-vexus index .                    # first run downloads the embedding model (~160 MB)
-vexus init --agent claude-code   # optional: install the steering pack
+vexus index .     # first run also fetches the embedding model (~160 MB, once)
 ```
 
-Then point your MCP client at it. For Claude Code, `.mcp.json`:
+Point your MCP client at it. **Claude Code** — `.mcp.json` in your repo:
 
 ```json
-{ "mcpServers": { "vexus": { "command": "vexus", "args": ["serve", "."] } } }
+{
+  "mcpServers": {
+    "vexus": { "command": "vexus", "args": ["serve", "."] }
+  }
+}
 ```
 
-`vexus serve` hosts the tools and a file watcher, so edits are reflected
-without re-indexing by hand.
+<details>
+<summary>Cursor, Windsurf, Cline, and other MCP clients</summary>
 
-## What the agent gets
+Any MCP client that can launch a stdio server works. The command is
+`vexus serve <path-to-repo>`. For Cursor, add the same block to
+`.cursor/mcp.json`.
 
-| Tool | For |
+Optional: `vexus init --agent cursor` writes a rules file telling the agent
+when to prefer vexus over grep. `--agent claude-code` installs a skill and a
+one-time nudge hook; `--agent generic` prints a snippet for your `AGENTS.md`.
+
+</details>
+
+That's it. `vexus serve` runs a file watcher, so the index stays current as you
+edit — no re-indexing by hand.
+
+## What your agent gets
+
+| Tool | Use it for |
 | --- | --- |
-| `explore` | "How does X work?", "where is Y handled?" — one call returns the relevant verbatim source, budgeted and grouped by file |
-| `search` | Find a symbol by meaning or by words |
-| `open` | Fetch a known symbol or an exact file range |
-| `callers` / `callees` | Who calls this, what this calls |
-| `impact` | Everything a change here could reach |
-| `status` | Index freshness, coverage, health |
+| **`explore`** | "How does X work?", "what happens when Y?" — one call, verbatim source, budgeted |
+| **`search`** | Find a symbol by meaning, not just by name |
+| **`open`** | Fetch a known symbol or an exact file range |
+| **`callers`** / **`callees`** | Trace who calls what |
+| **`impact`** | Everything a change here could reach, plus import dependents |
+| **`status`** | Index freshness, coverage, health |
 
-Every response is verbatim source with `path:line` headers, capped by a token
-budget you can raise per call.
+Every response is real source with `path:line` headers — the agent can act on
+it without a follow-up read.
+
+## Benchmarks
+
+Full methodology and caveats: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+### Context cost scales with your repo — vexus doesn't
+
+Same question, same repository, three sizes. grep+read searches and reads;
+vexus makes one `explore` call.
+
+| Repo size | grep + read | vexus | |
+| ---: | ---: | ---: | --- |
+| 50 files | 1,782 tokens | 863 | 2.1× less |
+| 200 files | 7,032 tokens | 609 | 11.5× less |
+| 500 files | 17,598 tokens | **469** | **37.5× less** |
+
+Grep grew 9.9×. Vexus went *down*. That's the whole pitch: a tool call returns
+a top-ranked handful bounded by its budget, while searching costs more the more
+code you have.
+
+> **Straight answer on the small-repo case:** on a few dozen files, grep is
+> cheaper and vexus is not worth installing. The benchmark reports those rows
+> too, including the ones vexus loses. The synthetic corpus above is also
+> grep's worst case (every file matches the term), and the two sides answer at
+> different breadth — grep returns every match, vexus returns the best ones.
+> Both caveats are spelled out in the benchmark doc rather than buried.
+
+### Retrieval quality
+
+Measured against hand-labelled fixture corpora — 69 graded queries, 99 labelled
+call edges — and **gated in CI**: any metric dropping more than 0.02 absolute
+fails the build.
+
+| | |
+| --- | ---: |
+| recall@5 | 0.80 |
+| recall@10 | 0.92 |
+| answer-in-bundle (`explore` returned the source you needed) | 0.83 |
+| call-edge precision / recall | 0.88 / 0.93 |
+
+### Speed
+
+500-file repo, release build, enforced by `vexus-eval perf`:
+
+| | |
+| --- | ---: |
+| Full index | 3.0 s |
+| Incremental update (one file saved) | 6 ms |
+| `search` p99 | 6 ms |
+| `explore` p99 | 15 ms |
 
 ## How it works
 
+```text
+vexus index    tree-sitter → symbols + call/import edges → doc-aware chunks
+               → local ONNX embeddings → SQLite (sqlite-vec + FTS5)
+
+vexus serve    MCP over stdio + debounced file watcher + startup reconcile
 ```
-vexus index    tree-sitter parse → symbols + call/import edges → chunks → local ONNX embeddings → SQLite
-vexus serve    MCP (stdio) + file watcher + startup reconcile
-.vexus/index.db   per-repo, gitignored, WAL
-```
 
-Search is hybrid: vector KNN and FTS5 keyword results fused with reciprocal
-rank fusion. `explore` adds a one-hop expansion through the call and import
-graph, then packs the result to a token budget.
+- **Hybrid retrieval.** Vector KNN and BM25 keyword results fused with
+  reciprocal rank fusion — semantic recall without losing exact-name precision.
+- **Graph expansion.** `explore` doesn't just return matches; it walks one hop
+  through callers, callees, and imports, then packs the result to a budget.
+- **Honest freshness.** When the index is reconciling or degraded, every tool
+  response says so on its first line. Nothing silently serves stale code.
+- **Concurrency.** Multiple `vexus serve` processes coordinate with an advisory
+  lock: one maintains the index, the rest read it.
+- **Local, always.** The embedding model runs on CPU on your machine. No code
+  leaves it. Zero agent tokens spent on indexing.
 
-Freshness is reported rather than assumed: when the index is reconciling or
-degraded, every tool response says so on its first line, and `status` explains
-why. Concurrent `vexus serve` processes coordinate with an advisory lock —
-one maintains the index, the others read it.
-
-The design document is in
-[`docs/superpowers/specs/`](docs/superpowers/specs/); the implementation
-plans that built it are alongside in `docs/superpowers/plans/`.
-
-## Measurement
-
-Retrieval quality is gated in CI against hand-labelled fixture corpora: a
-regression greater than 0.02 absolute in recall@5/10, MRR, nDCG@10,
-answer-in-bundle, or edge precision/recall fails the build. See
-[`eval/README.md`](eval/README.md).
-
-Token cost versus grepping is measured in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). The summary: a vexus call is
-bounded by its token budget, while grep-and-read grows with the repository —
-on a 500-file corpus that is roughly 36× less context for the same question,
-and the gap widens with size. On a very small repository an index does not
-pay for itself, and the benchmark says so.
-
-Performance budgets (500-file corpus, checked by `vexus-eval perf`):
-indexing under 30s, a single-file update under 1s, `search` p99 under 200ms,
-`explore` p99 under 600ms.
-
-## Languages
-
-Python, TypeScript/TSX, and Rust are indexed today. Symbols and import edges
-are extracted per language from tree-sitter queries; adding a language is a
-grammar, a query file, and a registry entry — no parser code.
+Languages: **Python, TypeScript/TSX, Rust**. Adding one is a grammar, a query
+file, and a registry entry — no parser code.
 
 ## Limitations
 
-Worth knowing before you rely on it:
+The things worth knowing before you rely on it:
 
-- **Call edges are heuristic.** They resolve by name and arity, not by type.
-  Same-named methods on different types, duck-typed dispatch, and dynamic
-  calls resolve to a best guess or not at all. Every edge is labelled with
-  its confidence, and unresolved ones say `unresolved` rather than guessing
-  silently.
-- **Unix only for now.** The advisory writer lock uses `flock`; on other
-  platforms every `vexus serve` would consider itself the writer.
-- **The first run needs the network.** The embedding model is fetched from
-  Hugging Face (pinned revision, checksum-verified) into `~/.vexus/models/`,
-  and `ort` fetches an ONNX Runtime build at compile time. Without the model
-  vexus still runs, keyword-and-graph only, and says so in `status`.
-- **The index is a cache.** Any schema or model change rebuilds it from
-  scratch — there is no migration path, by design.
+- **Call edges are heuristic.** They resolve by name and arity, not by type, so
+  same-named methods, duck typing, and dynamic dispatch resolve to a best guess
+  or not at all. Every edge carries a confidence label, and unresolved ones say
+  `unresolved` rather than guessing quietly.
+- **Unix only.** The writer lock uses `flock`; Windows support isn't there yet.
+- **First run needs network.** The model is fetched from Hugging Face (pinned
+  revision, checksum-verified). Without it vexus still runs keyword-and-graph
+  only, and `status` tells you so.
+- **The index is a cache.** Any schema or model change rebuilds it. There is no
+  migration path, on purpose.
+- **Agent adoption is unproven.** The tool descriptions are written to steer
+  agents away from grep, but whether they actually do is measured by a harness
+  (`eval/agent/`) that hasn't been run against a live model yet. Treat the
+  steering as a design intent, not a demonstrated result.
 
 ## Development
 
@@ -127,8 +263,9 @@ cargo run -p vexus-eval -- perf            # performance budgets
 cargo run -p vexus-eval -- token-bench     # regenerate docs/BENCHMARKS.md
 ```
 
-Tests use a deterministic mock embedder (`VEXUS_EMBEDDER=mock`), so nothing
-in CI downloads the model.
+Tests run against a deterministic mock embedder, so nothing in CI downloads the
+model. The design document and the implementation plans that produced this are
+in [`docs/superpowers/`](docs/superpowers/).
 
 ## License
 
