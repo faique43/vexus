@@ -29,8 +29,9 @@ fn default_tool() -> String {
     "search".to_string()
 }
 
-/// `eval/queries/{repo}.yaml` row — see the Global Constraints section of
-/// `docs/superpowers/plans/2026-07-26-plan-5-eval-bench-distribution.md`.
+/// `eval/queries/{repo}.yaml` row. `tool` selects which tool the query is
+/// graded against and defaults to `search`; `expect` lists the qualnames a
+/// correct result must surface.
 #[derive(Debug, Deserialize)]
 struct Query {
     q: String,

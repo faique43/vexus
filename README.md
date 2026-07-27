@@ -311,8 +311,7 @@ cargo run -p vexus-eval -- token-bench     # regenerate docs/BENCHMARKS.md
 ```
 
 Tests run against a deterministic mock embedder, so nothing in CI downloads the
-model. The design document and the implementation plans that produced this are
-in [`docs/superpowers/`](docs/superpowers/).
+model.
 
 ## License
 
