@@ -1,0 +1,77 @@
+name: nightly
+
+# Everything here needs the real embedding model, which PR CI deliberately
+# never downloads (see ci.yml). This is where the numbers that depend on real
+# semantics get measured: retrieval quality against eval/baseline-real.json,
+# and the token-efficiency report.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  real-eval:
+    name: retrieval metrics + token bench (real model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The model is content-addressed by the sha256 pinned in
+      # vexus-embed's manifest, so the cache key can be the manifest itself:
+      # change the pinned revision and the cache correctly misses.
+      - name: Cache the ONNX model
+        uses: actions/cache@v4
+        with:
+          path: ~/.vexus/models
+          key: vexus-model-${{ hashFiles('crates/vexus-embed/src/download.rs') }}
+
+      # First run downloads and verifies the model into ~/.vexus/models;
+      # subsequent runs hit the cache above.
+      - name: Fetch the model if the cache missed
+        run: cargo run --release -p vexus-cli -- index eval/corpora/pyapp
+
+      - name: Retrieval metrics (real)
+        run: cargo run --release -p vexus-eval -- run --real
+
+      # Advisory: a real-model regression should be visible in the run's
+      # artifacts and summary, but a nightly is not a merge gate — the
+      # gating comparison is the mock ratchet in ci.yml.
+      - name: Compare against the real baseline (advisory)
+        continue-on-error: true
+        run: cargo run --release -p vexus-eval -- check --real
+
+      - name: Token-efficiency benchmark (real)
+        run: cargo run --release -p vexus-eval -- token-bench --real
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval
+          path: |
+            eval/last-run.json
+            docs/BENCHMARKS.md
+
+  agent-loop:
+    name: agent-in-the-loop (needs ANTHROPIC_API_KEY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Costs real API tokens, so it only runs where a key is configured.
+    # Without one the job is skipped, which is the expected state for forks
+    # and for this repository until a key is added.
+    if: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the binary the agent will talk to
+        run: cargo build --release -p vexus-cli
+      - name: Run the scripted sessions
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash eval/agent/run.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-loop
+          path: eval/agent/results/
