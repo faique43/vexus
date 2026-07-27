@@ -30,16 +30,43 @@ fn sort_unresolved_last(edges: &mut [EdgeHit]) {
     edges.sort_by_key(|e| (e.depth, e.confidence.is_none()));
 }
 
-/// Render `header`, then as many `render_edge_tree` lines as fit under
+/// Collapse duplicate unresolved rows (same name at the same depth) into a
+/// single row with a count — seven `useCallback [unresolved]` rows carry no
+/// more information than one (field report: a React hook's callees were 18
+/// rows, all duplicated builtins). Resolved rows pass through untouched:
+/// they point at distinct real locations even when names repeat.
+fn collapse_unresolved(edges: &[EdgeHit]) -> Vec<(EdgeHit, usize)> {
+    let mut out: Vec<(EdgeHit, usize)> = Vec::new();
+    for e in edges {
+        if e.confidence.is_none() {
+            if let Some(prev) = out.iter_mut().find(|(p, _)| {
+                p.confidence.is_none()
+                    && p.depth == e.depth
+                    && p.symbol.qualname == e.symbol.qualname
+            }) {
+                prev.1 += 1;
+                continue;
+            }
+        }
+        out.push((e.clone(), 1));
+    }
+    out
+}
+
+/// Render `header`, then as many collapsed rows as fit under
 /// `budget_tokens`, appending a `… (truncated)` marker line if not all of
-/// `edges` made it in.
-fn render_capped(header: String, edges: &[EdgeHit], budget_tokens: u32) -> String {
+/// them made it in. Rows collapsed from several duplicates render with a
+/// trailing `×N`.
+fn render_capped(header: String, rows: &[(EdgeHit, usize)], budget_tokens: u32) -> String {
     let mut out = header;
     out.push('\n');
     let mut used = estimate_tokens(&out);
     let mut truncated = false;
-    for edge in edges {
-        let line = render_edge_tree(std::slice::from_ref(edge));
+    for (edge, count) in rows {
+        let mut line = render_edge_tree(std::slice::from_ref(edge));
+        if *count > 1 {
+            line = format!("{}  ×{count}\n", line.trim_end());
+        }
         let cost = estimate_tokens(&line);
         if used + cost > budget_tokens {
             truncated = true;
@@ -86,7 +113,8 @@ pub fn callers_text(
         info.qualname,
         depth
     );
-    apply_header(fresh_header, render_capped(header, &edges, budget_tokens))
+    let rows = collapse_unresolved(&edges);
+    apply_header(fresh_header, render_capped(header, &rows, budget_tokens))
 }
 
 /// Pure inner implementation of the `callees` tool.
@@ -121,15 +149,28 @@ pub fn callees_text(
         info.qualname,
         depth
     );
-    apply_header(fresh_header, render_capped(header, &edges, budget_tokens))
+    let rows = collapse_unresolved(&edges);
+    apply_header(fresh_header, render_capped(header, &rows, budget_tokens))
 }
 
 /// Pure inner implementation of the `impact` tool: the transitive caller
 /// graph (per `impact_of`) plus module-level import dependents (the
 /// incoming side of `imports_of`) — "blast radius" in the tool's shipped
 /// description covers both halves, not just the call graph.
-pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> String {
+///
+/// Token-budgeted like every other tool (field report: a hot symbol
+/// returned ~100k chars and blew the MCP client's limit — the 500-row cap
+/// alone bounds rows, not bytes). The `affected:` summary is computed over
+/// the FULL result set and always rendered, so truncation costs detail,
+/// never the headline numbers.
+pub fn impact_text(
+    state: &AppState,
+    symbol: &str,
+    max_depth: Option<u32>,
+    budget_tokens: Option<u32>,
+) -> String {
     let max_depth = max_depth.unwrap_or(5).clamp(1, 5);
+    let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
 
     let store = match state.lock_store_fresh() {
         Ok(s) => s,
@@ -156,35 +197,57 @@ pub fn impact_text(state: &AppState, symbol: &str, max_depth: Option<u32>) -> St
     let row_cap_hit = edges.len() >= IMPACT_ROW_CAP as usize;
     let deepest = edges.iter().map(|e| e.depth).max().unwrap_or(0);
 
-    let mut out = String::new();
+    let mut lines: Vec<String> = Vec::new();
     for d in 1..=deepest {
         let group: Vec<EdgeHit> = edges.iter().filter(|e| e.depth == d).cloned().collect();
         if group.is_empty() {
             continue;
         }
-        out.push_str(&format!("depth {d}:\n"));
-        out.push_str(&render_edge_tree(&group));
+        lines.push(format!("depth {d}:\n"));
+        for edge in &group {
+            lines.push(render_edge_tree(std::slice::from_ref(edge)));
+        }
     }
-
     if !importers.is_empty() {
-        out.push_str("import dependents:\n");
-        out.push_str(&render_edge_tree(&importers));
+        lines.push("import dependents:\n".to_string());
+        for edge in &importers {
+            lines.push(render_edge_tree(std::slice::from_ref(edge)));
+        }
     }
 
+    // Summary over the FULL sets, before any budget cut.
     let mut symbol_ids = HashSet::new();
     let mut files = HashSet::new();
     for e in edges.iter().chain(importers.iter()) {
         symbol_ids.insert(e.symbol.id);
         files.insert(e.symbol.path.clone());
     }
-    out.push_str(&format!(
+    let mut tail = format!(
         "affected: {} symbols across {} files\n",
         symbol_ids.len(),
         files.len()
-    ));
+    );
     if row_cap_hit {
-        out.push_str("(row cap reached — results truncated)\n");
+        tail.push_str("(row cap reached — results truncated)\n");
     }
+
+    // Reserve the tail's cost up front so the summary always fits.
+    let mut out = String::new();
+    let mut used = estimate_tokens(&tail);
+    let mut truncated = false;
+    for line in &lines {
+        let cost = estimate_tokens(line);
+        if used + cost > budget_tokens {
+            truncated = true;
+            break;
+        }
+        out.push_str(line);
+        used += cost;
+    }
+    if truncated {
+        out.push_str("… (truncated)\n");
+    }
+    out.push_str(&tail);
     apply_header(fresh_header, out)
 }
 
@@ -369,7 +432,7 @@ mod tests {
         chain_repo(root);
         let state = indexed_state(root);
 
-        let out = impact_text(&state, "chain.leaf", Some(5));
+        let out = impact_text(&state, "chain.leaf", Some(5), None);
         assert!(out.contains("depth 1:"), "got: {out:?}");
         assert!(out.contains("depth 2:"), "got: {out:?}");
         let depth1_pos = out.find("depth 1:").unwrap();
@@ -396,7 +459,7 @@ mod tests {
         write(root, "b.py", "import a\n");
         let state = indexed_state(root);
 
-        let out = impact_text(&state, "a.target", None);
+        let out = impact_text(&state, "a.target", None, None);
         assert!(out.contains("import dependents:"), "got: {out:?}");
         assert!(
             out.contains("b  (b.py:1)"),
@@ -420,7 +483,7 @@ mod tests {
         // Depth 2 is the deepest real chain here regardless of the
         // requested max_depth, but an absurd request must still clamp
         // rather than pass straight through to impact_of.
-        let out = impact_text(&state, "chain.leaf", Some(99));
+        let out = impact_text(&state, "chain.leaf", Some(99), None);
         assert!(out.contains("depth 2:"), "got: {out:?}");
         assert!(!out.contains("depth 3:"), "got: {out:?}");
     }
@@ -436,10 +499,79 @@ mod tests {
         write(root, "huge.py", &content);
         let state = indexed_state(root);
 
-        let out = impact_text(&state, "huge.target", Some(1));
+        let out = impact_text(&state, "huge.target", Some(1), None);
         assert!(
             out.contains("(row cap reached — results truncated)"),
             "got: {out:?}"
+        );
+    }
+
+    /// Field report: `callees` on a React hook returned 18 rows that were
+    /// all `[unresolved]` builtins — `useCallback ×7`, `setState ×6` — as 18
+    /// separate rows, each with a meaningless `(:0)` location. Duplicate
+    /// unresolved names at the same depth must collapse into one row with a
+    /// ×count, and synthetic rows (no real path) must not render a
+    /// location at all.
+    #[test]
+    fn duplicate_unresolved_callees_collapse_with_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "hooks.py",
+            "def helper():\n    pass\n\n\ndef main():\n    helper()\n    ghost()\n    ghost()\n    ghost()\n",
+        );
+        let state = indexed_state(root);
+
+        let out = callees_text(&state, "hooks.main", Some(1), None);
+        assert_eq!(
+            out.matches("ghost").count(),
+            1,
+            "3 identical unresolved calls must render as ONE row: {out:?}"
+        );
+        assert!(out.contains("×3"), "collapsed row must show ×3: {out:?}");
+        assert!(
+            !out.contains("(:0)"),
+            "synthetic unresolved rows must not render a fake location: {out:?}"
+        );
+        // resolved row untouched
+        assert!(out.contains("hooks.helper"), "got: {out:?}");
+        assert!(!out.contains("hooks.helper  ×"), "got: {out:?}");
+    }
+
+    /// Field report: `impact` on a hot symbol returned ~100k chars and blew
+    /// the MCP client's token limit — it was the only tool with no
+    /// `budget_tokens`. A small budget must truncate the row list (with the
+    /// standard marker) while still ending with the accurate `affected:`
+    /// summary computed over the FULL result set.
+    #[test]
+    fn impact_budget_truncates_rows_but_keeps_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut content = String::from("def target():\n    pass\n\n\n");
+        for i in 0..100 {
+            content.push_str(&format!("def caller_number_{i:03}():\n    target()\n\n\n"));
+        }
+        write(root, "wide.py", &content);
+        let state = indexed_state(root);
+
+        let full = impact_text(&state, "wide.target", Some(1), None);
+        assert!(
+            full.contains("affected: 100 symbols across 1 files"),
+            "got: {full:?}"
+        );
+
+        let capped = impact_text(&state, "wide.target", Some(1), Some(200));
+        assert!(capped.contains("… (truncated)"), "got: {capped:?}");
+        assert!(
+            capped.contains("affected: 100 symbols across 1 files"),
+            "summary must survive truncation and stay computed over the full set: {capped:?}"
+        );
+        assert!(
+            capped.len() < full.len() / 2,
+            "capped output should be much smaller: {} vs {}",
+            capped.len(),
+            full.len()
         );
     }
 
@@ -451,14 +583,14 @@ mod tests {
         write(root, "b.py", "def dup():\n    pass\n");
         let state = indexed_state(root);
 
-        let ambiguous = impact_text(&state, "dup", None);
+        let ambiguous = impact_text(&state, "dup", None, None);
         assert!(ambiguous.contains("a.dup"), "got: {ambiguous:?}");
         assert!(
             ambiguous.to_lowercase().contains("qualname"),
             "got: {ambiguous:?}"
         );
 
-        let notfound = impact_text(&state, "totally_unknown_xyz", None);
+        let notfound = impact_text(&state, "totally_unknown_xyz", None, None);
         assert!(notfound.contains("no symbol found"), "got: {notfound:?}");
     }
 }

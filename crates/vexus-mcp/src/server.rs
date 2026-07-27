@@ -99,6 +99,12 @@ struct ImpactParams {
     /// Traversal depth (default 5, max 5).
     #[schemars(description = "Traversal depth (default 5, max 5).")]
     max_depth: Option<u32>,
+    /// Token budget for the rendered impact report (default 4000, capped at 20000).
+    #[schemars(
+        description = "Token budget for the rendered impact report (default 4000, capped at 20000)."
+    )]
+    #[serde(alias = "budget")]
+    budget_tokens: Option<u32>,
 }
 
 /// Steering layer 1: the `instructions` text served on `initialize`.
@@ -233,7 +239,12 @@ impl VexusServer {
     async fn impact(&self, Parameters(params): Parameters<ImpactParams>) -> String {
         let state = self.state.clone();
         match tokio::task::spawn_blocking(move || {
-            graph::impact_text(&state, &params.symbol, params.max_depth)
+            graph::impact_text(
+                &state,
+                &params.symbol,
+                params.max_depth,
+                params.budget_tokens,
+            )
         })
         .await
         {

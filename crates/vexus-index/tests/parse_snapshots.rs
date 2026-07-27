@@ -112,3 +112,25 @@ fn typescript_chunks() {
 fn rust_chunks() {
     insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("rust/sample.rs")));
 }
+
+/// Field report: `export const readDataStream = async function* <T>(...)`
+/// produced no symbol at all — `callers`/`callees`/`impact` answered "no
+/// symbol found" for it while arrow consts worked. Every const-assigned
+/// function form (and generator declarations) must land in the symbol
+/// table.
+#[test]
+fn typescript_const_assigned_function_forms_are_symbols() {
+    let idx = parse_fixture("typescript/sample.ts");
+    let quals: Vec<&str> = idx.symbols.iter().map(|s| s.qualname.as_str()).collect();
+    for expected in [
+        "typescript.sample.readDataStream", // async generator function expression
+        "typescript.sample.compact",        // plain function expression
+        "typescript.sample.idGen",          // generator function declaration
+        "typescript.sample.fetchUserArrow", // arrow (already worked; regression guard)
+    ] {
+        assert!(
+            quals.contains(&expected),
+            "missing symbol {expected}; got {quals:?}"
+        );
+    }
+}

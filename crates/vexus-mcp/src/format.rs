@@ -116,10 +116,20 @@ pub fn render_edge_tree(edges: &[EdgeHit]) -> String {
         let indent = " ".repeat(2 * (edge.depth.saturating_sub(1) as usize));
         let confidence = edge.confidence.as_deref().unwrap_or("unresolved");
 
-        output.push_str(&format!(
-            "{}{}  ({}:{})  [{}]\n",
-            indent, edge.symbol.qualname, edge.symbol.path, edge.symbol.start_line, confidence
-        ));
+        // Synthetic endpoints (never resolved to a real symbol row) have no
+        // path — rendering their zero location as `(:0)` reads like a bug,
+        // so they get name + confidence only.
+        if edge.symbol.path.is_empty() {
+            output.push_str(&format!(
+                "{}{}  [{}]\n",
+                indent, edge.symbol.qualname, confidence
+            ));
+        } else {
+            output.push_str(&format!(
+                "{}{}  ({}:{})  [{}]\n",
+                indent, edge.symbol.qualname, edge.symbol.path, edge.symbol.start_line, confidence
+            ));
+        }
     }
 
     output
