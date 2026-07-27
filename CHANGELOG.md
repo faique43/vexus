@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.3 — tolerate the param names agents actually send
+
+The first real Claude Code session called `explore` with `{"query": ...}` —
+the reflex trained by `search`'s own param name — got a raw
+`missing field 'question'` error, and fell back to grep for the rest of the
+session. One guessable mistake should not kill the tool.
+
+- Every MCP tool now accepts the predictable wrong param spellings as
+  deserialize-only aliases: `explore` takes `query`/`q` for `question`,
+  `search` takes `question`/`q` for `query`, `open` takes `symbol`/`path`
+  for `target`, `callers`/`callees`/`impact` take `target`/`name` for
+  `symbol`, and every `budget_tokens` accepts `budget`. The published JSON
+  schema is unchanged — one canonical field per param.
+- The Claude Code steering pack's SKILL.md now states the param names per
+  tool. Re-run `vexus init --agent claude-code --force` in already-set-up
+  repos to pick that up.
+
 ## v0.1.2 — make the first run legible
 
 The first real-world install surfaced every first-run rough edge at once: the
