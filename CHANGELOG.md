@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.1.2 — make the first run legible
+
+The first real-world install surfaced every first-run rough edge at once: the
+embedding phase after `vexus index`'s structural summary printed nothing for
+minutes and read as a hang, `vexus serve` run by hand blocked silently, and
+nothing actually registered the MCP server. All fixed:
+
+- `vexus init --agent claude-code` now registers the MCP server in
+  `.mcp.json`: creates the file, or merges into an existing one without
+  touching other servers or reordering keys. An identical entry is skipped, a
+  customized `vexus` entry is kept unless `--force`, and malformed JSON is
+  left alone (the snippet is printed instead).
+- `vexus index` reports embedding progress on large backlogs — an upfront
+  count plus `embedded X/N chunks` lines — and says it is safe to interrupt
+  (it resumes from where it stopped). The watcher's small incremental updates
+  stay silent.
+- `vexus serve` prints a startup banner on stderr explaining it is a stdio
+  MCP server normally launched by an agent via `.mcp.json`, not by hand.
+- The model download line now includes a size hint (~160 MB, one-time).
+- `-v` is accepted alongside `-V`/`--version`.
+- `install.sh`'s next steps no longer suggest running `vexus serve` manually
+  and warn that the first index downloads the model and can take minutes.
+
+Also picks up dependency bumps: notify 6→8, tokenizers 0.23, actions/cache 6.
+
 ## v0.1.1 — document the real Linux floor, unpin a deprecated runner
 
 The Linux binaries require **glibc 2.39**, so they do not start on Ubuntu
