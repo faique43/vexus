@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.4 — index every const function form, budget and de-noise the graph tools
+
+Dogfooding on a large TypeScript repo surfaced three defects, all fixed:
+
+- **Symbols**: `const f = function ...` and `const g = async function* ...`
+  now index like arrow consts do (they are distinct tree-sitter node types
+  the query didn't match), and `function*` declarations are captured too.
+  Previously these symbols didn't exist, so `callers`/`callees`/`impact`
+  answered "no symbol found" for them.
+- **`impact`** takes `budget_tokens` (default 4000, `budget` alias) like
+  every other tool. Its 500-row cap bounds rows, not bytes — one hot symbol
+  returned ~100k chars and blew the MCP client's token limit. The
+  `affected: N symbols across M files` summary is always rendered and is
+  computed over the full result set, so truncation costs detail, never the
+  headline numbers.
+- **`callers`/`callees`** collapse duplicate unresolved names at the same
+  depth into one row with a ×count (a React hook's callees were 18 rows of
+  duplicated builtins), and synthetic unresolved rows no longer render a
+  meaningless `(:0)` location.
+
 ## v0.1.3 — tolerate the param names agents actually send
 
 The first real Claude Code session called `explore` with `{"query": ...}` —
