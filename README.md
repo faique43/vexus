@@ -146,8 +146,8 @@ VEXUS_VERSION=0.1.0 VEXUS_INSTALL_DIR=/usr/local/bin \
   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
-Prebuilt binaries: macOS (arm64, x64) and Linux (x64, arm64). Windows isn't
-supported yet — see [Limitations](#limitations).
+Prebuilt binaries: macOS (Apple Silicon) and Linux (x64, arm64). Intel macOS
+and Windows aren't supported — see [Limitations](#limitations).
 
 </details>
 
@@ -290,7 +290,11 @@ The things worth knowing before you rely on it:
   same-named methods, duck typing, and dynamic dispatch resolve to a best guess
   or not at all. Every edge carries a confidence label, and unresolved ones say
   `unresolved` rather than guessing quietly.
-- **Unix only.** The writer lock uses `flock`; Windows support isn't there yet.
+- **Apple Silicon macOS and Linux only.** Windows is out because the writer
+  lock uses `flock`. Intel macOS is out for a harder reason: the ONNX Runtime
+  build vexus embeds has no `x86_64-apple-darwin` target, so building from
+  source fails there too — supporting it means vendoring a runtime or
+  switching backends.
 - **First run needs network.** The model is fetched from Hugging Face (pinned
   revision, checksum-verified). Without it vexus still runs keyword-and-graph
   only, and `status` tells you so.

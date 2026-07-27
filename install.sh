@@ -42,9 +42,13 @@ os="$(uname -s)"
 arch="$(uname -m)"
 case "$os-$arch" in
   Darwin-arm64) target="aarch64-apple-darwin" ;;
-  Darwin-x86_64) target="x86_64-apple-darwin" ;;
   Linux-x86_64) target="x86_64-unknown-linux-gnu" ;;
   Linux-aarch64 | Linux-arm64) target="aarch64-unknown-linux-gnu" ;;
+  Darwin-x86_64)
+    # Not a packaging gap: the ONNX Runtime backend vexus embeds has no
+    # build for Intel macOS, so building from source fails the same way.
+    die "Intel macOS is not supported — vexus's embedding runtime has no build for x86_64-apple-darwin"
+    ;;
   *)
     die "no prebuilt binary for $os-$arch — build from source: cargo install --git https://github.com/$repo vexus-cli"
     ;;
