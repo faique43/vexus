@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.1 — Linux binaries that actually run
+
+The v0.1.0 Linux artifacts were built on Ubuntu 24.04 and so required
+`GLIBC_2.39`. A glibc-linked binary runs on its build machine's glibc and
+newer, never older, which left them failing at exec on Ubuntu 22.04, Debian 12,
+RHEL 9 and Amazon Linux 2023 with `version 'GLIBC_2.39' not found`.
+
+- Linux targets now build on Ubuntu 22.04, dropping the floor to **glibc 2.35**.
+- The release workflow fails if the required glibc rises above 2.35, so a
+  future runner bump cannot reintroduce this quietly.
+- The Apple Silicon build moved off the deprecated `macos-14` image. A retired
+  runner does not fail, it stays queued until the run times out.
+
+No code changes. macOS users are unaffected; if you are on Linux and v0.1.0
+would not start, this is the fix.
+
 ## v0.1.0 — first release
 
 Local code intelligence for coding agents: a semantic + structural index of a

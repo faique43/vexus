@@ -2407,7 +2407,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vexus-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "vexus-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "vexus-embed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2455,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "vexus-eval"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "vexus-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "insta",
  "streaming-iterator",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "vexus-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rmcp",
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "vexus-watch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
