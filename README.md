@@ -40,17 +40,28 @@ is doing full-text search because that is the only tool it has.
 ## The fix
 
 ```text
-explore "how does an invoice get created"
+explore "how does an invoice get created"   (budget_tokens: 500)
 ```
 
 One call. Vexus finds the entry points semantically, walks one hop through the
 call graph to pull in what they depend on, and returns verbatim source grouped
-by file. Real output, trimmed for length:
+by file. Below is the complete, unedited response — reproduce it by indexing
+[`eval/corpora/pyapp`](eval/corpora/pyapp) and asking that question with
+`budget_tokens: 500`:
 
 ````text
 explore: "how does an invoice get created"
 
 ## handlers/invoices.py
+handlers/invoices.py:3-8
+```
+from services.invoice_service import (
+    create_invoice,
+    get_invoice,
+    list_invoices,
+    refund_invoice,
+)
+```
 handlers/invoices.py:14-18
 ```
     def create(self, req):
@@ -60,10 +71,27 @@ handlers/invoices.py:14-18
         )
 ```
 ## services/invoice_service.py
+services/invoice_service.py:3-8
+```
+from models.invoice import Invoice
+from services.billing_service import charge_card
+from services.notification_service import EmailNotifier, notify_invoice_created
+from utils.ids import generate_id
+from utils.pagination import paginate
+from utils.validation import validate_amount
+```
 services/invoice_service.py:13-25
 ```
 def create_invoice(customer_id, amount_cents, currency="usd"):
-    ...
+    """Create and persist a new invoice, then notify the customer it exists."""
+    validate_amount(amount_cents)
+    invoice = Invoice(
+        id=generate_id("inv"),
+        customer_id=customer_id,
+        amount_cents=amount_cents,
+        currency=currency,
+        status="open",
+    )
     _INVOICES[invoice.id] = invoice
     notify_invoice_created(invoice, _default_notifier())
     return invoice
@@ -73,17 +101,25 @@ services/notification_service.py:20-28
 ```
 def notify_invoice_created(invoice, notifier):
     """Notify the customer that `invoice` was created, via whichever `notifier` was configured.
-    ...
+
+    Note: `notifier` is duck-typed — callers pass an `EmailNotifier`, an
+    `SmsNotifier`, or any future channel exposing `send(self, message)` —
+    so which one actually runs is decided entirely by the caller, not by
+    this function.
     """
     return notifier.send(f"Invoice {invoice.id} for {invoice.amount_cents} created")
 ```
-Related (not included, raise budget_tokens or use `open`): services.invoice_service.get_invoice:28-30,
-models.invoice.Invoice:6-14, services.invoice_service.refund_invoice:39-47, ...
+Related (not included, raise budget_tokens or use `open`): services.invoice_service.get_invoice:28-30, handlers.invoices.InvoiceHandler.get:20-22, models.invoice.Invoice:6-14, models.invoice:1-1, services.invoice_service.refund_invoice:39-47, handlers.invoices:1-1, handlers.webhooks:3-4, services.notification_service.EmailNotifier.send:7-9, handlers.webhooks:1-1, jobs.invoice_reminders:1-1, jobs.invoice_reminders:3-4, services.invoice_service:1-1, services.invoice_service:10-10, services.subscription_service:1-1, services.subscription_service:3-5
 ````
 
 Note the third file. Nothing in the question mentions notifications — vexus
 pulled it in because `create_invoice` calls it. That hop is the difference
 between "here are some matches" and "here is the flow."
+
+The budget is what keeps that tight. `budget_tokens` defaults to 8000, and at
+that setting this same query returns considerably more of the repo — the
+ranking is the same, the cutoff is just further down. Agents should pass a
+budget that matches how much context the answer is worth.
 
 ## Install
 

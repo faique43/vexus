@@ -3,11 +3,17 @@
 //! This module provides a WriterLock that ensures at most one process
 //! (or "vexus serve" instance) writes the index at a time.
 
-use std::fs::File;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
+// Everything below is only referenced from the `#[cfg(unix)]` arm of
+// `try_acquire`, so importing it unconditionally makes a Windows build fail
+// `clippy -D warnings` on `unused_imports`.
+#[cfg(unix)]
+use anyhow::Context;
+#[cfg(unix)]
+use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
@@ -100,6 +106,10 @@ mod tests {
         assert!(lock1.is_some(), "first try_acquire should succeed");
     }
 
+    // Mutual exclusion is the one property the non-unix stub cannot provide:
+    // it hands out a `WriterLock` unconditionally. Asserting it there would
+    // fail for a documented reason rather than a real defect.
+    #[cfg(unix)]
     #[test]
     fn try_acquire_fails_when_lock_held_in_same_process() {
         let dir = tempfile::tempdir().unwrap();
