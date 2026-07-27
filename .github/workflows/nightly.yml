@@ -23,7 +23,7 @@ jobs:
       # vexus-embed's manifest, so the cache key can be the manifest itself:
       # change the pinned revision and the cache correctly misses.
       - name: Cache the ONNX model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.vexus/models
           key: vexus-model-${{ hashFiles('crates/vexus-embed/src/download.rs') }}
