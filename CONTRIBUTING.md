@@ -88,7 +88,12 @@ parser code:
 
 ## Platform reality
 
-- **Supported:** Linux (x64, arm64), macOS on Apple Silicon.
+- **Supported:** Linux (x64, arm64, glibc 2.35+), macOS on Apple Silicon.
+  Release Linux builds run on the *oldest* supported runner image on purpose.
+  A glibc-linked binary runs on its build machine's glibc and newer, never
+  older, so building on a current image silently drops every user on an older
+  distro. A step in the release workflow fails the build if the required
+  glibc creeps above 2.35.
 - **Windows:** unsupported. The advisory writer lock is `flock`, and the
   non-unix stub hands every `serve` a writer lock, so concurrent instances
   would race. Real support means a Windows locking implementation, not a

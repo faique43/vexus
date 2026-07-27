@@ -21,6 +21,6 @@ repository, served over MCP.
 - **Measurement.** Retrieval metrics gated in CI against hand-labelled
   corpora, performance budgets, and a token-cost benchmark versus grep.
 
-Apple Silicon macOS and Linux (x64, arm64) in this release. Windows needs a
-non-`flock` writer lock; Intel macOS needs an ONNX Runtime build that the
-embedding backend does not ship. See the README's limitations.
+Apple Silicon macOS and Linux (x64, arm64, glibc 2.35+) in this release.
+Windows needs a non-`flock` writer lock; Intel macOS needs an ONNX Runtime
+build that the embedding backend does not ship. See the README's limitations.
