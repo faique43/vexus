@@ -71,15 +71,27 @@ for i in "${!tasks[@]}"; do
 
   # --output-format json gives a machine-readable transcript including the
   # tool calls, which is the whole measurement.
-  (cd "$workdir/repo" && claude -p "$task" --output-format json > "$out") || {
+  # --allowedTools is not optional: `claude -p` won't auto-approve a project
+  # .mcp.json server, and Grep/Read are permitted more readily than MCP tools.
+  # Without it the harness would report "the agent didn't use vexus" for a
+  # permissions reason and read as a steering failure — a biased measurement
+  # is worse than none.
+  (cd "$workdir/repo" && claude -p "$task" \
+      --output-format json \
+      --mcp-config .mcp.json \
+      --allowedTools "mcp__vexus__explore,mcp__vexus__search,mcp__vexus__open,mcp__vexus__callers,mcp__vexus__callees,mcp__vexus__impact,mcp__vexus__status,Grep,Glob,Read" \
+      > "$out") || {
     echo "  session failed; see $out" >&2
     continue
   }
 
   # Count tool invocations by name. Counting from the transcript rather than
   # asking the model what it did keeps the measurement honest.
-  vexus_calls=$(grep -o '"name":"mcp__vexus__[a-z]*"' "$out" | wc -l | tr -d ' ')
-  grep_calls=$(grep -oE '"name":"(Grep|Glob|Read)"' "$out" | wc -l | tr -d ' ')
+  # `|| true` on each: under `set -o pipefail` a grep with no matches exits 1
+  # and would abort the harness — and "no vexus calls" is exactly the result
+  # worth recording, not crashing on.
+  vexus_calls=$( { grep -o '"name":"mcp__vexus__[a-z]*"' "$out" || true; } | wc -l | tr -d ' ')
+  grep_calls=$( { grep -oE '"name":"(Grep|Glob|Read)"' "$out" || true; } | wc -l | tr -d ' ')
   vexus_total=$((vexus_total + vexus_calls))
   grep_total=$((grep_total + grep_calls))
 

@@ -36,14 +36,14 @@ jobs:
       # any of the 7 retrieval metrics dropped more than 0.02 absolute in
       # any corpus or overall. Never runs --real (no model downloads in PR
       # CI) — see eval/README.md for the pre-release --real --check workflow.
-      - run: cargo run -p vexus-eval -- check
+      - run: cargo run --release -p vexus-eval -- check
 
   perf:
     name: perf (advisory)
     runs-on: ubuntu-latest
     # Advisory only: GH runner variance (and, currently, real algorithmic
     # variance in the incremental-update path — see bench/budgets.json's
-    # comment and the Task 3/4 report) mean this must never block a merge.
+    # comment in bench/budgets.json's sibling docs) mean this must never block a merge.
     # continue-on-error makes the job show a non-blocking neutral/red
     # indicator instead of failing the required checks.
     continue-on-error: true
@@ -58,6 +58,6 @@ jobs:
           {
             echo '## vexus-eval perf (advisory — never blocks merge)'
             echo '```'
-            cargo run -p vexus-eval -- perf
+            cargo run --release -p vexus-eval -- perf
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"

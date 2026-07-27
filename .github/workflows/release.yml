@@ -35,15 +35,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release -p vexus-cli
+        # --locked so a release is built from the committed dependency
+        # versions, not whatever resolves that day.
+        run: cargo build --release --locked -p vexus-cli
 
       - name: Package
         id: package
         shell: bash
+        env:
+          # Via env rather than direct `${{ }}` interpolation into the script
+          # body, which would let a dispatch input inject shell.
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          [ "${{ github.event_name }}" = "workflow_dispatch" ] && version="${{ github.event.inputs.tag }}" && version="${version#v}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="${DISPATCH_TAG#v}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          # A tag that disagrees with Cargo.toml would ship an archive named
+          # for one version containing a binary that reports another.
+          grep -q "^version = \"$version\"" Cargo.toml || {
+            echo "tag v$version does not match the workspace version in Cargo.toml" >&2
+            exit 1
+          }
           name="vexus-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           strip target/release/vexus || true

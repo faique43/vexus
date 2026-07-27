@@ -19,14 +19,13 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::Result;
 use vexus_core::Store;
 use vexus_embed::Embedder;
 
 use crate::freshness::{set_freshness, Freshness};
-use crate::pipeline::walk_repo_relative_files;
+use crate::pipeline::list_in_scope_files;
 use crate::update::{update_file, UpdateOutcome};
 
 /// How many files between each `meta('reconcile_progress')` write — cheap
@@ -53,55 +52,6 @@ pub struct ReconcileReport {
     /// Files inspected whose content hash matched what was already
     /// stored — nothing to do.
     pub unchanged: usize,
-}
-
-/// Repo-relative paths (forward-slash-normalized) `git` considers in scope
-/// for `root` — tracked (`--cached`) AND untracked-but-not-ignored
-/// (`--others --exclude-standard`) — via `git ls-files -z` (NUL-separated,
-/// so a filename containing a newline can't corrupt the split the way plain
-/// `ls-files` output could). Without `--others --exclude-standard`, a file
-/// created (and never `git add`ed) while nothing was watching would be
-/// invisible to reconcile even though it's exactly the kind of offline
-/// change reconcile exists to catch up on; `--exclude-standard` still keeps
-/// `.gitignore`'d files out, matching `index_repo`'s own `ignore`-crate walk.
-/// `None` on any subprocess failure — `git` missing from `PATH`, `root` not
-/// actually a valid repository despite having a `.git` entry, a non-zero
-/// exit, anything — so the caller can fall back to the `ignore` walk
-/// uniformly rather than needing to distinguish failure modes.
-fn git_ls_files(root: &Path) -> Option<Vec<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("ls-files")
-        .arg("-z")
-        .arg("--cached")
-        .arg("--others")
-        .arg("--exclude-standard")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        output
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).replace('\\', "/"))
-            .collect(),
-    )
-}
-
-/// The file list reconcile treats as "in scope" for `root`: `git ls-files`
-/// when `root/.git` exists and the subprocess succeeds, else the same
-/// `ignore`-crate walk `index_repo` uses.
-fn list_in_scope_files(root: &Path) -> Vec<String> {
-    if root.join(".git").exists() {
-        if let Some(files) = git_ls_files(root) {
-            return files;
-        }
-    }
-    walk_repo_relative_files(root)
 }
 
 /// Bring `store` in line with `root`'s current disk state. Every file
@@ -227,6 +177,7 @@ fn reconcile_inner(
 mod tests {
     use super::*;
     use crate::freshness::effective_freshness;
+    use std::process::Command;
 
     fn write(root: &Path, rel: &str, content: &str) {
         let p = root.join(rel);

@@ -145,10 +145,10 @@ fn normalize_event_paths(root: &Path, event: &notify::Event) -> Vec<PathBuf> {
 /// check-ignore --stdin -z`, spawned once for the whole batch (rather than
 /// once per path) — cheap enough per drain, and the only way to get the
 /// *authoritative* answer `pipeline::index_repo`'s full walk relies on
-/// (nested `.gitignore`s, `.git/info/exclude`, the global excludesfile),
-/// none of which `GitignoreState::fallback` covers (it's built with
-/// `require_git(false)`, which — see `build_fallback_matcher` — also turns
-/// off `.git/info/exclude`/global-excludes honoring). Paths are written to
+/// (most importantly the index: git does not consider a *tracked* file
+/// ignored even when it matches a pattern, and `git ls-files --cached`,
+/// which `pipeline::list_in_scope_files` uses, agrees — the `ignore` crate
+/// has no notion of the index and would disagree). Paths are written to
 /// stdin NUL-separated (`-z` on both ends) so a filename containing a
 /// newline can't corrupt the split.
 ///
@@ -426,11 +426,16 @@ fn run_writer_inner(
     // previous `vexus serve` against the same DB) — it describes "the last
     // time THIS run's watcher applied a successful drain," which this run
     // hasn't done yet, so a stale timestamp from before would otherwise look
-    // like a live event just happened. `last_index_failed` resets to `0` the
-    // same way: whatever a prior run last recorded there no longer describes
-    // anything this run has actually observed.
+    // like a live event just happened.
+    //
+    // `last_index_failed` is deliberately NOT reset here. It is a count of
+    // files the last indexing pass could not parse, and `serve`'s own
+    // startup index writes it moments before this thread starts — clearing
+    // it here made `status` report `skipped: 0` the instant `vexus serve`
+    // came up, discarding the number `vexus index` had just established.
+    // Per-file failures during this run increment it from wherever it
+    // stands; a fresh full `vexus index` is what resets it.
     let _ = store.delete_meta("last_event_at");
-    let _ = store.set_meta("last_index_failed", "0");
 
     // macOS's FSEvents backend (what `notify::recommended_watcher` picks on
     // this platform) reports paths through the OS's realpath, which
@@ -1091,7 +1096,7 @@ mod tests {
     /// from whatever a *previous* run of this process (or a previous `vexus
     /// serve` against the same DB) last wrote.
     #[test]
-    fn run_writer_start_clears_last_event_at_and_resets_last_index_failed() {
+    fn run_writer_start_clears_last_event_at_but_preserves_last_index_failed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         write(&root, "a.py", "def helper():\n    return 1\n");
@@ -1102,6 +1107,8 @@ mod tests {
             crate::pipeline::index_repo(&root, &mut store).unwrap();
             // Simulate stale state left over from a previous run.
             store.set_meta("last_event_at", "1234567890").unwrap();
+            // Stands in for a count `vexus index` (or serve's own startup
+            // index) just established — the writer thread must not discard it.
             store.set_meta("last_index_failed", "7").unwrap();
         }
 
@@ -1122,8 +1129,10 @@ mod tests {
         );
         assert_eq!(
             reader.meta("last_index_failed").unwrap().as_deref(),
-            Some("0"),
-            "a fresh writer-thread start must reset last_index_failed to 0"
+            Some("7"),
+            "the writer thread must preserve the skipped-file count the last \
+             indexing pass recorded — clearing it made `status` report \
+             `skipped: 0` the instant `vexus serve` started"
         );
 
         drop(shutdown_tx);

@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{bail, Result};
 use vexus_core::Store;
@@ -118,14 +119,54 @@ pub(crate) fn walk_repo_relative_files(root: &Path) -> Vec<String> {
             .replace('\\', "/");
         out.push(rel);
     }
+    // readdir order differs between filesystems, and it determines rowid
+    // assignment, which `search_hybrid` uses as its RRF tie-break — so an
+    // unsorted walk makes the committed eval baseline platform-dependent.
+    out.sort();
     out
+}
+
+pub(crate) fn git_ls_files(root: &Path) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--cached")
+        .arg("--others")
+        .arg("--exclude-standard")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).replace('\\', "/"))
+            .collect(),
+    )
+}
+
+/// The file list reconcile treats as "in scope" for `root`: `git ls-files`
+/// when `root/.git` exists and the subprocess succeeds, else the same
+/// `ignore`-crate walk `index_repo` uses.
+pub(crate) fn list_in_scope_files(root: &Path) -> Vec<String> {
+    if root.join(".git").exists() {
+        if let Some(files) = git_ls_files(root) {
+            return files;
+        }
+    }
+    walk_repo_relative_files(root)
 }
 
 pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
     let mut report = IndexReport::default();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for rel in walk_repo_relative_files(root) {
+    for rel in list_in_scope_files(root) {
         match classify_file(root, &rel) {
             FileClass::Missing => {
                 // Disappeared between the walk and the stat/read (race); the

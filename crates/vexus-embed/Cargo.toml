@@ -9,7 +9,21 @@ anyhow.workspace = true
 blake3.workspace = true
 ureq.workspace = true
 sha2.workspace = true
-ort = { version = "2.0.0-rc.12", default-features = true }
+# ort's default feature set, with tls-native swapped for tls-rustls: the
+# native-tls default drags openssl-sys into the build-dependency graph (via
+# ort-sys's ureq downloader), which makes `cargo install` fail on any Linux
+# host without libssl-dev/pkg-config. Verify with `grep -c openssl
+# Cargo.lock` — NOT `cargo tree --target`, which only filters normal deps and
+# resolves build-deps for the host.
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-rustls",
+    "copy-dylibs",
+    "api-24",
+] }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 ndarray = "0.17"
 vexus-core = { path = "../vexus-core" }

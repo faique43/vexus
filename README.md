@@ -121,7 +121,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```sh
-cargo test --workspace                     # ~220 tests
+cargo test --workspace                     # ~280 tests
 cargo run -p vexus-eval -- check           # retrieval-metric gate
 cargo run -p vexus-eval -- perf            # performance budgets
 cargo run -p vexus-eval -- token-bench     # regenerate docs/BENCHMARKS.md

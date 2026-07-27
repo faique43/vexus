@@ -4,8 +4,8 @@ from services.rate_limiter import RateLimiter
 from services.user_service import _USERS
 from utils.ids import generate_id
 
-# Internally this is always "rate limiting"; see `services.rate_limiter` for
-# the retrieval-challenge note about the "throttle" synonym.
+# Support tickets call this throttling; internally it has always been rate
+# limiting.
 _login_limiter = RateLimiter(max_requests=5, window_seconds=60)
 _ACTIVE_TOKENS = {}
 

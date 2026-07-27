@@ -11,7 +11,8 @@
 set -eu
 
 repo="faique43/vexus"
-install_dir="${VEXUS_INSTALL_DIR:-$HOME/.local/bin}"
+# `set -u` would abort on an unset HOME before die() could explain why.
+install_dir="${VEXUS_INSTALL_DIR:-${HOME:-}/.local/bin}"
 
 die() {
   echo "install.sh: $1" >&2
@@ -21,6 +22,8 @@ die() {
 need() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
 }
+
+[ "$install_dir" != "/.local/bin" ] || die "neither VEXUS_INSTALL_DIR nor HOME is set"
 
 need curl
 need tar

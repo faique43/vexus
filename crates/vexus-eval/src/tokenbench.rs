@@ -277,11 +277,14 @@ pub fn render_markdown(results: &[TaskResult], scaling: &[ScalingPoint], real: b
 
     out.push_str("## The short version\n\n");
     out.push_str(
-        "vexus trades a *bounded* cost for an *unbounded* one. A tool call returns at \
-         most its token budget no matter how large the repository is; grepping and \
-         reading costs more the more code there is to search. So the honest answer to \
-         \"how many tokens does vexus save?\" is: none at all on a small repository, and \
-         increasingly many as the repository grows.\n\n\
+        "vexus trades a *bounded* cost for an *unbounded* one. A tool call returns a \
+         top-ranked handful of results — capped by its token budget, and in practice \
+         well under it — however large the repository is; grepping and reading costs \
+         more the more code there is to search. So the honest answer to \"how many \
+         tokens does vexus save?\" is: none at all on a small repository, and \
+         increasingly many as the repository grows — with the caveat, spelled out under \
+         Method, that the two sides answer at different breadth (grep returns every \
+         match; vexus returns the top ones).\n\n\
          The scaling table below is the load-bearing measurement. The per-task table \
          after it is run against the small hand-authored corpora used for retrieval \
          scoring, and — precisely because they are small — grep often wins there. Both \

@@ -53,6 +53,25 @@ jobs:
             eval/last-run.json
             docs/BENCHMARKS.md
 
+  # `secrets` is not an available context in a job-level `if:`, so whether a
+  # key exists has to be turned into an ordinary job output first.
+  has-key:
+    name: check for an API key
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "no ANTHROPIC_API_KEY configured — skipping the agent loop" >&2
+          fi
+
   agent-loop:
     name: agent-in-the-loop (needs ANTHROPIC_API_KEY)
     runs-on: ubuntu-latest
@@ -60,7 +79,8 @@ jobs:
     # Costs real API tokens, so it only runs where a key is configured.
     # Without one the job is skipped, which is the expected state for forks
     # and for this repository until a key is added.
-    if: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY != '' }}
+    needs: has-key
+    if: needs.has-key.outputs.configured == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
