@@ -239,14 +239,25 @@ fails the build.
 
 ### Speed
 
-500-file repo, release build, enforced by `vexus-eval perf`:
+500 Python files, release build, **real embedding model**, M-series laptop —
+what you would actually feel using it:
 
 | | |
 | --- | ---: |
-| Full index | 3.0 s |
-| Incremental update (one file saved) | 6 ms |
-| `search` p99 | 6 ms |
-| `explore` p99 | 15 ms |
+| First index (cold, includes embedding all 2,000 chunks) | 9.6 s |
+| Save → searchable again (includes the 500 ms debounce) | ~565 ms |
+| `search` p99 | 8 ms |
+| `explore` p99 | 9 ms |
+
+Queries stay in single-digit milliseconds because embedding one short question
+is cheap; the model cost is paid at index time, in a background thread, off
+your agent's clock.
+
+`vexus-eval perf` reports the same shape against a **mock** embedder — that is
+what CI tracks, so the harness never downloads a model — and its numbers are
+correspondingly lower (1.2 s index, 5 ms incremental). Timing is advisory in
+CI, not a merge gate: runner variance makes it a poor blocker. Budgets live in
+[`bench/budgets.json`](bench/budgets.json).
 
 ## How it works
 
