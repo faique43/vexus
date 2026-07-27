@@ -80,7 +80,11 @@ jobs:
     # Without one the job is skipped, which is the expected state for forks
     # and for this repository until a key is added.
     needs: has-key
-    if: needs.has-key.outputs.configured == 'true'
+    # Dispatch-only on purpose: this spends real API tokens, so it runs when
+    # someone asks for it, never unattended on the cron schedule. (`github` IS
+    # available in a job-level `if:` — only `secrets` isn't, which is what the
+    # has-key job above exists to work around.)
+    if: github.event_name == 'workflow_dispatch' && needs.has-key.outputs.configured == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

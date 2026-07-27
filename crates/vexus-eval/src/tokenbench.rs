@@ -382,6 +382,19 @@ pub fn render_markdown(results: &[TaskResult], scaling: &[ScalingPoint], real: b
          formulaic, so it measures how each approach's cost *responds to size*, not how \
          well retrieval works on realistic code — that is what the hand-authored corpora \
          and the retrieval metrics are for.\n\n\
+         Two properties of that table bound what it proves, and both favour the \
+         conclusion, so they are worth stating plainly:\n\n\
+         1. **Every file in the synthetic corpus contains the search term.** Each one \
+         defines a `helper_*` function and calls its predecessor, so a `helper` grep \
+         matches in all of them — a 100% hit rate. That is grep's *worst* case, not a \
+         typical one; a term concentrated in a handful of files would scale far more \
+         gently, and the ratio would shrink accordingly.\n\n\
+         2. **The two sides return answers of different breadth.** grep returns every \
+         match — an exhaustive answer. `explore` returns its top-ranked handful, using \
+         well under a tenth of its 8000-token budget and *shrinking* slightly as the \
+         corpus grows. So the flat line is top-k retrieval returning a fixed-size \
+         answer, not a budget cap being enforced, and a ratio measured against an \
+         exhaustive baseline flatters the top-k side by construction.\n\n\
          ## What this does not measure\n\n\
          This compares the cost of the context each approach pulls in. It is not a live \
          agent study: it does not measure whether a model then answers correctly, and it \
