@@ -106,7 +106,7 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: ${{ steps.package.outputs.archive }}
@@ -130,7 +130,7 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |

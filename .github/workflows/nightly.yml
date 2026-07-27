@@ -46,7 +46,7 @@ jobs:
       - name: Token-efficiency benchmark (real)
         run: cargo run --release -p vexus-eval -- token-bench --real
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nightly-eval
           path: |
@@ -95,7 +95,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: bash eval/agent/run.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agent-loop
           path: eval/agent/results/
