@@ -266,6 +266,51 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
 /// `last event: none` forever, no matter how long a caller waited. Fixed by
 /// hoisting the sender out to `serve_async`'s top level and dropping it
 /// explicitly only after `.waiting()` returns.
+/// Field-report regression: the first real Claude Code session called
+/// `explore` with `{"query": ...}` — the reflex `search`'s own param name
+/// trains — got a raw "missing field `question`" deserialization error, and
+/// fell back to grep for the rest of the session. The predictable wrong
+/// spellings must deserialize as serde aliases; the published schema still
+/// names only the canonical field.
+#[tokio::test(flavor = "multi_thread")]
+async fn common_wrong_param_names_are_accepted_as_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_chain_repo(root);
+    index_repo(root);
+
+    let client = connect(root).await;
+
+    // explore with `query` (canonical: `question`) + `budget` (canonical:
+    // `budget_tokens`) — the exact shape from the field report.
+    let mut args = serde_json::Map::new();
+    args.insert("query".into(), json!("how does alpha_process work"));
+    args.insert("budget".into(), json!(2000));
+    let explore = call_tool(&client, "explore", Some(args)).await;
+    assert!(
+        explore.contains("alpha_process"),
+        "explore via `query` alias should answer normally: {explore:?}"
+    );
+
+    // search with `question` (canonical: `query`) — the symmetric mixup.
+    let mut args = serde_json::Map::new();
+    args.insert("question".into(), json!("unique_marker_beta"));
+    let search = call_tool(&client, "search", Some(args)).await;
+    assert!(
+        search.contains("unique_marker_beta"),
+        "search via `question` alias should answer normally: {search:?}"
+    );
+
+    // explore with `q` — the terse spelling.
+    let mut args = serde_json::Map::new();
+    args.insert("q".into(), json!("alpha_process"));
+    let explore = call_tool(&client, "explore", Some(args)).await;
+    assert!(
+        explore.contains("alpha_process"),
+        "explore via `q` alias should answer normally: {explore:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn watcher_e2e_search_miss_write_file_status_heals_then_search_hit() {
     let dir = tempfile::tempdir().unwrap();

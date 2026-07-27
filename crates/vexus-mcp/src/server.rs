@@ -22,10 +22,17 @@ use serde::Deserialize;
 use crate::state::AppState;
 use crate::tools::{explore, graph, open, search};
 
+// Serde `alias` attributes below accept the wrong-but-predictable param
+// names agents actually send (field report: a first session called `explore`
+// with `query`, got "missing field `question`", and fell back to grep for
+// good). Aliases are deserialize-only — the published JSON schema still
+// names exactly one canonical field per param.
+
 /// Params for the `search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchParams {
     /// Free-text query — words, a symbol name, or a short question.
+    #[serde(alias = "question", alias = "q")]
     query: String,
     /// Max results to return (default 10, max 100).
     #[schemars(description = "Max results to return (default 10, max 100).")]
@@ -34,6 +41,7 @@ struct SearchParams {
     #[schemars(
         description = "Token budget for the rendered result list (default 4000, capped at 20000)."
     )]
+    #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
 
@@ -41,11 +49,13 @@ struct SearchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct OpenParams {
     /// A symbol qualname/name (e.g. `app.util.slug`) or a `path:start-end` line range (e.g. `src/app.py:10-40`).
+    #[serde(alias = "symbol", alias = "path")]
     target: String,
     /// Token budget for the rendered source (default 6000, capped at 20000).
     #[schemars(
         description = "Token budget for the rendered source (default 6000, capped at 20000)."
     )]
+    #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
 
@@ -53,6 +63,7 @@ struct OpenParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CallGraphParams {
     /// A symbol qualname/name (e.g. `app.util.slug`).
+    #[serde(alias = "target", alias = "name")]
     symbol: String,
     /// Traversal depth (default 1, max 3).
     #[schemars(description = "Traversal depth (default 1, max 3).")]
@@ -61,6 +72,7 @@ struct CallGraphParams {
     #[schemars(
         description = "Token budget for the rendered edge tree (default 4000, capped at 20000)."
     )]
+    #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
 
@@ -68,11 +80,13 @@ struct CallGraphParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ExploreParams {
     /// A natural-language question or a bag of symbol names.
+    #[serde(alias = "query", alias = "q")]
     question: String,
     /// Token budget for the rendered bundle (default 8000, capped at 20000).
     #[schemars(
         description = "Token budget for the rendered bundle (default 8000, capped at 20000)."
     )]
+    #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
 
@@ -80,6 +94,7 @@ struct ExploreParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ImpactParams {
     /// A symbol qualname/name (e.g. `app.util.slug`).
+    #[serde(alias = "target", alias = "name")]
     symbol: String,
     /// Traversal depth (default 5, max 5).
     #[schemars(description = "Traversal depth (default 5, max 5).")]

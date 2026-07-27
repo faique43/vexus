@@ -16,5 +16,9 @@ This repo's code is indexed (semantic vectors + call graph). Pick by question sh
 | What breaks if I change this | `impact` |
 | Results look wrong or stale | `status` (index freshness + coverage) |
 
+Param names: `explore(question: "…")`, `search(query: "…")`,
+`open(target: "qualname or path:start-end")`, `callers`/`callees`/`impact(symbol: "…")`.
+All accept an optional `budget_tokens`.
+
 Raise `budget_tokens` when a bundle gets truncated. Use grep only for exact
 string/regex hunts, comments, config values, or generated files.
