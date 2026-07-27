@@ -1,0 +1,85 @@
+name: Retrieval quality
+description: vexus returned the wrong code, missed the right code, or ranked badly
+labels: ["retrieval"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most useful kind of report vexus can get. Retrieval quality
+        is measured against hand-authored fixtures, which means it is only as
+        good as the cases we know about. A concrete miss on a real repository
+        is worth more than a benchmark.
+
+        You do not need to share your code. The question you asked and the
+        symbol you expected are usually enough.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What you asked
+      description: The exact question or query, and which tool ran it.
+      placeholder: |
+        explore "how does session expiry work"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected back
+      description: >
+        The function, file or symbol that should have been returned. A qualname
+        or a `path:line` is ideal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What you got
+      description: >
+        Paste the response, or just the file headers if it was long. Redact
+        freely.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Which failure is it
+      options:
+        - The right code was never returned at all
+        - The right code was returned but ranked too low
+        - It returned the right code plus a lot of noise
+        - A call edge is wrong or missing
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: budget
+    attributes:
+      label: budget_tokens used
+      description: Default is 8000 if you did not set one.
+    validations:
+      required: false
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: Anything unusual about the code
+      description: >
+        Dynamic dispatch, duck typing, re-exports, generated code, heavy macro
+        use, a monorepo. Call edges resolve by name and arity, so these are the
+        known weak spots.
+    validations:
+      required: false
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `vexus status .`
+      render: text
+    validations:
+      required: true

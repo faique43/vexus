@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a new tool, language, or capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Adding a language is the most contributor-friendly change in the repo
+        and needs no parser code. See
+        [CONTRIBUTING.md](https://github.com/faique43/vexus/blob/main/CONTRIBUTING.md#adding-a-language)
+        before filing, in case you would rather just send the PR.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can't you do today
+      description: >
+        Describe the situation, not the solution. What were you trying to get
+        your agent to do when this came up?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: If you have a shape in mind, sketch it. Rough is fine.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New language support
+        - New or changed MCP tool
+        - Indexing / chunking
+        - Retrieval and ranking
+        - Call graph and edge resolution
+        - Watcher and freshness
+        - Platform support (Windows, Intel macOS)
+        - Packaging and distribution
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd be willing to work on this
+          required: false

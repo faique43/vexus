@@ -1,0 +1,12 @@
+# Default owner for everything. Add per-directory owners below as the project
+# picks up regular contributors in specific areas.
+* @faique43
+
+# Areas where a wrong change is expensive and quiet:
+#   - schema.sql and store.rs define the on-disk index format
+#   - eval/ holds the committed baselines the retrieval gate ratchets against
+#   - .github/workflows/ gates and releases everything
+/crates/vexus-core/src/schema.sql  @faique43
+/crates/vexus-core/src/store.rs    @faique43
+/eval/                             @faique43
+/.github/                          @faique43

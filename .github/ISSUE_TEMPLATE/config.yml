@@ -1,0 +1,10 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/faique43/vexus/security/advisories/new
+    about: Report privately, not in a public issue. See SECURITY.md for scope.
+  - name: Known limitations
+    url: https://github.com/faique43/vexus#limitations
+    about: >-
+      Windows and Intel macOS are unsupported, call edges are heuristic, and
+      small repos cost more than grep. Check here before filing.

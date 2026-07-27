@@ -305,17 +305,27 @@ The things worth knowing before you rely on it:
   (`eval/agent/`) that hasn't been run against a live model yet. Treat the
   steering as a design intent, not a demonstrated result.
 
-## Development
+## Contributing
+
+Bug reports that say "this returned garbage for my repo" are as useful here as
+patches, and there's an [issue template](.github/ISSUE_TEMPLATE/retrieval_quality.yml)
+built for exactly that. Adding a language needs no parser code: a grammar, a
+`.scm` query file, and a registry entry.
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```sh
-cargo test --workspace                     # ~280 tests
+export VEXUS_EMBEDDER=mock                 # no model download needed to develop
+
+cargo test --workspace                     # ~281 tests
 cargo run -p vexus-eval -- check           # retrieval-metric gate
-cargo run -p vexus-eval -- perf            # performance budgets
+cargo run -p vexus-eval -- perf            # timings (mock embedder — see below)
 cargo run -p vexus-eval -- token-bench     # regenerate docs/BENCHMARKS.md
 ```
 
 Tests run against a deterministic mock embedder, so nothing in CI downloads the
-model.
+model. The same is true of `perf`, which is why its numbers catch algorithmic
+regressions but must never be quoted as user-facing performance.
 
 ## License
 

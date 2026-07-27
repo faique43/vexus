@@ -1,0 +1,79 @@
+name: Bug report
+description: Something crashed, returned the wrong thing, or behaved unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If vexus found the wrong code (or missed the right code), use
+        "Retrieval quality" instead. This template is for things that are
+        broken rather than imprecise.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The commands or tool calls, in order.
+      placeholder: |
+        1. vexus index .
+        2. asked the agent "..."
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `vexus status .`
+      description: >
+        Run this in the affected repository. It reports index counts, model,
+        freshness and role, which answers most of the follow-up questions.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `vexus --version`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - Linux x64
+        - Linux arm64
+        - Other (unsupported)
+    validations:
+      required: true
+
+  - type: input
+    id: languages
+    attributes:
+      label: Languages in the repo
+      placeholder: Python, TypeScript, Rust
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant stderr output
+      description: >
+        `vexus serve` logs to stderr. Include anything that looks related.
+      render: text
+    validations:
+      required: false

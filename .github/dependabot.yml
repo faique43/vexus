@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for the routine patch churn; anything major still lands on its
+      # own so it gets read properly.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      # Pinned deliberately. ort is the ONNX Runtime binding: a bump changes
+      # which prebuilt runtimes exist per target, and that is what makes or
+      # breaks the release matrix. rmcp is a pre-1.0 beta whose API moves.
+      # Both should be updated by hand, with a release build to prove it.
+      - dependency-name: "ort"
+      - dependency-name: "rmcp"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
