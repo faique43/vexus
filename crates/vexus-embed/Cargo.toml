@@ -10,7 +10,7 @@ blake3.workspace = true
 ureq.workspace = true
 sha2.workspace = true
 ort = { version = "2.0.0-rc.12", default-features = true }
-tokenizers = "0.20"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 ndarray = "0.17"
 vexus-core = { path = "../vexus-core" }
 

@@ -4,10 +4,30 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use vexus_watch::pipeline;
 
+/// `--version` output. The schema version and model id are here because
+/// they're what actually determines whether an existing `.vexus/index.db` is
+/// usable by this binary — a mismatch in either rebuilds the index, so when
+/// someone reports "it re-indexed everything", these are the two numbers
+/// worth comparing between their old and new build.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nindex schema: 2",
+    "\nembedding model: jina-code-v2-q",
+);
+
+// `concat!` only accepts literal tokens, so the schema version above is
+// written out rather than interpolated — which would let it drift silently
+// the next time the schema changes. This fails the build instead.
+const _: () = assert!(
+    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'2' && vexus_core::SCHEMA_VERSION.len() == 1,
+    "LONG_VERSION's hardcoded schema version no longer matches vexus_core::SCHEMA_VERSION"
+);
+
 #[derive(Parser)]
 #[command(
     name = "vexus",
     version,
+    long_version = LONG_VERSION,
     about = "Local code intelligence for coding agents"
 )]
 struct Cli {
