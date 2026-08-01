@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Cold `vexus serve` no longer loads the embedding model twice.** The
+  writer path builds its embedder once and seeds the shared state with it;
+  previously the startup index build and the writer thread each constructed
+  their own ORT session from the ~160 MB model file.
+- **The model download reports progress** — a stderr line every ~10% with
+  MB downloaded/total — instead of going silent for minutes after the
+  initial "downloading …" announcement.
+- **A first-ever embed pass narrates regardless of size.** The progress
+  gate only announced backlogs above 256 chunks, so a small repo's first
+  index — the run that also pays the one-time model download — was the
+  most silent one. First passes (nothing embedded yet) now always print;
+  the watcher's steady-state updates stay silent.
+
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 
 Dogfooding on a large TypeScript repo surfaced three defects, all fixed:
