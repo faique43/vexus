@@ -3,7 +3,7 @@
     "PreToolUse": [
       {
         "matcher": "Grep|Glob",
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/nudge-grep.sh\"" }]
+        "hooks": [{ "type": "command", "command": "vexus hook nudge-grep" }]
       }
     ]
   }

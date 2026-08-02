@@ -38,16 +38,55 @@ else
   die "need sha256sum or shasum to verify the download"
 fi
 
+# Hosts the full build can't run on get the *structural* build instead:
+# the ONNX embedding runtime is compiled out (it has no binaries for these
+# hosts — not a packaging gap), so semantic search is off but keyword +
+# call-graph search work fully. `status` reports which build is running.
+structural_note() {
+  echo "install.sh: note: $1" >&2
+  echo "install.sh: note: installing the structural-only build — keyword+graph search only, no semantic search" >&2
+}
+
 os="$(uname -s)"
 arch="$(uname -m)"
+variant=""
 case "$os-$arch" in
   Darwin-arm64) target="aarch64-apple-darwin" ;;
-  Linux-x86_64) target="x86_64-unknown-linux-gnu" ;;
-  Linux-aarch64 | Linux-arm64) target="aarch64-unknown-linux-gnu" ;;
   Darwin-x86_64)
-    # Not a packaging gap: the ONNX Runtime backend vexus embeds has no
-    # build for Intel macOS, so building from source fails the same way.
-    die "Intel macOS is not supported — vexus's embedding runtime has no build for x86_64-apple-darwin"
+    target="x86_64-apple-darwin"
+    variant="-structural"
+    structural_note "vexus's embedding runtime has no build for Intel macOS"
+    ;;
+  Linux-x86_64 | Linux-aarch64 | Linux-arm64)
+    case "$arch" in
+      x86_64) target="x86_64-unknown-linux-gnu" ;;
+      *) target="aarch64-unknown-linux-gnu" ;;
+    esac
+    # musl (Alpine): uname says Linux/x86_64, but the glibc binary won't
+    # even exec. Detect via the dynamic loader.
+    if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ] ||
+      ldd --version 2>&1 | grep -qi musl; then
+      if [ "$arch" = "x86_64" ]; then
+        target="x86_64-unknown-linux-musl"
+        variant="-structural"
+        structural_note "this is a musl system (Alpine?); the full build needs glibc"
+      else
+        die "no prebuilt binary for musl on $arch — build from source: cargo install --git https://github.com/$repo vexus-cli --no-default-features"
+      fi
+    else
+      # The full build's embedded ONNX Runtime needs glibc 2.39+. On older
+      # distros (Ubuntu 22.04, Debian 12, RHEL 9) it fails at exec with
+      # "version GLIBC_2.39 not found" — catch that here instead.
+      glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+      if [ -n "$glibc" ] && [ "$(printf '%s\n' "2.39" "$glibc" | sort -V | head -n 1)" != "2.39" ]; then
+        if [ "$arch" = "x86_64" ]; then
+          variant="-structural"
+          structural_note "glibc $glibc is older than the 2.39 the full build's embedding runtime needs"
+        else
+          die "glibc $glibc is older than the 2.39 floor and no structural build exists for $arch — see the README's limitations"
+        fi
+      fi
+    fi
     ;;
   *)
     die "no prebuilt binary for $os-$arch — build from source: cargo install --git https://github.com/$repo vexus-cli"
@@ -62,7 +101,7 @@ if [ -z "$version" ]; then
 fi
 version="${version#v}"
 
-name="vexus-${version}-${target}"
+name="vexus-${version}-${target}${variant}"
 base="https://github.com/$repo/releases/download/v${version}"
 
 tmp="$(mktemp -d)"
