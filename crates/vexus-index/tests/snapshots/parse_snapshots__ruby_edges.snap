@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"ruby/sample.rb\"))"
+---
+- imports ruby.sample -> json arity=None
+- imports ruby.sample -> helper arity=None
+- calls ruby.sample.Shop.Cart.build -> new arity=Some(1)

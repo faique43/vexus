@@ -233,6 +233,66 @@ fn swift_chunks() {
     insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("swift/sample.swift")));
 }
 
+#[test]
+fn ruby_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("ruby/sample.rb")));
+}
+
+#[test]
+fn ruby_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("ruby/sample.rb")));
+}
+
+#[test]
+fn ruby_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("ruby/sample.rb")));
+}
+
+#[test]
+fn php_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("php/sample.php")));
+}
+
+#[test]
+fn php_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("php/sample.php")));
+}
+
+#[test]
+fn php_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("php/sample.php")));
+}
+
+#[test]
+fn scala_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("scala/sample.scala")));
+}
+
+#[test]
+fn scala_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("scala/sample.scala")));
+}
+
+#[test]
+fn scala_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("scala/sample.scala")));
+}
+
+#[test]
+fn elixir_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("elixir/sample.ex")));
+}
+
+#[test]
+fn elixir_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("elixir/sample.ex")));
+}
+
+#[test]
+fn elixir_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("elixir/sample.ex")));
+}
+
 /// Field report: `export const readDataStream = async function* <T>(...)`
 /// produced no symbol at all — `callers`/`callees`/`impact` answered "no
 /// symbol found" for it while arrow consts worked. Every const-assigned

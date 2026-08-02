@@ -105,6 +105,36 @@ static LANGS: &[Lang] = &[
         symbols_scm: include_str!("../queries/swift.scm"),
         edges_scm: include_str!("../queries/swift_edges.scm"),
     },
+    Lang {
+        name: "ruby",
+        extensions: &["rb"],
+        grammar: || tree_sitter_ruby::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/ruby.scm"),
+        edges_scm: include_str!("../queries/ruby_edges.scm"),
+    },
+    // LANGUAGE_PHP (not _ONLY): real-world .php files open with <?php and
+    // can interleave HTML.
+    Lang {
+        name: "php",
+        extensions: &["php"],
+        grammar: || tree_sitter_php::LANGUAGE_PHP.into(),
+        symbols_scm: include_str!("../queries/php.scm"),
+        edges_scm: include_str!("../queries/php_edges.scm"),
+    },
+    Lang {
+        name: "scala",
+        extensions: &["scala", "sc"],
+        grammar: || tree_sitter_scala::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/scala.scm"),
+        edges_scm: include_str!("../queries/scala_edges.scm"),
+    },
+    Lang {
+        name: "elixir",
+        extensions: &["ex", "exs"],
+        grammar: || tree_sitter_elixir::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/elixir.scm"),
+        edges_scm: include_str!("../queries/elixir_edges.scm"),
+    },
 ];
 
 pub fn for_path(path: &Path) -> Option<&'static Lang> {

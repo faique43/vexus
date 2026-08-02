@@ -1,0 +1,16 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"php/sample.php\"))"
+---
+- "sym=Some(0) [1-1] tokens~1 :: <?php⏎"
+- "sym=Some(0) [4-4] tokens~5 :: use Shop\\Util\\Slug;⏎"
+- "sym=Some(2) [6-6] tokens~5 :: const TAX_RATE = 8;⏎"
+- "sym=Some(3) [8-11] tokens~30 :: // Formats a cent amount for display.⏎function format_cents(int $cents): string "
+- "sym=Some(4) [13-28] tokens~36 :: class Invoice {⏎    public function __construct(array $lines) {⏎    public funct"
+- "sym=Some(5) [16-18] tokens~21 ::     public function __construct(array $lines) {⏎        $this->lines = $lines;⏎ "
+- "sym=Some(6) [20-23] tokens~28 ::     // Total with tax.⏎    public function total(int $tax): int {⏎        return"
+- "sym=Some(7) [25-27] tokens~21 ::     private function subtotal(): int {⏎        return array_sum($this->lines);⏎ "
+- "sym=Some(8) [30-32] tokens~15 :: interface Renderable {⏎    public function render(): string;⏎"
+- "sym=Some(9) [31-31] tokens~9 ::     public function render(): string;⏎"
+- "sym=Some(10) [34-34] tokens~4 :: trait Loggable {}⏎"
+- "sym=Some(11) [36-39] tokens~3 :: enum Status {⏎"

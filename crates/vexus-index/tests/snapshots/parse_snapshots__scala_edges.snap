@@ -1,0 +1,6 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"scala/sample.scala\"))"
+---
+- imports scala.sample -> shop arity=None
+- calls scala.sample.Cart.total -> subtotal arity=Some(0)

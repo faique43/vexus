@@ -268,3 +268,24 @@
 - caller: ios.PriceBadge.saleBadgeText
   callee: ios.PriceBadge.PriceBadge.displayText
   expected: resolved
+
+# --- wave-3 languages (Ruby, PHP, Scala, Elixir). Read back from a real
+# index run. The Elixir def-head artifact (a def's own head parses as a
+# call, so every function carries a self-edge) is a known v1 limitation —
+# it doesn't affect these labeled pairs. ---------------------------------
+
+- caller: store.gift_cards.Store.GiftCard.apply_to
+  callee: store.gift_cards.Store.GiftCard.deduct
+  expected: resolved
+
+- caller: legacy.coupons.coupon_discount_cents
+  callee: legacy.coupons.coupon_is_active
+  expected: resolved
+
+- caller: analytics.Funnel.Funnel.conversion
+  callee: analytics.Funnel.Funnel.stepRate
+  expected: resolved
+
+- caller: notifier.dispatcher.Shop.Notifier.Dispatcher.dispatch
+  callee: notifier.dispatcher.Shop.Notifier.Dispatcher.deliver
+  expected: resolved

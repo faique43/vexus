@@ -292,8 +292,8 @@ vexus serve    MCP over stdio + debounced file watcher + startup reconcile
   leaves it. Zero agent tokens spent on indexing.
 
 Languages: **Python, TypeScript/TSX, JavaScript/JSX, Rust, Go, Java, C, C++,
-C#, Kotlin, Swift**. Adding one is a grammar, a query file, and a registry
-entry — no parser code.
+C#, Kotlin, Swift, Ruby, PHP, Scala, Elixir**. Adding one is a grammar, a
+query file, and a registry entry — no parser code.
 
 ## Limitations
 

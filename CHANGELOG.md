@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Wave 3 languages: Ruby, PHP, Scala, Elixir.** Ruby captures modules,
+  classes, methods (optional parameters — `def subtotal` gets arity None)
+  and `def self.x` singletons; bare no-paren calls parse as identifiers,
+  so only calls with arguments or receivers become edges. PHP exercises
+  the `\` namespace machinery end to end (namespaces index as modules,
+  qualified calls resolve by suffix); traits map to Trait. Scala objects
+  index as classes; both concrete and abstract `def`s are captured.
+  Elixir's def/defp/defmodule are plain call nodes discriminated by
+  `#eq?`/`#any-of?` predicates — which the tree-sitter Rust binding
+  applies natively, so no parser-code change was needed after all. Known
+  Elixir limitation: a def's own head parses as a call, so every function
+  carries a self-edge (indistinguishable from single-line recursion).
 - **Wave 2 languages: C++ (`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`), C#, Kotlin,
   Swift.** C++ namespaces index as modules and out-of-class
   `Type::method` definitions keep their qualified name (the resolver's

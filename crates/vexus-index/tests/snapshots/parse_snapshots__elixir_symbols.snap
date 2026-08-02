@@ -1,0 +1,9 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"elixir/sample.ex\"))"
+---
+- "module elixir.sample [1-18] arity=None parent=None sig=None"
+- "module elixir.sample.Shop.Cart [1-18] arity=None parent=Some(0) sig=Some(\"defmodule Shop.Cart do\")"
+- "function elixir.sample.Shop.Cart.total [7-9] arity=Some(2) parent=Some(1) sig=Some(\"def total(items, tax) do\")"
+- "function elixir.sample.Shop.Cart.subtotal [11-13] arity=Some(1) parent=Some(1) sig=Some(\"defp subtotal(items) do\")"
+- "function elixir.sample.Shop.Cart.empty [15-17] arity=None parent=Some(1) sig=Some(\"def empty do\")"

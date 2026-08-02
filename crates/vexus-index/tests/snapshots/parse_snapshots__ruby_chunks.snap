@@ -1,0 +1,10 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"ruby/sample.rb\"))"
+---
+- "sym=Some(0) [1-2] tokens~10 :: require \"json\"⏎require_relative \"helper\"⏎"
+- "sym=Some(2) [5-23] tokens~30 ::   # One shopping cart.⏎class Cart⏎    def initialize(items)⏎    def total(tax)⏎ "
+- "sym=Some(3) [7-9] tokens~13 ::     def initialize(items)⏎      @items = items⏎    end⏎"
+- "sym=Some(4) [11-14] tokens~17 ::     # Total in cents.⏎    def total(tax)⏎      subtotal + tax⏎    end⏎"
+- "sym=Some(5) [16-18] tokens~10 ::     def subtotal⏎      @items.sum⏎    end⏎"
+- "sym=Some(6) [20-22] tokens~12 ::     def self.build(items)⏎      new(items)⏎    end⏎"
