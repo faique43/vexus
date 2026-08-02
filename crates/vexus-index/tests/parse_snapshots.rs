@@ -173,6 +173,66 @@ fn c_chunks() {
     insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("c/sample.c")));
 }
 
+#[test]
+fn cpp_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("cpp/sample.cpp")));
+}
+
+#[test]
+fn cpp_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("cpp/sample.cpp")));
+}
+
+#[test]
+fn cpp_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("cpp/sample.cpp")));
+}
+
+#[test]
+fn c_sharp_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("c_sharp/Sample.cs")));
+}
+
+#[test]
+fn c_sharp_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("c_sharp/Sample.cs")));
+}
+
+#[test]
+fn c_sharp_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("c_sharp/Sample.cs")));
+}
+
+#[test]
+fn kotlin_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("kotlin/sample.kt")));
+}
+
+#[test]
+fn kotlin_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("kotlin/sample.kt")));
+}
+
+#[test]
+fn kotlin_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("kotlin/sample.kt")));
+}
+
+#[test]
+fn swift_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("swift/sample.swift")));
+}
+
+#[test]
+fn swift_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("swift/sample.swift")));
+}
+
+#[test]
+fn swift_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("swift/sample.swift")));
+}
+
 /// Field report: `export const readDataStream = async function* <T>(...)`
 /// produced no symbol at all — `callers`/`callees`/`impact` answered "no
 /// symbol found" for it while arrow consts worked. Every const-assigned

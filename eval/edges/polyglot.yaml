@@ -248,3 +248,23 @@
 - caller: native.checksum.order_checksum
   callee: native.checksum.fletcher_step
   expected: resolved
+
+# --- wave-2 languages (C++, C#, Kotlin, Swift). Read back from a real
+# index run; the Swift pair resolves name-only (Swift symbols carry no
+# arity) but lands on the right symbol. ----------------------------------
+
+- caller: pos.receipt.pos.render_receipt
+  callee: pos.receipt.pos.money_cell
+  expected: resolved
+
+- caller: backoffice.RefundPolicy.RefundPolicy.AutoApproves
+  callee: backoffice.RefundPolicy.RefundPolicy.WithinWindow
+  expected: resolved
+
+- caller: mobile.CheckoutFlow.CheckoutFlow.advance
+  callee: mobile.CheckoutFlow.CheckoutFlow.currentStep
+  expected: resolved
+
+- caller: ios.PriceBadge.saleBadgeText
+  callee: ios.PriceBadge.PriceBadge.displayText
+  expected: resolved

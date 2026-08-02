@@ -264,3 +264,52 @@
   graded:
     native.checksum.order_checksum: 3
     native.checksum.fletcher_step: 2
+
+# --- wave-2 languages (C++, C#, Kotlin, Swift). Qualnames read back from a
+# real `vexus index` run (VEXUS_EMBEDDER=none). --------------------------
+
+- q: "where is the printed receipt rendered for the POS terminal"
+  expect:
+    - pos.receipt.pos.render_receipt
+  graded:
+    pos.receipt.pos.render_receipt: 3
+    pos.receipt.pos.money_cell: 2
+
+- q: "where do we decide if a refund is auto approved"
+  expect:
+    - backoffice.RefundPolicy.RefundPolicy.AutoApproves
+  graded:
+    backoffice.RefundPolicy.RefundPolicy.AutoApproves: 3
+    backoffice.RefundPolicy.RefundPolicy.WithinWindow: 2
+
+- q: "where does the mobile checkout advance to the next step"
+  expect:
+    - mobile.CheckoutFlow.CheckoutFlow.advance
+  graded:
+    mobile.CheckoutFlow.CheckoutFlow.advance: 3
+    mobile.CheckoutFlow.CheckoutFlow.currentStep: 1
+
+- q: "where is the iOS price badge text formatted"
+  expect:
+    - ios.PriceBadge.PriceBadge.displayText
+  graded:
+    ios.PriceBadge.PriceBadge.displayText: 3
+    ios.PriceBadge.saleBadgeText: 2
+
+- q: "how does the refund auto approval policy work"
+  tool: explore
+  expect:
+    - backoffice.RefundPolicy.RefundPolicy.AutoApproves
+    - backoffice.RefundPolicy.RefundPolicy.WithinWindow
+  graded:
+    backoffice.RefundPolicy.RefundPolicy.AutoApproves: 3
+    backoffice.RefundPolicy.RefundPolicy.WithinWindow: 2
+
+- q: "how is the point of sale receipt built"
+  tool: explore
+  expect:
+    - pos.receipt.pos.render_receipt
+    - pos.receipt.pos.money_cell
+  graded:
+    pos.receipt.pos.render_receipt: 3
+    pos.receipt.pos.money_cell: 2
