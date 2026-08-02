@@ -1,127 +1,108 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 — Windows, 18 languages, and small repos that pay their way
 
-- **Wave 4 languages: Dart, Lua, Bash — vexus now indexes 18 languages.**
-  Dart rides its grammar's quirks (top-level functions parse as
-  lambda_expression; class_member_definition wraps signature+body);
-  extensions and mixins are captured. Lua's `M.f`/`M:m` definitions keep
-  the trailing identifier as the name so dotted call sites resolve by
-  suffix; colon methods get receiver-free arity. Bash captures functions
-  and treats each command invocation as a potential callee (builtins
-  excluded) — script-local calls resolve, the rest collapse as
-  unresolved. Binary size for all 15 new grammars: +27 MB unstripped
-  (~40 → ~66 MB); release binaries are stripped, and feature-gating
-  grammars is an option if this ever matters.
-- **Wave 3 languages: Ruby, PHP, Scala, Elixir.** Ruby captures modules,
-  classes, methods (optional parameters — `def subtotal` gets arity None)
-  and `def self.x` singletons; bare no-paren calls parse as identifiers,
-  so only calls with arguments or receivers become edges. PHP exercises
-  the `\` namespace machinery end to end (namespaces index as modules,
-  qualified calls resolve by suffix); traits map to Trait. Scala objects
-  index as classes; both concrete and abstract `def`s are captured.
-  Elixir's def/defp/defmodule are plain call nodes discriminated by
-  `#eq?`/`#any-of?` predicates — which the tree-sitter Rust binding
-  applies natively, so no parser-code change was needed after all. Known
-  Elixir limitation: a def's own head parses as a call, so every function
-  carries a self-edge (indistinguishable from single-line recursion).
-- **Wave 2 languages: C++ (`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`), C#, Kotlin,
-  Swift.** C++ namespaces index as modules and out-of-class
-  `Type::method` definitions keep their qualified name (the resolver's
-  `::` suffix matching finds them); C# covers both namespace forms,
-  records, and constructors (properties deliberately skipped —
-  small-graph noise); Kotlin objects/interfaces/enum classes index as
-  classes with `const val` captured; Swift extensions nest their members
-  under the extended type's name, and Swift symbols carry no arity (the
-  grammar has no parameter-list node) so their edges resolve name-only.
-- **Four new languages: JavaScript/JSX (`.js`/`.jsx`/`.mjs`/`.cjs`), Go,
-  Java, and C (`.c`/`.h`)** — each is a grammar dependency, two `.scm`
-  query files, and a registry entry, no parser code. Go receiver methods
-  index as methods with receiver-free arity; Java constructors/records and
-  C prototypes/typedefs are captured; plain JS gets its own grammar rather
-  than riding the TypeScript one (legacy JS and Flow files diverge).
-  Wave-1 files joined the polyglot eval corpus with graded queries and
-  labeled edges (all four languages' call chains resolve at name-arity
-  confidence).
-- **The Claude Code pack's grep nudge no longer needs bash.** hooks.json
-  now runs `vexus hook nudge-grep` (a hidden subcommand reading the hook
-  payload's `session_id` from stdin), so the pack behaves identically on
-  Windows/cmd/PowerShell. `nudge-grep.sh` is deprecated and now just execs
-  the subcommand; it ships for one more release for hooks.json files
-  installed by older versions — re-run
-  `vexus init --agent claude-code --force` to migrate.
-Small repos stop paying big-repo prices. Three retrieval changes, all
-no-ops at Medium scale (≥2,000 chunks — the historical constants):
+The three things that kept vexus off real machines: it did not run on
+Windows, it understood three languages, and on a repo of a few dozen
+files it cost more tokens than grep. All three are fixed.
 
-- **KNN distance floor.** vec0's `k = 50` returns the 50 nearest chunks
-  regardless of distance, so on a corpus smaller than 50 chunks every
-  query ranked the whole repo. Candidates above the embedder's L2 floor
+### Platforms
+
+- **Windows is supported** (x64 and arm64). The advisory writer lock moved
+  from raw `libc::flock` to `std::fs::File::try_lock` — flock(2) on Unix,
+  LockFileEx on Windows — replacing a non-unix stub that handed *every*
+  process a writer lock, so concurrent `serve` instances raced. Mutual
+  exclusion now holds everywhere and its test runs unconditionally. `libc`
+  is gone as a dependency. Releases ship `.zip` archives with `vexus.exe`;
+  `irm https://raw.githubusercontent.com/faique43/vexus/main/install.ps1 | iex`
+  installs to `%LOCALAPPDATA%\vexus\bin` with mandatory SHA256
+  verification. CI runs the full suite on `windows-latest`, and a
+  `.gitattributes` forces LF checkouts so snapshots and blake3 file hashes
+  match across platforms.
+- **Intel macOS, glibc < 2.39, and musl/Alpine are no longer stranded.** A
+  default `onnx` cargo feature compiles the embedding runtime out under
+  `--no-default-features`, which is what frees those targets from ort's
+  prebuilt-binary matrix. Releases ship `-structural` artifacts for
+  `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` (glibc 2.35) and
+  `x86_64-unknown-linux-musl` (fully static): keyword and call-graph search
+  work fully, semantic search is off, and both the startup line and
+  `status` say so. `install.sh` detects musl and pre-2.39 glibc — it used
+  to install a binary that failed at exec — and Intel macOS is no longer a
+  hard error. A CI job keeps the no-ONNX build compiling.
+- **Every release artifact is smoke-tested before packaging**: the built
+  binary runs `--version`, indexes a three-file fixture, and must report
+  its symbols. Nothing previously executed a release binary, so one that
+  linked but crashed at ONNX load would have shipped.
+- The watcher canonicalizes its root through `dunce`, so Windows
+  `ReadDirectoryChangesW` events (plain `C:\...`) match the watched root
+  instead of failing `strip_prefix` against a `\\?\`-prefixed path.
+
+### Languages: 3 → 18
+
+**JavaScript/JSX, Go, Java, C, C++, C#, Kotlin, Swift, Ruby, PHP, Scala,
+Elixir, Dart, Lua and Bash** join Python, TypeScript/TSX and Rust. Each is
+a grammar dependency, two `.scm` query files and a registry entry — still
+no parser code. Notable per-language behavior:
+
+- Go receiver methods index as methods with receiver-free arity; Java
+  captures constructors and records; C captures prototypes and typedefs
+  (`#define` is a known gap). Plain JS gets its own grammar rather than
+  riding TypeScript's, which diverges on legacy and Flow-annotated files.
+- C++ namespaces index as modules and out-of-class `Type::method`
+  definitions keep their qualified name. C# covers both namespace forms;
+  properties are deliberately not symbols. Kotlin objects and enum classes
+  index as classes. Swift extensions nest members under the extended
+  type's name, and Swift symbols carry no arity (its grammar has no
+  parameter-list node), so those edges resolve by name only.
+- Ruby captures modules, `def self.x` singletons, and methods with
+  optional parameters. PHP exercises the new `\` namespace separator end
+  to end. Scala objects index as classes. Elixir's `def`/`defp`/`defmodule`
+  are ordinary call nodes discriminated by query predicates; a def's own
+  head parses as a call, so every Elixir function currently carries a
+  self-edge.
+- Dart, Lua (`M.f`/`M:m` names resolve by suffix) and Bash (functions
+  only; commands become potential callees) round out the set.
+
+Supporting work: the symbol extractor learned `@def.module` and
+`@def.method` captures, the resolver learned PHP's `\` separator, the
+chunker learned `--` comments, and tree-sitter moved to 0.25 (C# and Swift
+ship ABI-15 parsers that 0.24 refuses to load). Binary size grew ~27 MB
+unstripped for all fifteen grammars; release binaries are stripped.
+
+### Small repos
+
+Three retrieval changes, all no-ops at 2,000+ chunks — the scale the
+original constants were tuned for:
+
+- **A KNN distance floor.** sqlite-vec's `k = 50` returns the 50 nearest
+  chunks regardless of distance, so on a corpus smaller than that, every
+  query ranked the entire repo. Candidates above the embedder's L2 floor
   (jina-code-v2: 1.1; `VEXUS_KNN_FLOOR` overrides, `0` disables) no longer
   fuse into results — unless nothing else matched, in which case they come
   back explicitly labeled.
-- **Honest weak matches.** When keyword search finds nothing and no vector
-  candidate clears the floor, `explore` and `search` now say "weak match —
-  nearest neighbors only, grep is the better tool here" and `explore`
-  skips graph expansion instead of fanning out from a wrong guess.
-  Previously `explore` could never say "no" on a non-empty repo.
-- **Corpus-tier explore limits.** Under 200 chunks, `explore` uses 8
-  entries / 6 expanded symbols / 12 neighbors / 4,000-token default budget
-  (was 12/8/24/8,000); 200–1,999 chunks gets 8/6/16/4,000. Real-model token
-  cost on the small benchmark corpora dropped ~35–40% on the worst
-  questions while every real-model retrieval metric improved
-  (answer-in-bundle +0.06 overall, recall@10 +0.05). Both baselines
-  re-blessed; the mock baseline's answer_in_bundle drop is an artifact of
-  random-ranking coverage, not retrieval quality — see the PR for the
-  full analysis.
+- **Honest weak matches.** With no keyword hit and nothing under the floor,
+  `explore` and `search` now say so and point at grep, and `explore` skips
+  graph expansion rather than fanning out from a wrong guess. Previously
+  `explore` could never answer "no" on a non-empty repo.
+- **Corpus-tier limits.** Below 200 chunks `explore` uses 8 entries / 6
+  expanded symbols / 12 neighbors / 4,000-token default budget; 200–1,999
+  chunks gets 8/6/16/4,000. Real-model token cost on the small benchmark
+  corpora fell 35–40% on the worst questions while every real-model
+  retrieval metric improved (answer-in-bundle +0.06, recall@10 +0.05).
+
+### First run
+
 - **Cold `vexus serve` no longer loads the embedding model twice.** The
-  writer path builds its embedder once and seeds the shared state with it;
-  previously the startup index build and the writer thread each constructed
-  their own ORT session from the ~160 MB model file.
-- **The model download reports progress** — a stderr line every ~10% with
-  MB downloaded/total — instead of going silent for minutes after the
-  initial "downloading …" announcement.
-- **A first-ever embed pass narrates regardless of size.** The progress
-  gate only announced backlogs above 256 chunks, so a small repo's first
-  index — the run that also pays the one-time model download — was the
-  most silent one. First passes (nothing embedded yet) now always print;
-  the watcher's steady-state updates stay silent.
-- **Real cross-platform writer locking.** The advisory writer lock on
-  `.vexus/lock` now uses `std::fs::File::try_lock` — flock(2) on Unix,
-  LockFileEx on Windows — replacing the raw `libc::flock` call and the
-  non-unix stub that handed every process a writer lock. Mutual exclusion
-  now holds on every platform, and the mutual-exclusion test runs
-  unconditionally. `libc` is no longer a dependency.
-- CI runs the full test suite on `windows-latest` alongside Ubuntu and
-  macOS. A `.gitattributes` forces LF checkouts so snapshot tests and
-  blake3 file hashes are byte-identical across platforms.
-- **Windows releases.** The release matrix builds `x86_64-pc-windows-msvc`
-  and `aarch64-pc-windows-msvc` (both have prebuilt ONNX runtimes),
-  packaged as `.zip` with `vexus.exe`. `install.ps1` installs to
-  `%LOCALAPPDATA%\vexus\bin` with mandatory SHA256 verification and adds
-  it to the user PATH: `irm .../install.ps1 | iex`.
-- **Every release artifact is now smoke-tested** before packaging: the
-  built binary runs `--version`, indexes a 3-file fixture and must report
-  its symbols — catching binaries that link but crash at load, on every
-  target including the ONNX-static ones.
-- **Structural-only builds un-strand Intel macOS, old-glibc Linux, and
-  musl/Alpine.** A new default `onnx` cargo feature compiles the ONNX
-  runtime out under `--no-default-features`; the release ships
-  `-structural` artifacts for `x86_64-apple-darwin`,
-  `x86_64-unknown-linux-gnu` (glibc 2.35 floor) and
-  `x86_64-unknown-linux-musl` (fully static). Keyword and call-graph
-  search work fully; semantic search is off, and both the startup stderr
-  line and `status` say so. `install.sh` now detects musl and pre-2.39
-  glibc — previously it silently installed a binary that failed at exec —
-  and installs the structural artifact with an honest note; Intel macOS
-  stops being a hard `die`. A CI job keeps the no-ONNX shape compiling.
-- The watcher canonicalizes the root via `dunce`, so Windows
-  ReadDirectoryChangesW events (plain `C:\...`) match the watched root
-  instead of failing `strip_prefix` against a `\\?\`-prefixed path.
-- The watcher canonicalizes the root via `dunce`, so Windows
-  ReadDirectoryChangesW events (plain `C:\...`) match the watched root
-  instead of failing `strip_prefix` against a `\\?\`-prefixed path.
-  blake3 file hashes are byte-identical across platforms. (Windows release
-  artifacts and an installer land separately.)
+  startup index build and the writer thread each used to construct their
+  own ORT session from the ~160 MB file.
+- The model download reports progress every ~10% instead of going silent
+  for minutes, and a first-ever embedding pass narrates regardless of size
+  — previously a small repo's first index, the one that also pays for the
+  download, was the quietest.
+- The Claude Code pack's grep nudge is now `vexus hook nudge-grep` instead
+  of a bash script, so the pack works identically on Windows. Re-run
+  `vexus init --agent claude-code --force` to migrate; `nudge-grep.sh`
+  ships one more release as a shim.
 
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 
