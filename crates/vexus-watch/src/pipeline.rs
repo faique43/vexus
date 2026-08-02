@@ -272,12 +272,23 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
         from_cache: 0,
     };
     let total = store.embed_backlog()?;
-    let announce = total > EMBED_PROGRESS_MIN_BACKLOG;
+    // Big backlogs always narrate. A first-ever embed pass (nothing embedded
+    // yet) narrates regardless of size: on a small repo the cold run's only
+    // slow step is the one-time model download, and a silent first index
+    // right after a silent download reads as a hang — the exact failure the
+    // progress lines exist to prevent. The watcher's steady-state calls
+    // (small backlog, embeddings already present) stay silent.
+    let announce =
+        total > EMBED_PROGRESS_MIN_BACKLOG || (total > 0 && store.embedded_count()? == 0);
     if announce {
-        eprintln!(
-            "vexus: embedding {total} chunks — this can take a few minutes on a large repo \
-             (safe to interrupt; it resumes where it left off)"
-        );
+        if total > EMBED_PROGRESS_MIN_BACKLOG {
+            eprintln!(
+                "vexus: embedding {total} chunks — this can take a few minutes on a large repo \
+                 (safe to interrupt; it resumes where it left off)"
+            );
+        } else {
+            eprintln!("vexus: embedding {total} chunks …");
+        }
     }
     loop {
         let backlog_before = store.embed_backlog()?;

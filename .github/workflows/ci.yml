@@ -8,13 +8,10 @@ jobs:
   test:
     strategy:
       matrix:
-        # Unix only, matching the support the README states: the advisory
-        # writer lock is flock, and the non-unix stub hands every `serve` a
-        # writer lock, so concurrent instances would race. Running a
-        # required job against a platform the project does not claim to
-        # support just pins the badge red. Restore this entry as part of
-        # adding real Windows locking, not before.
-        os: [ubuntu-latest, macos-latest]
+        # windows-latest joined the matrix when the writer lock moved to
+        # std::fs::File::try_lock (flock on Unix, LockFileEx on Windows) —
+        # real mutual exclusion on every platform, no stub.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       VEXUS_EMBEDDER: mock

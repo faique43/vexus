@@ -458,6 +458,7 @@ fn main() -> Result<()> {
                         || indexed_model.0.as_deref() == Some(vexus_embed::JINA_CODE_V2.id)
                 }
             };
+            let mut knn_floor = None;
             let query_vec = if worth_building {
                 vexus_embed::select::make_embedder().and_then(|embedder| {
                     let same_model = indexed_model.0.as_deref() == Some(embedder.id())
@@ -465,6 +466,7 @@ fn main() -> Result<()> {
                     if !same_model {
                         return None;
                     }
+                    knn_floor = vexus_embed::effective_distance_floor(embedder.as_ref());
                     embedder
                         .embed(&[query.as_str()])
                         .ok()
@@ -473,7 +475,12 @@ fn main() -> Result<()> {
             } else {
                 None
             };
-            for h in store.search_hybrid(&query, query_vec.as_deref(), limit)? {
+            let (hits, outcome) =
+                store.search_hybrid_scored(&query, query_vec.as_deref(), knn_floor, limit)?;
+            if outcome == vexus_core::search::SearchOutcome::WeakVectorOnly {
+                println!("weak match — nothing indexed clearly matches; nearest neighbors only:");
+            }
+            for h in hits {
                 let qual = h.qualname.unwrap_or_else(|| "(preamble)".into());
                 println!(
                     "{}  {}:{}-{}  {:.2}\n    {}",
