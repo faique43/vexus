@@ -108,6 +108,12 @@ parser code:
   `-structural` artifact; CI keeps the shape compiling (`structural` job).
   Full semantic support there still means vendoring an ONNX Runtime build
   or switching backends — open for contribution.
+- **Intel macOS:** unsupported. The ONNX Runtime build the embedding backend
+  pulls has no `x86_64-apple-darwin` target, so it fails at build time on any
+  runner, and `cargo install` fails the same way. Supporting it means vendoring
+  a runtime or switching backends.
+
+The Intel macOS and old-glibc gaps are open for contribution if you want them.
 
 ## Commits and PRs
 

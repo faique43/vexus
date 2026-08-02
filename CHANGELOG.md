@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+- **The Claude Code pack's grep nudge no longer needs bash.** hooks.json
+  now runs `vexus hook nudge-grep` (a hidden subcommand reading the hook
+  payload's `session_id` from stdin), so the pack behaves identically on
+  Windows/cmd/PowerShell. `nudge-grep.sh` is deprecated and now just execs
+  the subcommand; it ships for one more release for hooks.json files
+  installed by older versions — re-run
+  `vexus init --agent claude-code --force` to migrate.
+Small repos stop paying big-repo prices. Three retrieval changes, all
+no-ops at Medium scale (≥2,000 chunks — the historical constants):
+
+- **KNN distance floor.** vec0's `k = 50` returns the 50 nearest chunks
+  regardless of distance, so on a corpus smaller than 50 chunks every
+  query ranked the whole repo. Candidates above the embedder's L2 floor
+  (jina-code-v2: 1.1; `VEXUS_KNN_FLOOR` overrides, `0` disables) no longer
+  fuse into results — unless nothing else matched, in which case they come
+  back explicitly labeled.
+- **Honest weak matches.** When keyword search finds nothing and no vector
+  candidate clears the floor, `explore` and `search` now say "weak match —
+  nearest neighbors only, grep is the better tool here" and `explore`
+  skips graph expansion instead of fanning out from a wrong guess.
+  Previously `explore` could never say "no" on a non-empty repo.
+- **Corpus-tier explore limits.** Under 200 chunks, `explore` uses 8
+  entries / 6 expanded symbols / 12 neighbors / 4,000-token default budget
+  (was 12/8/24/8,000); 200–1,999 chunks gets 8/6/16/4,000. Real-model token
+  cost on the small benchmark corpora dropped ~35–40% on the worst
+  questions while every real-model retrieval metric improved
+  (answer-in-bundle +0.06 overall, recall@10 +0.05). Both baselines
+  re-blessed; the mock baseline's answer_in_bundle drop is an artifact of
+  random-ranking coverage, not retrieval quality — see the PR for the
+  full analysis.
+- **Cold `vexus serve` no longer loads the embedding model twice.** The
+  writer path builds its embedder once and seeds the shared state with it;
+  previously the startup index build and the writer thread each constructed
+  their own ORT session from the ~160 MB model file.
+- **The model download reports progress** — a stderr line every ~10% with
+  MB downloaded/total — instead of going silent for minutes after the
+  initial "downloading …" announcement.
+- **A first-ever embed pass narrates regardless of size.** The progress
+  gate only announced backlogs above 256 chunks, so a small repo's first
+  index — the run that also pays the one-time model download — was the
+  most silent one. First passes (nothing embedded yet) now always print;
+  the watcher's steady-state updates stay silent.
 - **Real cross-platform writer locking.** The advisory writer lock on
   `.vexus/lock` now uses `std::fs::File::try_lock` — flock(2) on Unix,
   LockFileEx on Windows — replacing the raw `libc::flock` call and the
@@ -34,6 +76,11 @@
 - The watcher canonicalizes the root via `dunce`, so Windows
   ReadDirectoryChangesW events (plain `C:\...`) match the watched root
   instead of failing `strip_prefix` against a `\\?\`-prefixed path.
+- The watcher canonicalizes the root via `dunce`, so Windows
+  ReadDirectoryChangesW events (plain `C:\...`) match the watched root
+  instead of failing `strip_prefix` against a `\\?\`-prefixed path.
+  blake3 file hashes are byte-identical across platforms. (Windows release
+  artifacts and an installer land separately.)
 
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 

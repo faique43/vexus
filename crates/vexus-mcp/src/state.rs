@@ -540,6 +540,28 @@ mod tests {
         );
     }
 
+    /// The writer path in `serve_async` builds its embedder before the
+    /// startup index and seeds it via `embedder.set(..)`; `embedder()` must
+    /// then hand back that exact Arc rather than building a second one —
+    /// the double cold-start ORT session load this seeding exists to kill.
+    #[test]
+    fn embedder_seeded_before_first_use_is_reused_not_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::env::set_var("VEXUS_EMBEDDER", "mock");
+        let state = indexed_state(root);
+        let seeded: Arc<dyn Embedder> = Arc::new(vexus_embed::MockEmbedder);
+        state
+            .embedder
+            .set(Some(Arc::clone(&seeded)))
+            .unwrap_or_else(|_| panic!("OnceLock must be empty before first embedder() call"));
+        let got = state.embedder().expect("seeded Some must come back Some");
+        assert!(
+            Arc::ptr_eq(&seeded, &got),
+            "a pre-seeded embedder must be returned as-is, never rebuilt"
+        );
+    }
+
     /// Finding C3: an `AppState` whose store isn't populated yet (the
     /// reader/lock-loser path, before the winner's first index build has
     /// produced `index.db`) must degrade every tool call to a plain text

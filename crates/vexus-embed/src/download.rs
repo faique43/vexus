@@ -48,7 +48,13 @@ fn base_url() -> String {
     std::env::var("VEXUS_MODEL_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
 }
 
-fn fetch(url: &str, dest: &Path) -> Result<()> {
+/// Downloads with a percentage line on stderr every ~10% when the size is
+/// known and large: minutes of silence while a ~160 MB model streams down is
+/// the first-run "is it hung?" moment, and this is the only channel that can
+/// say otherwise (stderr, never stdout — the MCP transport owns stdout).
+const PROGRESS_MIN_BYTES: u64 = 10 * 1024 * 1024;
+
+fn fetch(url: &str, name: &str, dest: &Path) -> Result<()> {
     if let Some(path) = url.strip_prefix("file://") {
         std::fs::copy(path, dest).with_context(|| format!("copy {path}"))?;
         return Ok(());
@@ -56,9 +62,39 @@ fn fetch(url: &str, dest: &Path) -> Result<()> {
     let resp = ureq::get(url)
         .call()
         .with_context(|| format!("GET {url}"))?;
+    let total: Option<u64> = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= PROGRESS_MIN_BYTES);
     let mut reader = resp.into_reader();
     let mut out = std::fs::File::create(dest)?;
-    std::io::copy(&mut reader, &mut out)?;
+    match total {
+        None => {
+            std::io::copy(&mut reader, &mut out)?;
+        }
+        Some(total) => {
+            let mut done: u64 = 0;
+            let mut next_pct: u64 = 10;
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut out, &buf[..n])?;
+                done += n as u64;
+                let pct = done * 100 / total;
+                if pct >= next_pct {
+                    eprintln!(
+                        "vexus: downloading {name} … {pct}% ({}/{} MB)",
+                        done / (1024 * 1024),
+                        total / (1024 * 1024)
+                    );
+                    next_pct = (pct / 10 + 1) * 10;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -139,7 +175,7 @@ pub fn ensure_model(manifest: &ModelManifest, models_root: &Path) -> Result<Path
         };
         eprintln!("vexus: downloading {}{size} …", file.name);
         let result = (|| -> Result<()> {
-            fetch(&url, &part)?;
+            fetch(&url, file.name, &part)?;
             let got = file_sha256(&part)?;
             if got != file.sha256 {
                 bail!(

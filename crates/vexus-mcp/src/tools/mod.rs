@@ -85,6 +85,15 @@ pub(crate) fn resolve_or_text(store: &Store, target: &str) -> Result<SymbolInfo,
 /// but the embed itself can be a real (slow, possibly ONNX) inference call,
 /// and must run unlocked so it doesn't stall every other tool call for the
 /// duration.
+/// The KNN distance floor for this process's embedder (env override
+/// included) — `None` when there's no embedder, or the embedder declares no
+/// floor (mock). Cheap after the first call: `state.embedder()` caches.
+pub(crate) fn knn_floor(state: &AppState) -> Option<f64> {
+    state
+        .embedder()
+        .and_then(|e| vexus_embed::effective_distance_floor(e.as_ref()))
+}
+
 pub(crate) fn embed_query(state: &AppState, query: &str) -> Option<Vec<f32>> {
     let embedder = state.embedder()?;
     let same_model = {

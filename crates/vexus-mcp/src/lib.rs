@@ -70,7 +70,12 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         if is_writer { "writer" } else { "reader" }
     );
 
-    // Only the writer does startup indexing.
+    // Only the writer does startup indexing. The writer also always needs an
+    // embedder (for `start_writer` below), so it's built exactly once here
+    // and later seeded into `AppState`'s `OnceLock` — previously the startup
+    // index build and `state.embedder()` each constructed their own ORT
+    // session, paying the ~160 MB model load twice on a cold first run.
+    let mut prebuilt_embedder: Option<Option<Arc<dyn vexus_embed::Embedder>>> = None;
     if is_writer {
         let mut store = vexus_core::Store::open(&db_path)
             .with_context(|| format!("failed to open index at {}", db_path.display()))?;
@@ -79,9 +84,12 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         // read-only checkout) is a nuisance, not a reason to refuse to serve.
         let _ = std::fs::write(root.join(".vexus/.gitignore"), "*\n");
 
+        let embedder: Option<Arc<dyn vexus_embed::Embedder>> =
+            vexus_embed::select::make_embedder().map(Arc::from);
         if store.counts()?.files == 0 {
-            build_startup_index_if_empty(&root, &mut store)?;
+            build_startup_index_if_empty(&root, &mut store, embedder.as_deref())?;
         }
+        prebuilt_embedder = Some(embedder);
     }
 
     // Tool handlers only ever read; opening read-only keeps concurrent
@@ -149,6 +157,13 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         last_generation: AtomicU64::new(0),
         is_writer,
     });
+    // Seed the writer's already-built embedder so `state.embedder()` (tool
+    // handlers, `start_writer` below) reuses it instead of building a second
+    // one. Readers keep the lazy path — they only pay for an embedder if a
+    // tool actually needs a query vector.
+    if let Some(embedder) = prebuilt_embedder {
+        let _ = state.embedder.set(embedder);
+    }
 
     // Only reachable via the reader path's None arm above (the writer
     // branch always populates `initial_store`, and the writer's own eager
@@ -202,7 +217,11 @@ async fn serve_async(root: PathBuf) -> Result<()> {
 /// (absent `meta('freshness')` reads as `Fresh` — see
 /// `freshness::get_freshness`), falsely claiming the index is caught up
 /// while it's still being built from scratch.
-fn build_startup_index_if_empty(root: &Path, store: &mut vexus_core::Store) -> Result<()> {
+fn build_startup_index_if_empty(
+    root: &Path,
+    store: &mut vexus_core::Store,
+    embedder: Option<&dyn vexus_embed::Embedder>,
+) -> Result<()> {
     let _ = vexus_watch::set_freshness(store, Freshness::Indexing);
 
     eprintln!("vexus: no index found for {root:?} — building one now...");
@@ -216,10 +235,10 @@ fn build_startup_index_if_empty(root: &Path, store: &mut vexus_core::Store) -> R
                 report.failed.len()
             );
             if store.vec_available() {
-                match vexus_embed::select::make_embedder() {
+                match embedder {
                     Some(embedder) => {
                         store.set_model(embedder.id(), embedder.dim())?;
-                        match pipeline::embed_pending(store, embedder.as_ref()) {
+                        match pipeline::embed_pending(store, embedder) {
                             Ok(er) => eprintln!(
                                 "vexus: embedded {} chunks (cache hits: {})",
                                 er.embedded, er.from_cache
@@ -626,7 +645,7 @@ mod tests {
         let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
         assert_eq!(store.counts().unwrap().files, 0);
 
-        build_startup_index_if_empty(&root, &mut store).unwrap();
+        build_startup_index_if_empty(&root, &mut store, Some(&vexus_embed::MockEmbedder)).unwrap();
 
         assert_eq!(
             store.counts().unwrap().files,
