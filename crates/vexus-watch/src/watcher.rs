@@ -447,7 +447,13 @@ fn run_writer_inner(
     // events actually carry; if canonicalization fails (root vanished
     // before the watch even starts), fall back to the given path and let
     // `watcher.watch` below surface the real error.
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    //
+    // `dunce`, not `std::fs::canonicalize`: on Windows the std version
+    // returns `\\?\C:\...` UNC paths while ReadDirectoryChangesW events
+    // carry plain `C:\...` — `strip_prefix(root)` would then fail for every
+    // event, the exact bug the macOS realpath note above describes. dunce
+    // strips the UNC prefix where it's safe and is the std call elsewhere.
+    let root = dunce::canonicalize(&root).unwrap_or(root);
 
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
 

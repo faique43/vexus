@@ -211,6 +211,13 @@ pub fn status_text(store: &vexus_core::Store, role: Option<bool>) -> Result<Stri
         format!("model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"),
         freshness_line,
     ];
+    // Structural-only builds compile the ONNX runtime out (targets it has
+    // no prebuilt binaries for). Surface that here, in the tool output —
+    // not only on stderr at startup — so "why is semantic search off?"
+    // has a visible answer.
+    #[cfg(not(feature = "onnx"))]
+    lines
+        .push("embeddings: unavailable (structural-only build — keyword+graph search only)".into());
     if let Some(is_writer) = role {
         if let Some(role) = role_line(is_writer) {
             lines.push(role);
@@ -530,6 +537,28 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, &second),
             "embedder() must return the same Arc after the first call, not rebuild"
+        );
+    }
+
+    /// The writer path in `serve_async` builds its embedder before the
+    /// startup index and seeds it via `embedder.set(..)`; `embedder()` must
+    /// then hand back that exact Arc rather than building a second one —
+    /// the double cold-start ORT session load this seeding exists to kill.
+    #[test]
+    fn embedder_seeded_before_first_use_is_reused_not_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::env::set_var("VEXUS_EMBEDDER", "mock");
+        let state = indexed_state(root);
+        let seeded: Arc<dyn Embedder> = Arc::new(vexus_embed::MockEmbedder);
+        state
+            .embedder
+            .set(Some(Arc::clone(&seeded)))
+            .unwrap_or_else(|_| panic!("OnceLock must be empty before first embedder() call"));
+        let got = state.embedder().expect("seeded Some must come back Some");
+        assert!(
+            Arc::ptr_eq(&seeded, &got),
+            "a pre-seeded embedder must be returned as-is, never rebuilt"
         );
     }
 

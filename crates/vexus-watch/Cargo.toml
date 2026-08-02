@@ -4,15 +4,19 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+default = ["onnx"]
+onnx = ["vexus-embed/onnx"]
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
 ignore.workspace = true
 notify.workspace = true
-libc.workspace = true
+dunce.workspace = true
 vexus-core = { path = "../vexus-core" }
 vexus-index = { path = "../vexus-index" }
-vexus-embed = { path = "../vexus-embed" }
+vexus-embed = { path = "../vexus-embed", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,32 +1,20 @@
-//! Advisory writer lock using flock (per-fd locking).
+//! Advisory writer lock using OS file locking (per-handle).
 //!
 //! This module provides a WriterLock that ensures at most one process
 //! (or "vexus serve" instance) writes the index at a time.
 
+use std::fs::{File, TryLockError};
 use std::path::Path;
 
-use anyhow::Result;
-
-// Everything below is only referenced from the `#[cfg(unix)]` arm of
-// `try_acquire`, so importing it unconditionally makes a Windows build fail
-// `clippy -D warnings` on `unused_imports`.
-#[cfg(unix)]
-use anyhow::Context;
-#[cfg(unix)]
-use std::fs::File;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use anyhow::{Context, Result};
 
 /// Advisory writer lock on `.vexus/lock`. Held while alive; released on drop
-/// (explicit funlock + fd close both release it).
+/// (explicit unlock + handle close both release it).
 ///
-/// Unix only: uses flock for per-fd locking. Non-unix platforms return
-/// Some() always (no locking yet; document as a todo).
+/// Uses `std::fs::File::try_lock` — flock(2) on Unix, LockFileEx on Windows —
+/// so the same single code path covers every supported platform.
 pub struct WriterLock {
-    #[cfg(unix)]
     file: File,
-    #[cfg(not(unix))]
-    _marker: std::marker::PhantomData<()>,
 }
 
 impl WriterLock {
@@ -34,50 +22,28 @@ impl WriterLock {
     ///
     /// Returns:
     /// - `Ok(Some(WriterLock))` if we acquired the lock (we're the writer)
-    /// - `Ok(None)` if another process/fd holds the lock (we're a reader)
+    /// - `Ok(None)` if another process/handle holds the lock (we're a reader)
     /// - `Err(_)` on I/O or other errors
     pub fn try_acquire(root: &Path) -> Result<Option<WriterLock>> {
-        #[cfg(unix)]
-        {
-            let dir = root.join(".vexus");
-            std::fs::create_dir_all(&dir).with_context(|| {
-                format!("failed to create .vexus directory at {}", dir.display())
-            })?;
+        let dir = root.join(".vexus");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create .vexus directory at {}", dir.display()))?;
 
-            let path = dir.join("lock");
-            let file = File::create(&path)
-                .with_context(|| format!("failed to create lock file at {}", path.display()))?;
+        let path = dir.join("lock");
+        let file = File::create(&path)
+            .with_context(|| format!("failed to create lock file at {}", path.display()))?;
 
-            // LOCK_EX | LOCK_NB: exclusive, non-blocking
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-
-            if rc == 0 {
-                Ok(Some(WriterLock { file }))
-            } else {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                    Ok(None)
-                } else {
-                    Err(err).context("flock .vexus/lock")
-                }
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            // Non-unix platforms: no locking yet. TODO: implement Windows equivalent.
-            let _ = root;
-            Ok(Some(WriterLock {
-                _marker: std::marker::PhantomData,
-            }))
+        match file.try_lock() {
+            Ok(()) => Ok(Some(WriterLock { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(err)) => Err(err).context("lock .vexus/lock"),
         }
     }
 }
 
-#[cfg(unix)]
 impl Drop for WriterLock {
     fn drop(&mut self) {
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        let _ = self.file.unlock();
     }
 }
 
@@ -106,10 +72,9 @@ mod tests {
         assert!(lock1.is_some(), "first try_acquire should succeed");
     }
 
-    // Mutual exclusion is the one property the non-unix stub cannot provide:
-    // it hands out a `WriterLock` unconditionally. Asserting it there would
-    // fail for a documented reason rather than a real defect.
-    #[cfg(unix)]
+    // flock and LockFileEx are both per-handle, so two try_acquire calls in
+    // one process open two handles and genuinely contend — this asserts
+    // mutual exclusion on every platform.
     #[test]
     fn try_acquire_fails_when_lock_held_in_same_process() {
         let dir = tempfile::tempdir().unwrap();

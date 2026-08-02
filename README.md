@@ -130,6 +130,12 @@ curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 Downloads the release binary for your platform, verifies it against the
 release checksums, and installs to `~/.local/bin`.
 
+On Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/faique43/vexus/main/install.ps1 | iex
+```
+
 <details>
 <summary>Other ways to install</summary>
 
@@ -146,14 +152,20 @@ VEXUS_VERSION=0.1.4 VEXUS_INSTALL_DIR=/usr/local/bin \
   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
-Prebuilt binaries: macOS (Apple Silicon) and Linux (x64, arm64, **glibc 2.39 or
-newer** — Ubuntu 24.04+, Debian 13+, Fedora 39+). ONNX Runtime is linked
-statically, so there is nothing to install alongside the binary.
+Prebuilt binaries: macOS (Apple Silicon), Linux (x64, arm64, **glibc 2.39 or
+newer** — Ubuntu 24.04+, Debian 13+, Fedora 39+) and Windows (x64, arm64).
+ONNX Runtime is linked statically, so there is nothing to install alongside
+the binary.
 
-On an older distro the binary will not start. Ubuntu 22.04, Debian 12 and
-RHEL 9 are all below the floor, and building from source does not help there;
-see [Limitations](#limitations). Intel macOS and Windows aren't supported
-either.
+Hosts the full build can't run on get a **structural-only** build instead —
+the embedding runtime is compiled out, so semantic search is off but keyword
+and call-graph search work fully. `install.sh` detects these cases itself
+and says so: Intel macOS, Linux with glibc older than 2.39 (Ubuntu 22.04,
+Debian 12, RHEL 9), and musl/Alpine (x64). `vexus status` reports which
+build is running. See [Limitations](#limitations).
+On an older Linux distro the binary will not start. Ubuntu 22.04, Debian 12
+and RHEL 9 are all below the floor, and building from source does not help
+there; see [Limitations](#limitations). Intel macOS isn't supported either.
 
 </details>
 
@@ -303,10 +315,9 @@ The things worth knowing before you rely on it:
   same-named methods, duck typing, and dynamic dispatch resolve to a best guess
   or not at all. Every edge carries a confidence label, and unresolved ones say
   `unresolved` rather than guessing quietly.
-- **Apple Silicon macOS and recent Linux only.** Windows is out because the
-  writer lock uses `flock`. The other two limits both come from the embedded
-  ONNX Runtime rather than from vexus, which means building from source does
-  not work around either:
+- **Apple Silicon macOS, recent Linux, and Windows.** The two remaining
+  platform limits both come from the embedded ONNX Runtime rather than from
+  vexus, which means building from source does not work around either:
   - **Intel macOS** has no prebuilt runtime at all, so the build fails.
   - **Linux needs glibc 2.39+.** The prebuilt runtime is compiled against
     glibc 2.38 and references `__isoc23_strtol`, so it will not even link
