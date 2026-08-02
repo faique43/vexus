@@ -42,6 +42,12 @@ jobs:
           # silently.
           - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # Windows became buildable when the writer lock moved to
+          # std::fs::File::try_lock (LockFileEx there); ort ships prebuilt
+          # CPU runtimes for both Windows targets. Packaged as .zip with a
+          # vexus.exe inside; installed via install.ps1.
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -76,6 +82,29 @@ jobs:
             exit 1
           fi
 
+      # A packaged binary that links but crashes at load (the exact failure
+      # class static ONNX Runtime linking produces) would otherwise ship
+      # unnoticed — no step here ever executed the artifact before this.
+      # Mock embedder: no model download in CI, and it exercises exactly
+      # what a structural/keyword run does at the user's machine.
+      - name: Smoke test the binary
+        shell: bash
+        env:
+          VEXUS_EMBEDDER: mock
+        run: |
+          set -euo pipefail
+          bin=target/release/vexus
+          [ "$RUNNER_OS" = "Windows" ] && bin="$bin.exe"
+          "$bin" --version
+          mkdir -p smoke/src
+          printf 'def top_helper():\n    return 1\n' > smoke/a.py
+          printf 'fn main() { helper(); }\nfn helper() {}\n' > smoke/src/lib.rs
+          printf 'export function ui(): number { return 2; }\n' > smoke/app.ts
+          "$bin" index smoke
+          "$bin" status smoke | tee smoke_status.txt
+          grep -q "index: 3 files" smoke_status.txt
+          grep -Eq " [1-9][0-9]* symbols" smoke_status.txt
+
       - name: Package
         id: package
         shell: bash
@@ -100,11 +129,18 @@ jobs:
           }
           name="vexus-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          strip target/release/vexus || true
-          cp target/release/vexus "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/vexus.exe "dist/$name/"
+            cp README.md LICENSE "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
+            echo "archive=dist/$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            strip target/release/vexus || true
+            cp target/release/vexus "dist/$name/"
+            cp README.md LICENSE "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -121,13 +157,14 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # One checksum file covering every archive: install.sh verifies the
-      # archive it downloaded against this before unpacking anything.
+      # One checksum file covering every archive: install.sh / install.ps1
+      # verify the archive they downloaded against this before unpacking
+      # anything.
       - name: Checksums
         run: |
           set -euo pipefail
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v3
@@ -135,5 +172,6 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/SHA256SUMS
           generate_release_notes: true
