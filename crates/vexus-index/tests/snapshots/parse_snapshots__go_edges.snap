@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"go/sample.go\"))"
+---
+- "imports go.sample -> \"fmt\" arity=None"
+- calls go.sample.Restock -> Errorf arity=Some(2)
+- calls go.sample.Describe -> Sprintf arity=Some(3)

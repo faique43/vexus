@@ -214,3 +214,53 @@
   expect:
     - service.src.services.order_service.persist_status
     - service.src.services.notifications.notify_order_cancelled
+
+# --- wave-1 languages (Go, JS, Java, C files added with the 18-language
+# expansion). Every qualname below was read back from a real `vexus index`
+# run over this corpus (VEXUS_EMBEDDER=none). ---------------------------
+
+- q: "where do we decide which SKUs need restocking"
+  expect:
+    - worker.inventory.needsRestock
+    - worker.inventory.RestockReport
+  graded:
+    worker.inventory.needsRestock: 3
+    worker.inventory.RestockReport: 2
+
+- q: "where is the daily sales report rendered for the admin email"
+  expect:
+    - admin.report.renderDailyReport
+  graded:
+    admin.report.renderDailyReport: 3
+    admin.report.currencyCell: 1
+
+- q: "where is the order stage number turned into a UI label"
+  expect:
+    - android.OrderTracker.OrderTracker.stageLabel
+  graded:
+    android.OrderTracker.OrderTracker.stageLabel: 3
+
+- q: "where is the checksum computed for the POS order payload"
+  expect:
+    - native.checksum.order_checksum
+  graded:
+    native.checksum.order_checksum: 3
+    native.checksum.fletcher_step: 2
+
+- q: "how does the warehouse restock report get built"
+  tool: explore
+  expect:
+    - worker.inventory.RestockReport
+    - worker.inventory.needsRestock
+  graded:
+    worker.inventory.RestockReport: 3
+    worker.inventory.needsRestock: 2
+
+- q: "how is the native order payload checksum computed"
+  tool: explore
+  expect:
+    - native.checksum.order_checksum
+    - native.checksum.fletcher_step
+  graded:
+    native.checksum.order_checksum: 3
+    native.checksum.fletcher_step: 2

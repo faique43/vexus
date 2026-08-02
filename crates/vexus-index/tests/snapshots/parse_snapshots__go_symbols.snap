@@ -1,0 +1,11 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"go/sample.go\"))"
+---
+- "module go.sample [1-33] arity=None parent=None sig=None"
+- "const go.sample.MaxItems [5-5] arity=None parent=Some(0) sig=Some(\"const MaxItems = 100\")"
+- "struct go.sample.Item [8-11] arity=None parent=Some(0) sig=Some(\"type Item struct {\")"
+- "interface go.sample.Stocker [13-15] arity=None parent=Some(0) sig=Some(\"type Stocker interface {\")"
+- "type go.sample.Quantity [17-17] arity=None parent=Some(0) sig=Some(\"type Quantity int\")"
+- "method go.sample.Restock [20-26] arity=Some(1) parent=Some(0) sig=Some(\"func (it *Item) Restock(n int) error {\")"
+- "function go.sample.Describe [28-33] arity=Some(2) parent=Some(0) sig=Some(\"func Describe(it Item, verbose bool) string {\")"

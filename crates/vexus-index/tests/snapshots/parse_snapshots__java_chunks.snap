@@ -1,0 +1,15 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"java/Sample.java\"))"
+---
+- "sym=Some(0) [1-1] tokens~3 :: package shop;⏎"
+- "sym=Some(0) [3-3] tokens~5 :: import java.util.List;⏎"
+- "sym=Some(1) [5-21] tokens~33 :: public class Order {⏎    public Order(List<String> lines) {⏎    public int lineC"
+- "sym=Some(2) [8-10] tokens~18 ::     public Order(List<String> lines) {⏎        this.lines = lines;⏎    }⏎"
+- "sym=Some(3) [12-15] tokens~22 ::     // Total line count.⏎    public int lineCount() {⏎        return lines.size("
+- "sym=Some(4) [17-20] tokens~41 ::     public String summary(boolean verbose) {⏎        var count = lineCount();⏎  "
+- "sym=Some(5) [23-25] tokens~11 :: interface Renderable {⏎    String render();⏎"
+- "sym=Some(6) [24-24] tokens~5 ::     String render();⏎"
+- "sym=Some(7) [27-30] tokens~3 :: enum Status {⏎"
+- "sym=Some(8) [32-36] tokens~20 :: record Description(int count) implements Renderable {⏎    public String render()"
+- "sym=Some(9) [33-35] tokens~21 ::     public String render() {⏎        return \"order with \" + count + \" lines\";⏎  "

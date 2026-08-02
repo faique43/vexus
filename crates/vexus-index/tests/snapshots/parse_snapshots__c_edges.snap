@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"c/sample.c\"))"
+---
+- imports c.sample -> <stdio.h> arity=None
+- "imports c.sample -> \"buffer.h\" arity=None"
+- calls c.sample.rb_push -> rb_wrap arity=Some(2)
+- calls c.sample.rb_push -> printf arity=Some(2)

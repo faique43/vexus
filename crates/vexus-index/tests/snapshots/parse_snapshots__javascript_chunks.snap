@@ -1,0 +1,12 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"javascript/sample.js\"))"
+---
+- "sym=Some(0) [1-1] tokens~10 :: import { formatPrice } from \"./format\";⏎"
+- "sym=Some(1) [3-6] tokens~27 :: // Renders one cart row.⏎function renderRow(item, index) {⏎  return `${index}: $"
+- "sym=Some(2) [8-10] tokens~22 :: const sumTotals = (items) => {⏎  return items.reduce((acc, it) => acc + it.price"
+- "sym=Some(3) [12-14] tokens~16 :: const legacyHelper = function (x) {⏎  return renderRow(x, 0);⏎};⏎"
+- "sym=Some(4) [16-19] tokens~16 :: function* idGenerator() {⏎  let i = 0;⏎  while (true) yield i++;⏎}⏎"
+- "sym=Some(5) [21-30] tokens~13 :: class Cart {⏎    constructor(items) {⏎    total() {⏎"
+- "sym=Some(6) [22-24] tokens~12 ::   constructor(items) {⏎    this.items = items;⏎  }⏎"
+- "sym=Some(7) [26-29] tokens~17 ::   // Total in cents.⏎  total() {⏎    return sumTotals(this.items);⏎  }⏎"

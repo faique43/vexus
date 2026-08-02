@@ -1,0 +1,9 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"javascript/sample.js\"))"
+---
+- imports javascript.sample -> ./format arity=None
+- calls javascript.sample.renderRow -> formatPrice arity=Some(1)
+- calls javascript.sample.sumTotals -> reduce arity=Some(2)
+- calls javascript.sample.legacyHelper -> renderRow arity=Some(2)
+- calls javascript.sample.Cart.total -> sumTotals arity=Some(1)

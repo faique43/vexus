@@ -1,0 +1,14 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"java/Sample.java\"))"
+---
+- "module java.Sample [1-36] arity=None parent=None sig=None"
+- "class java.Sample.Order [5-21] arity=None parent=Some(0) sig=Some(\"public class Order {\")"
+- "method java.Sample.Order.Order [8-10] arity=Some(1) parent=Some(1) sig=Some(\"public Order(List<String> lines) {\")"
+- "method java.Sample.Order.lineCount [13-15] arity=Some(0) parent=Some(1) sig=Some(\"public int lineCount() {\")"
+- "method java.Sample.Order.summary [17-20] arity=Some(1) parent=Some(1) sig=Some(\"public String summary(boolean verbose) {\")"
+- "interface java.Sample.Renderable [23-25] arity=None parent=Some(0) sig=Some(\"interface Renderable {\")"
+- "method java.Sample.Renderable.render [24-24] arity=Some(0) parent=Some(5) sig=Some(\"String render();\")"
+- "enum java.Sample.Status [27-30] arity=None parent=Some(0) sig=Some(\"enum Status {\")"
+- "class java.Sample.Description [32-36] arity=None parent=Some(0) sig=Some(\"record Description(int count) implements Renderable {\")"
+- "method java.Sample.Description.render [33-35] arity=Some(0) parent=Some(8) sig=Some(\"public String render() {\")"
