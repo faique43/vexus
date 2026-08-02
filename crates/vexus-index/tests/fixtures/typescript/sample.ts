@@ -35,3 +35,24 @@ export function* idGen(prefix: string) {
 }
 
 export const fetchUserArrow = (id: string) => load(id);
+
+// Assignment-defined functions: member assignment, `var` and object-literal
+// values all index like the declared forms.
+const registry: Record<string, unknown> = {};
+
+registry.lookup = function lookupEntry(id: string) {
+  return load(id);
+};
+
+registry.find = (id: string) => load(id);
+
+var legacyLoad = function (id: string) {
+  return load(id);
+};
+
+export const handlers = {
+  fetch: function (id: string) {
+    return fetchUser(id, 1);
+  },
+  compactAll: (xs: number[]) => compact(xs),
+};

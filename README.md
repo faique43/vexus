@@ -164,9 +164,6 @@ and says so: Intel macOS, and Linux with glibc older than 2.39 (Ubuntu
 22.04, Debian 12, RHEL 9). `vexus status` reports which build is running.
 musl systems (Alpine) are not supported at all — the vector-search
 dependency does not build against musl. See [Limitations](#limitations).
-On an older Linux distro the binary will not start. Ubuntu 22.04, Debian 12
-and RHEL 9 are all below the floor, and building from source does not help
-there; see [Limitations](#limitations). Intel macOS isn't supported either.
 
 </details>
 
@@ -280,9 +277,10 @@ your agent's clock.
 
 `vexus-eval perf` reports the same shape against a **mock** embedder — that is
 what CI tracks, so the harness never downloads a model — and its numbers are
-correspondingly lower (1.2 s index, 5 ms incremental). Timing is advisory in
-CI, not a merge gate: runner variance makes it a poor blocker. Budgets live in
-[`bench/budgets.json`](bench/budgets.json).
+correspondingly lower (0.26 s to "embed" 2000 chunks, versus 13.6 s for the
+real model). Pass `--real` to time the shipped model instead. Timing is
+advisory in CI, not a merge gate: runner variance makes it a poor blocker.
+Budgets live in [`bench/budgets.json`](bench/budgets.json).
 
 ## How it works
 
@@ -349,15 +347,17 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 ```sh
 export VEXUS_EMBEDDER=mock                 # no model download needed to develop
 
-cargo test --workspace                     # ~281 tests
+cargo test --workspace                     # ~360 tests
 cargo run -p vexus-eval -- check           # retrieval-metric gate
 cargo run -p vexus-eval -- perf            # timings (mock embedder — see below)
+cargo run -p vexus-eval -- perf --real     # same, timing the real model
 cargo run -p vexus-eval -- token-bench     # regenerate docs/BENCHMARKS.md
 ```
 
 Tests run against a deterministic mock embedder, so nothing in CI downloads the
-model. The same is true of `perf`, which is why its numbers catch algorithmic
-regressions but must never be quoted as user-facing performance.
+model. `perf` defaults to the same mock, which is why its default numbers catch
+algorithmic regressions but must never be quoted as user-facing performance —
+quote a `perf --real` run instead.
 
 ## License
 

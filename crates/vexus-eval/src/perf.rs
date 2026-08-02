@@ -20,6 +20,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use vexus_core::Store;
+use vexus_embed::select::real_embedder;
 use vexus_embed::{Embedder, MockEmbedder};
 use vexus_mcp::state::AppState;
 use vexus_mcp::tools::explore::explore_text;
@@ -307,6 +308,9 @@ fn p50_p99(mut samples: Vec<f64>) -> (f64, f64) {
 #[derive(Debug, Serialize)]
 struct HistoryRow {
     unix_ts: u64,
+    /// `"mock"` or `"real"` — without it a history file mixes two
+    /// incomparable scales into one column.
+    mode: &'static str,
     #[serde(flatten)]
     timings: Timings,
 }
@@ -315,13 +319,17 @@ struct HistoryRow {
 /// `path`, creating it if it doesn't exist yet — `bench/history.jsonl` is
 /// gitignored (see `.gitignore`'s comment), a running local/CI log, not a
 /// committed artifact.
-fn append_history(path: &Path, timings: Timings) -> Result<()> {
+fn append_history(path: &Path, timings: Timings, real: bool) -> Result<()> {
     use std::io::Write;
     let unix_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let row = HistoryRow { unix_ts, timings };
+    let row = HistoryRow {
+        unix_ts,
+        mode: mode_label(real),
+        timings,
+    };
     let mut line = serde_json::to_string(&row).context("serialize history row")?;
     line.push('\n');
     let mut f = std::fs::OpenOptions::new()
@@ -333,14 +341,24 @@ fn append_history(path: &Path, timings: Timings) -> Result<()> {
         .with_context(|| format!("append to {}", path.display()))
 }
 
-fn print_perf_table(timings: &Timings, budgets: &Budgets) {
-    println!("perf ({FILE_COUNT}-file synthetic corpus, mock embedder):\n");
+/// `"real"` for a run that loads the shipped ONNX model, `"mock"` otherwise.
+fn mode_label(real: bool) -> &'static str {
+    if real {
+        "real"
+    } else {
+        "mock"
+    }
+}
+
+fn print_perf_table(timings: &Timings, budgets: &Budgets, real: bool) {
+    let mode = mode_label(real);
+    println!("perf ({FILE_COUNT}-file synthetic corpus, {mode} embedder):\n");
     println!(
         "  index-500           {:>10.1} ms   (budget {:.0} ms)",
         timings.index_500_ms, budgets.index_500_ms
     );
     println!(
-        "  embed-500 (mock)    {:>10.1} ms   (informational — excluded from gating)",
+        "  embed-500 ({mode})    {:>10.1} ms   (informational — excluded from gating)",
         timings.embed_500_ms
     );
     println!(
@@ -377,7 +395,7 @@ fn bench_root() -> Result<PathBuf> {
 /// against `bench/budgets.json`. Always exits `Ok(())` (prints violations,
 /// if any) unless `enforce` is set, in which case any budget violation
 /// becomes an `Err` (exit 1).
-pub fn run(enforce: bool) -> Result<()> {
+pub fn run(enforce: bool, real: bool) -> Result<()> {
     let bench_root = bench_root()?;
     let budgets = load_budgets(&bench_root.join("budgets.json"))?;
 
@@ -398,10 +416,14 @@ pub fn run(enforce: bool) -> Result<()> {
         report.failed
     );
 
-    let embedder = MockEmbedder;
+    let embedder: Box<dyn Embedder> = if real {
+        real_embedder()?
+    } else {
+        Box::new(MockEmbedder)
+    };
     store.set_model(embedder.id(), embedder.dim())?;
     let t = Instant::now();
-    vexus_watch::pipeline::embed_pending(&mut store, &embedder).context("embed perf corpus")?;
+    vexus_watch::pipeline::embed_pending(&mut store, &*embedder).context("embed perf corpus")?;
     let embed_500_ms = elapsed_ms(t);
 
     // Incremental: one deterministic single-file edit, timing update_file
@@ -409,7 +431,7 @@ pub fn run(enforce: bool) -> Result<()> {
     // vexus isn't responsible for how fast the OS/editor writes a file).
     let incr_rel = apply_deterministic_edit(corpus_dir.path(), 0, 1)?;
     let t = Instant::now();
-    let outcome = update_file(&mut store, Some(&embedder), corpus_dir.path(), &incr_rel)
+    let outcome = update_file(&mut store, Some(&*embedder), corpus_dir.path(), &incr_rel)
         .context("incremental update_file timing")?;
     let incremental_ms = elapsed_ms(t);
     ensure!(
@@ -425,7 +447,7 @@ pub fn run(enforce: bool) -> Result<()> {
     }
     let t = Instant::now();
     let recon =
-        reconcile(&mut store, Some(&embedder), corpus_dir.path()).context("reconcile timing")?;
+        reconcile(&mut store, Some(&*embedder), corpus_dir.path()).context("reconcile timing")?;
     let reconcile_100_ms = elapsed_ms(t);
     ensure!(
         recon.updated == RECONCILE_CHANGED_COUNT,
@@ -437,7 +459,7 @@ pub fn run(enforce: bool) -> Result<()> {
     // in an AppState (mirrors corpus.rs's index_into_temp_state) so both
     // paths go through the exact lock/freshness-probe route the MCP server
     // itself uses per call, not a bare Store method call.
-    let embedder_arc: Arc<dyn Embedder> = Arc::new(embedder);
+    let embedder_arc: Arc<dyn Embedder> = Arc::from(embedder);
     let embedder_slot: OnceLock<Option<Arc<dyn Embedder>>> = OnceLock::new();
     let _ = embedder_slot.set(Some(embedder_arc.clone()));
     let state = AppState {
@@ -486,8 +508,16 @@ pub fn run(enforce: bool) -> Result<()> {
         explore_p99_ms,
     };
 
-    print_perf_table(&timings, &budgets);
-    append_history(&bench_root.join("history.jsonl"), timings)?;
+    print_perf_table(&timings, &budgets, real);
+    append_history(&bench_root.join("history.jsonl"), timings, real)?;
+
+    // Budgets are calibrated against the mock embedder, so a --real run
+    // reports its numbers and stops there rather than failing against
+    // thresholds that were never meant for it.
+    if real {
+        println!("\nperf: --real numbers are informational; budgets gate the mock run only");
+        return Ok(());
+    }
 
     let violations = check_budgets(&timings, &budgets);
     if violations.is_empty() {

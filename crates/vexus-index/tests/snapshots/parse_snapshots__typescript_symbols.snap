@@ -2,7 +2,7 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: symbol_lines(&idx)
 ---
-- "module typescript.sample [1-37] arity=None parent=None sig=None"
+- "module typescript.sample [1-58] arity=None parent=None sig=None"
 - "function typescript.sample.fetchUser [6-8] arity=Some(2) parent=Some(0) sig=Some(\"export function fetchUser(id: string, retries: number) {\")"
 - "function typescript.sample.load [10-12] arity=Some(1) parent=Some(0) sig=Some(\"function load(id: string) {\")"
 - "class typescript.sample.Repo [14-18] arity=None parent=Some(0) sig=Some(\"export class Repo {\")"
@@ -12,3 +12,8 @@ expression: symbol_lines(&idx)
 - "function typescript.sample.compact [29-31] arity=Some(1) parent=Some(0) sig=Some(\"const compact = function (xs: number[]) {\")"
 - "function typescript.sample.idGen [33-35] arity=Some(1) parent=Some(0) sig=Some(\"export function* idGen(prefix: string) {\")"
 - "function typescript.sample.fetchUserArrow [37-37] arity=Some(1) parent=Some(0) sig=Some(\"export const fetchUserArrow = (id: string) => load(id);\")"
+- "function typescript.sample.lookup [43-45] arity=Some(1) parent=Some(0) sig=Some(\"registry.lookup = function lookupEntry(id: string) {\")"
+- "function typescript.sample.find [47-47] arity=Some(1) parent=Some(0) sig=Some(\"registry.find = (id: string) => load(id);\")"
+- "function typescript.sample.legacyLoad [49-51] arity=Some(1) parent=Some(0) sig=Some(\"var legacyLoad = function (id: string) {\")"
+- "function typescript.sample.fetch [54-56] arity=Some(1) parent=Some(0) sig=Some(\"fetch: function (id: string) {\")"
+- "function typescript.sample.compactAll [57-57] arity=Some(1) parent=Some(0) sig=Some(\"compactAll: (xs: number[]) => compact(xs),\")"

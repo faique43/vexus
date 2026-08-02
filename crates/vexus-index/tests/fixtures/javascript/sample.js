@@ -28,3 +28,27 @@ class Cart {
     return sumTotals(this.items);
   }
 }
+
+// CommonJS surface: assignment-defined methods must index like declarations.
+const app = {};
+
+app.use = function use(fn) {
+  return renderRow(fn, 1);
+};
+
+app.render = (name) => sumTotals([name]);
+
+Cart.prototype.clear = function () {
+  this.items = [];
+};
+
+var legacyVar = function (n) {
+  return n * 2;
+};
+
+module.exports = {
+  buildCart: function (items) {
+    return new Cart(items);
+  },
+  emptyCart: () => new Cart([]),
+};
