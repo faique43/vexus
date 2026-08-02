@@ -12,7 +12,7 @@ anyhow = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 blake3 = "1"
 tempfile = "3"
-ureq = "2"
+ureq = "3"
 sha2 = "0.10"
 notify = "8"
 dunce = "1"
