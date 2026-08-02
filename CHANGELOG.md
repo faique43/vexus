@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The Claude Code pack's grep nudge no longer needs bash.** hooks.json
+  now runs `vexus hook nudge-grep` (a hidden subcommand reading the hook
+  payload's `session_id` from stdin), so the pack behaves identically on
+  Windows/cmd/PowerShell. `nudge-grep.sh` is deprecated and now just execs
+  the subcommand; it ships for one more release for hooks.json files
+  installed by older versions — re-run
+  `vexus init --agent claude-code --force` to migrate.
 Small repos stop paying big-repo prices. Three retrieval changes, all
 no-ops at Medium scale (≥2,000 chunks — the historical constants):
 
