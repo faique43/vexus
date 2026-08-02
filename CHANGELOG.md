@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **The Claude Code pack's grep nudge no longer needs bash.** hooks.json
+  now runs `vexus hook nudge-grep` (a hidden subcommand reading the hook
+  payload's `session_id` from stdin), so the pack behaves identically on
+  Windows/cmd/PowerShell. `nudge-grep.sh` is deprecated and now just execs
+  the subcommand; it ships for one more release for hooks.json files
+  installed by older versions — re-run
+  `vexus init --agent claude-code --force` to migrate.
+
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 
 Dogfooding on a large TypeScript repo surfaced three defects, all fixed:

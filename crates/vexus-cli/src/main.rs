@@ -65,6 +65,12 @@ enum Cmd {
         force: bool,
         path: Option<PathBuf>,
     },
+    /// Agent-hook helpers invoked by installed steering packs — not for
+    /// interactive use. `vexus hook nudge-grep` is what the Claude Code
+    /// pack's hooks.json runs; it replaced a bash script so the pack works
+    /// identically on Windows/cmd/PowerShell.
+    #[command(hide = true)]
+    Hook { name: String },
 }
 
 fn db_path(root: &Path) -> PathBuf {
@@ -188,6 +194,53 @@ fn register_mcp_server(root: &Path, force: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The one-line JSON payload the nudge hook prints — additionalContext
+/// steering the agent toward the vexus tools instead of grep. Byte-for-byte
+/// what the old nudge-grep.sh emitted.
+const NUDGE_GREP_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"This repo has a vexus code index. For finding/understanding code, the vexus MCP tools are faster and cheaper than grep: `explore` answers how/where questions in one call with verbatim source; `search` finds symbols by meaning. Grep remains right for exact strings, comments, and config values."}}"#;
+
+/// `vexus hook nudge-grep`: nudge once per agent session toward the vexus
+/// tools; never block, never fail. Session identity comes from the hook
+/// payload's `session_id` (Claude Code writes it to stdin), falling back to
+/// the `CLAUDE_SESSION_ID` env var, then to a constant — a lost marker only
+/// means one extra nudge line, never an error. Pure over its inputs so the
+/// once-per-session behavior is unit-testable without real hook plumbing.
+fn hook_nudge_grep(stdin_payload: &str, marker_dir: &Path) -> Option<&'static str> {
+    let session = serde_json::from_str::<serde_json::Value>(stdin_payload)
+        .ok()
+        .and_then(|v| v.get("session_id")?.as_str().map(String::from))
+        .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
+        .unwrap_or_else(|| "session".to_string());
+    let safe: String = session
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let marker = marker_dir.join(format!("vexus-nudge-{safe}"));
+    if marker.exists() {
+        return None;
+    }
+    let _ = std::fs::write(&marker, b"");
+    Some(NUDGE_GREP_JSON)
+}
+
+fn run_hook(name: &str) -> Result<()> {
+    match name {
+        "nudge-grep" => {
+            let mut payload = String::new();
+            use std::io::Read;
+            let _ = std::io::stdin().read_to_string(&mut payload);
+            if let Some(json) = hook_nudge_grep(&payload, &std::env::temp_dir()) {
+                println!("{json}");
+            }
+            Ok(())
+        }
+        // Unknown hook names exit 0 silently: a pack from a newer vexus
+        // running against an older binary must degrade to "no nudge", not
+        // break the agent's tool call.
+        _ => Ok(()),
+    }
 }
 
 fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
@@ -436,6 +489,9 @@ fn main() -> Result<()> {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             init_steering_packs(&agent, &root, force)?;
         }
+        Cmd::Hook { name } => {
+            run_hook(&name)?;
+        }
     }
     Ok(())
 }
@@ -443,6 +499,39 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_nudge_grep_fires_once_per_session_and_stays_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = r#"{"session_id":"abc-123","tool_name":"Grep"}"#;
+
+        let first = hook_nudge_grep(payload, dir.path());
+        let json = first.expect("first call in a session must nudge");
+        let v: serde_json::Value = serde_json::from_str(json).expect("nudge must be valid JSON");
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"], "PreToolUse",
+            "shape Claude Code expects"
+        );
+
+        assert!(
+            hook_nudge_grep(payload, dir.path()).is_none(),
+            "second call in the same session must stay silent"
+        );
+
+        let other = r#"{"session_id":"other-999"}"#;
+        assert!(
+            hook_nudge_grep(other, dir.path()).is_some(),
+            "a different session gets its own nudge"
+        );
+    }
+
+    #[test]
+    fn hook_nudge_grep_tolerates_garbage_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        // No JSON at all: falls back to env/constant session identity and
+        // still nudges rather than erroring.
+        assert!(hook_nudge_grep("", dir.path()).is_some());
+    }
 
     fn parsed(m: &McpMerge) -> serde_json::Value {
         match m {
