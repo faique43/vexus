@@ -10,6 +10,7 @@ fn is_annotation_line(line: &str) -> bool {
         || t.starts_with("/*")
         || t.starts_with('*')
         || t.starts_with('@')
+        || t.starts_with("--") // Lua (and SQL/Haskell-style) comments
 }
 
 /// True if `ancestor` is a strict ancestor of `of` by walking `parent` links.

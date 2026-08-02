@@ -82,6 +82,21 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
                     def_node = Some(cap.node);
                     def_kind = "type";
                 }
+                // Namespace-like containers: Ruby `module`, C++/C#/PHP
+                // `namespace`, Elixir `defmodule`. Members nest under them
+                // for qualnames, but functions inside stay `Function`, not
+                // `Method` (the promotion list below excludes Module).
+                "def.module" => {
+                    def_node = Some(cap.node);
+                    def_kind = "module";
+                }
+                // Methods whose methodness is syntactic rather than
+                // parent-derived: Go's `method_declaration` (top-level, no
+                // enclosing type node), Ruby's `def self.x`.
+                "def.method" => {
+                    def_node = Some(cap.node);
+                    def_kind = "method";
+                }
                 "def.name" => {
                     name = Some(
                         cap.node
@@ -119,6 +134,7 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
                 SymbolKind::Method
             }
             "function" => SymbolKind::Function,
+            "method" => SymbolKind::Method,
             "class" => SymbolKind::Class,
             "struct" => SymbolKind::Struct,
             "enum" => SymbolKind::Enum,
@@ -126,6 +142,7 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
             "interface" => SymbolKind::Interface,
             "const" => SymbolKind::Const,
             "type" => SymbolKind::Type,
+            "module" => SymbolKind::Module,
             _ => SymbolKind::Function,
         };
         let qualname = format!("{}.{}", idx.symbols[parent].qualname, name);

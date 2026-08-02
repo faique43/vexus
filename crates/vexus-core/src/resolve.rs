@@ -11,11 +11,11 @@ struct EdgeRow {
 }
 
 /// Extract the last path segment of a possibly-qualified name, recognizing
-/// `.` (Python/JS-style), `::` (Rust-style), and `/` (relative-path-style)
-/// separators. Picks whichever separator occurs latest in the string, so
-/// mixed names (e.g. `std::collections::HashMap`, `./utils/helper`) resolve
-/// to their true last segment rather than falling back to Python-only `.`
-/// splitting.
+/// `.` (Python/JS-style), `::` (Rust-style), `/` (relative-path-style), and
+/// `\` (PHP-namespace-style) separators. Picks whichever separator occurs
+/// latest in the string, so mixed names (e.g. `std::collections::HashMap`,
+/// `./utils/helper`, `App\Service\Mailer::send`) resolve to their true last
+/// segment rather than falling back to Python-only `.` splitting.
 pub(crate) fn last_segment(name: &str) -> &str {
     let cut = name
         .rfind("::")
@@ -23,6 +23,7 @@ pub(crate) fn last_segment(name: &str) -> &str {
         .into_iter()
         .chain(name.rfind('.').map(|i| i + 1))
         .chain(name.rfind('/').map(|i| i + 1))
+        .chain(name.rfind('\\').map(|i| i + 1))
         .max()
         .unwrap_or(0);
     &name[cut..]
@@ -31,15 +32,18 @@ pub(crate) fn last_segment(name: &str) -> &str {
 /// SQL boolean expression matching `dst_expr` (a `dst_name`-shaped column
 /// reference, e.g. `e.dst_name`) against the already-bound parameter
 /// `param` (e.g. `?1`): either exactly equal, or a qualified suffix using
-/// any of the supported separators (`.` Python/JS, `::` Rust, `/` paths).
-/// Exact-length `substr` comparisons are used instead of `LIKE` so that
-/// `_`/`%` in the target name are never interpreted as wildcards.
+/// any of the supported separators (`.` Python/JS, `::` Rust, `/` paths,
+/// `\` PHP namespaces). Exact-length `substr` comparisons are used instead
+/// of `LIKE` so that `_`/`%` in the target name are never interpreted as
+/// wildcards. (SQLite single-quoted literals treat `\` literally — no
+/// escaping needed.)
 pub(crate) fn suffix_match_sql(dst_expr: &str, param: &str) -> String {
     format!(
         "({dst_expr} = {param}
           OR substr({dst_expr}, -length({param}) - 1) = '.' || {param}
           OR substr({dst_expr}, -length({param}) - 2) = '::' || {param}
-          OR substr({dst_expr}, -length({param}) - 1) = '/' || {param})"
+          OR substr({dst_expr}, -length({param}) - 1) = '/' || {param}
+          OR substr({dst_expr}, -length({param}) - 1) = '\\' || {param})"
     )
 }
 
@@ -416,6 +420,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(q.as_deref(), Some("utils.helper"));
+    }
+
+    #[test]
+    fn php_backslash_namespace_resolves_to_last_segment() {
+        // `App\Service\Mailer::send`-style names: `\` separates namespace
+        // segments; a trailing `::method` still wins as the latest separator.
+        assert_eq!(super::last_segment(r"App\Service\Mailer"), "Mailer");
+        assert_eq!(super::last_segment(r"App\Service\Mailer::send"), "send");
+        assert_eq!(super::last_segment(r"\Globals"), "Globals");
+
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "app.caller", SymbolKind::Function, None)],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Calls,
+                dst_name: r"App\Service\mailer_send".into(),
+                dst_arity: None,
+            }],
+            chunks: vec![],
+        };
+        let defs = FileIndex {
+            symbols: vec![sym(
+                "mailer_send",
+                "mailer.mailer_send",
+                SymbolKind::Function,
+                None,
+            )],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("app.php", caller), ("mailer.php", defs)]);
+        let n = store.resolve_all_edges().unwrap();
+        assert_eq!(n, 1);
+
+        let q: Option<String> = store
+            .conn
+            .query_row(
+                r"SELECT s.qualname FROM edges e JOIN symbols s ON e.dst_id = s.id
+                 WHERE e.dst_name = 'App\Service\mailer_send'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(q.as_deref(), Some("mailer.mailer_send"));
+    }
+
+    #[test]
+    fn resolve_edges_for_names_matches_backslash_suffix() {
+        // Incremental re-resolution must recognize `\name` suffixes too.
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "app.caller", SymbolKind::Function, None)],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Imports,
+                dst_name: r"App\Util\Slug".into(),
+                dst_arity: None,
+            }],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("app.php", caller)]);
+        store.resolve_all_edges().unwrap(); // starts unresolved
+
+        let late = FileIndex {
+            symbols: vec![sym("Slug", "util.Slug", SymbolKind::Class, None)],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("util.php", "python", &[7u8; 32], &late)
+            .unwrap();
+        let n = store.resolve_edges_for_names(&["Slug".into()]).unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
