@@ -101,12 +101,13 @@ parser code:
   `std::fs::File::try_lock` (LockFileEx there), CI runs the full suite on
   `windows-latest`, and releases ship `.zip` archives installed via
   `install.ps1`.
-- **Intel macOS:** unsupported. The ONNX Runtime build the embedding backend
-  pulls has no `x86_64-apple-darwin` target, so it fails at build time on any
-  runner, and `cargo install` fails the same way. Supporting it means vendoring
-  a runtime or switching backends.
-
-The Intel macOS and old-glibc gaps are open for contribution if you want them.
+- **Intel macOS, glibc < 2.39, musl:** served by the *structural-only*
+  build (`cargo build -p vexus-cli --no-default-features`) — the ONNX
+  runtime is compiled out, so no semantic search, but keyword+graph search
+  work fully. `install.sh` detects these hosts and installs the
+  `-structural` artifact; CI keeps the shape compiling (`structural` job).
+  Full semantic support there still means vendoring an ONNX Runtime build
+  or switching backends — open for contribution.
 
 ## Commits and PRs
 
