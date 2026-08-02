@@ -1,0 +1,10 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"java/Sample.java\"))"
+---
+- imports java.Sample -> java.util.List arity=None
+- calls java.Sample.Order.lineCount -> size arity=Some(0)
+- calls java.Sample.Order.summary -> lineCount arity=Some(0)
+- calls java.Sample.Order.summary -> Description arity=Some(1)
+- calls java.Sample.Order.summary -> render arity=Some(0)
+- calls java.Sample.Order.summary -> valueOf arity=Some(1)

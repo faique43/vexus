@@ -113,6 +113,66 @@ fn rust_chunks() {
     insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("rust/sample.rs")));
 }
 
+#[test]
+fn javascript_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("javascript/sample.js")));
+}
+
+#[test]
+fn javascript_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("javascript/sample.js")));
+}
+
+#[test]
+fn javascript_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("javascript/sample.js")));
+}
+
+#[test]
+fn go_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("go/sample.go")));
+}
+
+#[test]
+fn go_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("go/sample.go")));
+}
+
+#[test]
+fn go_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("go/sample.go")));
+}
+
+#[test]
+fn java_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("java/Sample.java")));
+}
+
+#[test]
+fn java_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("java/Sample.java")));
+}
+
+#[test]
+fn java_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("java/Sample.java")));
+}
+
+#[test]
+fn c_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("c/sample.c")));
+}
+
+#[test]
+fn c_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("c/sample.c")));
+}
+
+#[test]
+fn c_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("c/sample.c")));
+}
+
 /// Field report: `export const readDataStream = async function* <T>(...)`
 /// produced no symbol at all — `callers`/`callees`/`impact` answered "no
 /// symbol found" for it while arrow consts worked. Every const-assigned

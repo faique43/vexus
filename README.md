@@ -291,8 +291,8 @@ vexus serve    MCP over stdio + debounced file watcher + startup reconcile
 - **Local, always.** The embedding model runs on CPU on your machine. No code
   leaves it. Zero agent tokens spent on indexing.
 
-Languages: **Python, TypeScript/TSX, Rust**. Adding one is a grammar, a query
-file, and a registry entry — no parser code.
+Languages: **Python, TypeScript/TSX, JavaScript/JSX, Rust, Go, Java, C**.
+Adding one is a grammar, a query file, and a registry entry — no parser code.
 
 ## Limitations
 

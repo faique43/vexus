@@ -44,6 +44,39 @@ static LANGS: &[Lang] = &[
         symbols_scm: include_str!("../queries/rust.scm"),
         edges_scm: include_str!("../queries/rust_edges.scm"),
     },
+    // Plain JS gets its own grammar rather than riding LANGUAGE_TSX: the TS
+    // grammar diverges on a few legacy JS constructs and Flow-annotated
+    // files, and JSX needs the JS grammar's own JSX support anyway.
+    Lang {
+        name: "javascript",
+        extensions: &["js", "jsx", "mjs", "cjs"],
+        grammar: || tree_sitter_javascript::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/javascript.scm"),
+        edges_scm: include_str!("../queries/javascript_edges.scm"),
+    },
+    Lang {
+        name: "go",
+        extensions: &["go"],
+        grammar: || tree_sitter_go::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/go.scm"),
+        edges_scm: include_str!("../queries/go_edges.scm"),
+    },
+    Lang {
+        name: "java",
+        extensions: &["java"],
+        grammar: || tree_sitter_java::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/java.scm"),
+        edges_scm: include_str!("../queries/java_edges.scm"),
+    },
+    // `.h` maps to C for now; if that misparses a C++-heavy codebase's
+    // headers, the graceful degradation path (module-only symbol) applies.
+    Lang {
+        name: "c",
+        extensions: &["c", "h"],
+        grammar: || tree_sitter_c::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/c.scm"),
+        edges_scm: include_str!("../queries/c_edges.scm"),
+    },
 ];
 
 pub fn for_path(path: &Path) -> Option<&'static Lang> {

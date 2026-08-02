@@ -1,0 +1,11 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"c/sample.c\"))"
+---
+- "module c.sample [1-30] arity=None parent=None sig=None"
+- "type c.sample.RingBuffer [4-4] arity=None parent=Some(0) sig=Some(\"typedef struct RingBuffer RingBuffer;\")"
+- "struct c.sample.RingBuffer [7-11] arity=None parent=Some(0) sig=Some(\"struct RingBuffer {\")"
+- "enum c.sample.BufferState [13-16] arity=None parent=Some(0) sig=Some(\"enum BufferState {\")"
+- "function c.sample.rb_push [18-18] arity=Some(2) parent=Some(0) sig=Some(\"int rb_push(RingBuffer *rb, int value);\")"
+- "function c.sample.rb_wrap [20-22] arity=Some(2) parent=Some(0) sig=Some(\"static int rb_wrap(int i, int len) {\")"
+- "function c.sample.rb_push [24-30] arity=Some(2) parent=Some(0) sig=Some(\"int rb_push(RingBuffer *rb, int value) {\")"

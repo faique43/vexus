@@ -229,3 +229,22 @@
     service.src.services.pricing.Discount.apply — the abstract trait
     method signature, which has no executable body at all, arguably a
     worse outcome than picking either concrete impl.
+
+# --- wave-1 languages (Go, JS, Java, C). Each pair read back from a real
+# `vexus index` run (all resolve at name_arity confidence). ---------------
+
+- caller: worker.inventory.RestockReport
+  callee: worker.inventory.needsRestock
+  expected: resolved
+
+- caller: admin.report.renderDailyReport
+  callee: admin.report.currencyCell
+  expected: resolved
+
+- caller: android.OrderTracker.OrderTracker.advanceTo
+  callee: android.OrderTracker.OrderTracker.stageLabel
+  expected: resolved
+
+- caller: native.checksum.order_checksum
+  callee: native.checksum.fletcher_step
+  expected: resolved

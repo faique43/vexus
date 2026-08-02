@@ -2,13 +2,13 @@
   "mode": "mock",
   "per_corpus": {
     "polyglot": {
-      "recall@5": 0.2308,
-      "recall@10": 0.4231,
-      "mrr": 0.1079,
-      "ndcg@10": 0.0913,
-      "answer_in_bundle": 0.75,
-      "edge_precision": 0.8837,
-      "edge_recall": 0.9048
+      "recall@5": 0.2353,
+      "recall@10": 0.3529,
+      "mrr": 0.084,
+      "ndcg@10": 0.0764,
+      "answer_in_bundle": 0.8,
+      "edge_precision": 0.8936,
+      "edge_recall": 0.913
     },
     "pyapp": {
       "recall@5": 0.3333,
@@ -21,12 +21,12 @@
     }
   },
   "overall": {
-    "recall@5": 0.2857,
-    "recall@10": 0.375,
-    "mrr": 0.1602,
-    "ndcg@10": 0.1518,
-    "answer_in_bundle": 0.7222,
-    "edge_precision": 0.8846,
-    "edge_recall": 0.9293
+    "recall@5": 0.2813,
+    "recall@10": 0.3438,
+    "mrr": 0.141,
+    "ndcg@10": 0.125,
+    "answer_in_bundle": 0.75,
+    "edge_precision": 0.8889,
+    "edge_recall": 0.932
   }
 }

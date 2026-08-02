@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Four new languages: JavaScript/JSX (`.js`/`.jsx`/`.mjs`/`.cjs`), Go,
+  Java, and C (`.c`/`.h`)** — each is a grammar dependency, two `.scm`
+  query files, and a registry entry, no parser code. Go receiver methods
+  index as methods with receiver-free arity; Java constructors/records and
+  C prototypes/typedefs are captured; plain JS gets its own grammar rather
+  than riding the TypeScript one (legacy JS and Flow files diverge).
+  Wave-1 files joined the polyglot eval corpus with graded queries and
+  labeled edges (all four languages' call chains resolve at name-arity
+  confidence).
+
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 
 Dogfooding on a large TypeScript repo surfaced three defects, all fixed:

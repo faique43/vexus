@@ -1,0 +1,11 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"c/sample.c\"))"
+---
+- "sym=Some(0) [1-2] tokens~9 :: #include <stdio.h>⏎#include \"buffer.h\"⏎"
+- "sym=Some(1) [4-4] tokens~9 :: typedef struct RingBuffer RingBuffer;⏎"
+- "sym=Some(2) [6-11] tokens~13 :: /* One fixed-size ring buffer. */⏎struct RingBuffer {⏎"
+- "sym=Some(3) [13-16] tokens~4 :: enum BufferState {⏎"
+- "sym=Some(4) [18-18] tokens~10 :: int rb_push(RingBuffer *rb, int value);⏎"
+- "sym=Some(5) [20-22] tokens~14 :: static int rb_wrap(int i, int len) {⏎    return i % len;⏎}⏎"
+- "sym=Some(6) [24-30] tokens~48 :: int rb_push(RingBuffer *rb, int value) {⏎    int slot = rb_wrap(rb->head, rb->le"
