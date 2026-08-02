@@ -14,6 +14,16 @@
   index — the run that also pays the one-time model download — was the
   most silent one. First passes (nothing embedded yet) now always print;
   the watcher's steady-state updates stay silent.
+- **Real cross-platform writer locking.** The advisory writer lock on
+  `.vexus/lock` now uses `std::fs::File::try_lock` — flock(2) on Unix,
+  LockFileEx on Windows — replacing the raw `libc::flock` call and the
+  non-unix stub that handed every process a writer lock. Mutual exclusion
+  now holds on every platform, and the mutual-exclusion test runs
+  unconditionally. `libc` is no longer a dependency.
+- CI runs the full test suite on `windows-latest` alongside Ubuntu and
+  macOS. A `.gitattributes` forces LF checkouts so snapshot tests and
+  blake3 file hashes are byte-identical across platforms. (Windows release
+  artifacts and an installer land separately.)
 
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 

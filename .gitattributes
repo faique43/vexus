@@ -1,0 +1,4 @@
+# Checkout must be byte-identical on every platform: insta snapshots hash
+# fixture content, and blake3 file hashes feed the incremental indexer, so
+# a CRLF checkout on Windows would shift both. Force LF everywhere.
+* text=auto eol=lf
