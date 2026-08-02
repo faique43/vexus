@@ -7,7 +7,7 @@ use vexus_core::model::estimate_tokens;
 use vexus_watch::pipeline;
 
 use crate::state::{freshness_header, AppState};
-use crate::tools::{apply_header, clamp_budget, embed_query};
+use crate::tools::{apply_header, clamp_budget, embed_query, knn_floor};
 
 const DEFAULT_LIMIT: u32 = 10;
 const MAX_LIMIT: u32 = 100;
@@ -30,16 +30,18 @@ pub fn search_text(
     // Embed before locking: a real embedder's inference call must not hold
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, query);
+    let floor = knn_floor(state);
 
     let store = match state.lock_store_fresh() {
         Ok(s) => s,
         Err(msg) => return msg,
     };
     let fresh_header = freshness_header(&store);
-    let hits = match store.search_hybrid(query, query_vec.as_deref(), limit) {
-        Ok(hits) => hits,
-        Err(e) => return apply_header(fresh_header, format!("search error: {e:#}")),
-    };
+    let (hits, outcome) =
+        match store.search_hybrid_scored(query, query_vec.as_deref(), floor, limit) {
+            Ok(hits) => hits,
+            Err(e) => return apply_header(fresh_header, format!("search error: {e:#}")),
+        };
     drop(store);
 
     if hits.is_empty() {
@@ -52,6 +54,13 @@ pub fn search_text(
     }
 
     let mut out = String::new();
+    if outcome == vexus_core::search::SearchOutcome::WeakVectorOnly {
+        out.push_str(
+            "weak match — no keyword hits and nothing semantically close; \
+             these are only the nearest neighbors. For exact strings, grep is \
+             the better tool here.\n",
+        );
+    }
     let mut used_tokens = 0u32;
     for (i, hit) in hits.iter().enumerate() {
         let qual = hit.qualname.as_deref().unwrap_or("(preamble)");
