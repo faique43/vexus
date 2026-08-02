@@ -52,6 +52,19 @@ no-ops at Medium scale (≥2,000 chunks — the historical constants):
   unconditionally. `libc` is no longer a dependency.
 - CI runs the full test suite on `windows-latest` alongside Ubuntu and
   macOS. A `.gitattributes` forces LF checkouts so snapshot tests and
+  blake3 file hashes are byte-identical across platforms.
+- **Windows releases.** The release matrix builds `x86_64-pc-windows-msvc`
+  and `aarch64-pc-windows-msvc` (both have prebuilt ONNX runtimes),
+  packaged as `.zip` with `vexus.exe`. `install.ps1` installs to
+  `%LOCALAPPDATA%\vexus\bin` with mandatory SHA256 verification and adds
+  it to the user PATH: `irm .../install.ps1 | iex`.
+- **Every release artifact is now smoke-tested** before packaging: the
+  built binary runs `--version`, indexes a 3-file fixture and must report
+  its symbols — catching binaries that link but crash at load, on every
+  target including the ONNX-static ones.
+- The watcher canonicalizes the root via `dunce`, so Windows
+  ReadDirectoryChangesW events (plain `C:\...`) match the watched root
+  instead of failing `strip_prefix` against a `\\?\`-prefixed path.
   blake3 file hashes are byte-identical across platforms. (Windows release
   artifacts and an installer land separately.)
 
