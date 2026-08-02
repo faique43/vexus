@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"php/sample.php\"))"
+---
+- "imports php.sample -> Shop\\Util\\Slug arity=None"
+- calls php.sample.format_cents -> strval arity=Some(1)
+- calls php.sample.Invoice.total -> subtotal arity=Some(0)
+- calls php.sample.Invoice.subtotal -> array_sum arity=Some(1)

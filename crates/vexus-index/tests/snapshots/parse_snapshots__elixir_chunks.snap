@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"elixir/sample.ex\"))"
+---
+- "sym=Some(2) [7-9] tokens~14 ::   def total(items, tax) do⏎    subtotal(items) + tax⏎  end⏎"
+- "sym=Some(3) [11-13] tokens~13 ::   defp subtotal(items) do⏎    Enum.sum(items)⏎  end⏎"
+- "sym=Some(4) [15-17] tokens~7 ::   def empty do⏎    []⏎  end⏎"

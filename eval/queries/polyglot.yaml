@@ -313,3 +313,52 @@
   graded:
     pos.receipt.pos.render_receipt: 3
     pos.receipt.pos.money_cell: 2
+
+# --- wave-3 languages (Ruby, PHP, Scala, Elixir). Qualnames read back from
+# a real `vexus index` run (VEXUS_EMBEDDER=none). ------------------------
+
+- q: "where is a gift card applied to a charge"
+  expect:
+    - store.gift_cards.Store.GiftCard.apply_to
+  graded:
+    store.gift_cards.Store.GiftCard.apply_to: 3
+    store.gift_cards.Store.GiftCard.deduct: 2
+
+- q: "where is the legacy coupon discount computed"
+  expect:
+    - legacy.coupons.coupon_discount_cents
+  graded:
+    legacy.coupons.coupon_discount_cents: 3
+    legacy.coupons.coupon_is_active: 2
+
+- q: "where is the checkout funnel conversion calculated"
+  expect:
+    - analytics.Funnel.Funnel.conversion
+  graded:
+    analytics.Funnel.Funnel.conversion: 3
+    analytics.Funnel.Funnel.stepRate: 2
+
+- q: "where are order notifications routed to a channel"
+  expect:
+    - notifier.dispatcher.Shop.Notifier.Dispatcher.dispatch
+  graded:
+    notifier.dispatcher.Shop.Notifier.Dispatcher.dispatch: 3
+    notifier.dispatcher.Shop.Notifier.Dispatcher.deliver: 2
+
+- q: "how does gift card redemption work"
+  tool: explore
+  expect:
+    - store.gift_cards.Store.GiftCard.apply_to
+    - store.gift_cards.Store.GiftCard.deduct
+  graded:
+    store.gift_cards.Store.GiftCard.apply_to: 3
+    store.gift_cards.Store.GiftCard.deduct: 2
+
+- q: "how does a coupon code get validated and turned into a discount"
+  tool: explore
+  expect:
+    - legacy.coupons.coupon_discount_cents
+    - legacy.coupons.coupon_is_active
+  graded:
+    legacy.coupons.coupon_discount_cents: 3
+    legacy.coupons.coupon_is_active: 2

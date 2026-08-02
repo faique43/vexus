@@ -1,0 +1,14 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"scala/sample.scala\"))"
+---
+- "module scala.sample [1-23] arity=None parent=None sig=None"
+- "class scala.sample.Registry [5-7] arity=None parent=Some(0) sig=Some(\"object Registry {\")"
+- "method scala.sample.Registry.lookup [6-6] arity=Some(1) parent=Some(1) sig=Some(\"def lookup(id: String): Int = id.length\")"
+- "class scala.sample.Cart [10-13] arity=None parent=Some(0) sig=Some(\"class Cart(items: List[Int]) {\")"
+- "method scala.sample.Cart.total [11-11] arity=Some(1) parent=Some(3) sig=Some(\"def total(tax: Int): Int = subtotal() + tax\")"
+- "method scala.sample.Cart.subtotal [12-12] arity=Some(0) parent=Some(3) sig=Some(\"private def subtotal(): Int = items.sum\")"
+- "trait scala.sample.Renderer [15-17] arity=None parent=Some(0) sig=Some(\"trait Renderer {\")"
+- "method scala.sample.Renderer.render [16-16] arity=Some(0) parent=Some(6) sig=Some(\"def render(): String\")"
+- "class scala.sample.Line [19-19] arity=None parent=Some(0) sig=Some(\"case class Line(qty: Int)\")"
+- "enum scala.sample.Color [21-23] arity=None parent=Some(0) sig=Some(\"enum Color {\")"
