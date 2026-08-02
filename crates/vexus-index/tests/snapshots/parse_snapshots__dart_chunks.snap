@@ -1,0 +1,15 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"dart/sample.dart\"))"
+---
+- "sym=Some(0) [1-1] tokens~9 :: import 'package:shop/pricing.dart';⏎"
+- "sym=Some(1) [3-14] tokens~28 :: class Cart {⏎    Cart(this.items);⏎    int total(int tax) {⏎    int subtotal() ="
+- "sym=Some(2) [6-6] tokens~5 ::   Cart(this.items);⏎"
+- "sym=Some(3) [8-11] tokens~19 ::   // Total in cents.⏎  int total(int tax) {⏎    return subtotal() + tax;⏎  }⏎"
+- "sym=Some(4) [13-13] tokens~13 ::   int subtotal() => items.fold(0, (a, b) => a + b);⏎"
+- "sym=Some(5) [16-18] tokens~11 :: mixin Loggable {⏎    void log(String msg) {}⏎"
+- "sym=Some(6) [17-17] tokens~6 ::   void log(String msg) {}⏎"
+- "sym=Some(7) [20-20] tokens~6 :: enum Color { red, green }⏎"
+- "sym=Some(8) [22-24] tokens~14 :: extension CartX on Cart {⏎    String describe() => 'cart';⏎"
+- "sym=Some(9) [23-23] tokens~7 ::   String describe() => 'cart';⏎"
+- "sym=Some(10) [26-28] tokens~17 :: int checkoutTotal(Cart cart, int tax) {⏎  return cart.total(tax);⏎}⏎"

@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"bash/sample.sh\"))"
+---
+- "sym=Some(0) [1-2] tokens~9 :: #!/usr/bin/env bash⏎set -euo pipefail⏎"
+- "sym=Some(0) [14-14] tokens~1 :: deploy⏎"
+- "sym=Some(1) [4-7] tokens~16 :: # Prints one formatted line.⏎log_line() {⏎  printf '%s\\n' \"$1\"⏎}⏎"
+- "sym=Some(2) [9-12] tokens~16 :: function deploy() {⏎  log_line \"deploying\"⏎  rsync -a src/ dest/⏎}⏎"

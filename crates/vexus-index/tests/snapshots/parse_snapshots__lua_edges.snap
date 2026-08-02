@@ -1,0 +1,9 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"lua/sample.lua\"))"
+---
+- imports lua.sample -> json arity=None
+- calls lua.sample.format_cents -> tostring arity=Some(1)
+- calls lua.sample.receipt_line -> format_cents arity=Some(1)
+- calls lua.sample.describe -> receipt_line arity=Some(2)
+- calls lua.sample.standalone -> clamp arity=Some(2)
