@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Wave 2 languages: C++ (`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`), C#, Kotlin,
+  Swift.** C++ namespaces index as modules and out-of-class
+  `Type::method` definitions keep their qualified name (the resolver's
+  `::` suffix matching finds them); C# covers both namespace forms,
+  records, and constructors (properties deliberately skipped —
+  small-graph noise); Kotlin objects/interfaces/enum classes index as
+  classes with `const val` captured; Swift extensions nest their members
+  under the extended type's name, and Swift symbols carry no arity (the
+  grammar has no parameter-list node) so their edges resolve name-only.
 - **Four new languages: JavaScript/JSX (`.js`/`.jsx`/`.mjs`/`.cjs`), Go,
   Java, and C (`.c`/`.h`)** — each is a grammar dependency, two `.scm`
   query files, and a registry entry, no parser code. Go receiver methods

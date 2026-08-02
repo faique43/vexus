@@ -1,0 +1,15 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"kotlin/sample.kt\"))"
+---
+- "module kotlin.sample [1-27] arity=None parent=None sig=None"
+- "const kotlin.sample.MAX_ITEMS [5-5] arity=None parent=Some(0) sig=Some(\"const val MAX_ITEMS = 100\")"
+- "class kotlin.sample.Cart [8-10] arity=None parent=Some(0) sig=Some(\"class Cart(val items: List<Int>) {\")"
+- "method kotlin.sample.Cart.total [9-9] arity=Some(1) parent=Some(2) sig=Some(\"fun total(tax: Int): Int = items.sum() + tax\")"
+- "class kotlin.sample.Registry [12-14] arity=None parent=Some(0) sig=Some(\"object Registry {\")"
+- "method kotlin.sample.Registry.lookup [13-13] arity=Some(1) parent=Some(4) sig=Some(\"fun lookup(id: String): Int = id.length\")"
+- "class kotlin.sample.Renderer [16-18] arity=None parent=Some(0) sig=Some(\"interface Renderer {\")"
+- "method kotlin.sample.Renderer.render [17-17] arity=Some(0) parent=Some(6) sig=Some(\"fun render(): String\")"
+- "class kotlin.sample.Color [20-20] arity=None parent=Some(0) sig=Some(\"enum class Color { RED, GREEN }\")"
+- "class kotlin.sample.Line [22-22] arity=None parent=Some(0) sig=Some(\"data class Line(val qty: Int)\")"
+- "function kotlin.sample.describe [24-27] arity=Some(2) parent=Some(0) sig=Some(\"fun describe(cart: Cart, verbose: Boolean): String {\")"

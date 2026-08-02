@@ -1,0 +1,15 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"cpp/sample.cpp\"))"
+---
+- "sym=Some(0) [1-2] tokens~9 :: #include \"cart.hpp\"⏎#include <vector>⏎"
+- "sym=Some(2) [6-14] tokens~31 :: // One shopping cart.⏎class Cart {⏎    int total(int tax) { return subtotal() + "
+- "sym=Some(3) [9-9] tokens~12 ::   int total(int tax) { return subtotal() + tax; }⏎"
+- "sym=Some(4) [12-12] tokens~9 ::   int subtotal() { return items_; }⏎"
+- "sym=Some(5) [16-19] tokens~3 :: struct Point {⏎"
+- "sym=Some(6) [21-21] tokens~8 :: enum class Color { Red, Green };⏎"
+- "sym=Some(7) [24-26] tokens~18 :: T clamp_min(T value, T floor) {⏎  return value < floor ? floor : value;⏎}⏎"
+- "sym=Some(8) [28-28] tokens~4 :: int helper(int v);⏎"
+- "sym=Some(9) [32-32] tokens~14 :: int shop::helper(int v) { return shop::clamp_min(v, 0); }⏎"
+- "sym=Some(10) [34-34] tokens~4 :: typedef int Cents;⏎"
+- "sym=Some(11) [35-35] tokens~4 :: using Money = int;⏎"

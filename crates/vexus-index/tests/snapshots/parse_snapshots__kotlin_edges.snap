@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"kotlin/sample.kt\"))"
+---
+- imports kotlin.sample -> kotlin.math.max arity=None
+- calls kotlin.sample.Cart.total -> sum arity=Some(0)
+- calls kotlin.sample.describe -> max arity=Some(2)
+- calls kotlin.sample.describe -> lookup arity=Some(1)

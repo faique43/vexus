@@ -1,0 +1,16 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"kotlin/sample.kt\"))"
+---
+- "sym=Some(0) [1-1] tokens~3 :: package shop⏎"
+- "sym=Some(0) [3-3] tokens~5 :: import kotlin.math.max⏎"
+- "sym=Some(1) [5-5] tokens~6 :: const val MAX_ITEMS = 100⏎"
+- "sym=Some(2) [7-10] tokens~26 :: // One shopping cart.⏎class Cart(val items: List<Int>) {⏎    fun total(tax: Int)"
+- "sym=Some(3) [9-9] tokens~12 ::     fun total(tax: Int): Int = items.sum() + tax⏎"
+- "sym=Some(4) [12-14] tokens~15 :: object Registry {⏎    fun lookup(id: String): Int = id.length⏎"
+- "sym=Some(5) [13-13] tokens~11 ::     fun lookup(id: String): Int = id.length⏎"
+- "sym=Some(6) [16-18] tokens~11 :: interface Renderer {⏎    fun render(): String⏎"
+- "sym=Some(7) [17-17] tokens~6 ::     fun render(): String⏎"
+- "sym=Some(8) [20-20] tokens~8 :: enum class Color { RED, GREEN }⏎"
+- "sym=Some(9) [22-22] tokens~7 :: data class Line(val qty: Int)⏎"
+- "sym=Some(10) [24-27] tokens~40 :: fun describe(cart: Cart, verbose: Boolean): String {⏎    val n = max(cart.items."

@@ -1,0 +1,14 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "chunk_lines(&parse_fixture(\"c_sharp/Sample.cs\"))"
+---
+- "sym=Some(0) [1-2] tokens~12 :: using System;⏎using System.Collections.Generic;⏎"
+- "sym=Some(2) [6-19] tokens~32 :: public class Invoice {⏎    public Invoice(List<int> lines) {⏎    public int Tota"
+- "sym=Some(3) [9-11] tokens~18 ::     public Invoice(List<int> lines) {⏎        this.lines = lines;⏎    }⏎"
+- "sym=Some(4) [13-16] tokens~29 ::     // Total in cents, tax included.⏎    public int Total(int taxCents) {⏎      "
+- "sym=Some(5) [18-18] tokens~8 ::     static int Subtotal() => 41;⏎"
+- "sym=Some(6) [21-23] tokens~13 :: public interface IRenderable {⏎    string Render();⏎"
+- "sym=Some(7) [22-22] tokens~5 ::     string Render();⏎"
+- "sym=Some(8) [25-28] tokens~5 :: public enum Status {⏎"
+- "sym=Some(9) [30-30] tokens~12 :: public record LineItem(int Qty, int UnitCents);⏎"
+- "sym=Some(10) [32-35] tokens~5 :: public struct Pair {⏎"

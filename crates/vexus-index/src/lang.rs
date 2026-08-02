@@ -77,6 +77,34 @@ static LANGS: &[Lang] = &[
         symbols_scm: include_str!("../queries/c.scm"),
         edges_scm: include_str!("../queries/c_edges.scm"),
     },
+    Lang {
+        name: "cpp",
+        extensions: &["cpp", "cc", "cxx", "hpp", "hh"],
+        grammar: || tree_sitter_cpp::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/cpp.scm"),
+        edges_scm: include_str!("../queries/cpp_edges.scm"),
+    },
+    Lang {
+        name: "c_sharp",
+        extensions: &["cs"],
+        grammar: || tree_sitter_c_sharp::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/c_sharp.scm"),
+        edges_scm: include_str!("../queries/c_sharp_edges.scm"),
+    },
+    Lang {
+        name: "kotlin",
+        extensions: &["kt", "kts"],
+        grammar: || tree_sitter_kotlin_ng::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/kotlin.scm"),
+        edges_scm: include_str!("../queries/kotlin_edges.scm"),
+    },
+    Lang {
+        name: "swift",
+        extensions: &["swift"],
+        grammar: || tree_sitter_swift::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/swift.scm"),
+        edges_scm: include_str!("../queries/swift_edges.scm"),
+    },
 ];
 
 pub fn for_path(path: &Path) -> Option<&'static Lang> {

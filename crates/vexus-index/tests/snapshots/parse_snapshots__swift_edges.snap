@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"swift/sample.swift\"))"
+---
+- imports swift.sample -> Foundation arity=None
+- calls swift.sample.Cart.total -> subtotal arity=Some(0)
+- calls swift.sample.Cart.subtotal -> reduce arity=Some(2)
+- calls swift.sample.fetchTotal -> total arity=Some(1)

@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"cpp/sample.cpp\"))"
+---
+- "imports cpp.sample -> \"cart.hpp\" arity=None"
+- imports cpp.sample -> <vector> arity=None
+- calls cpp.sample.shop.Cart.total -> subtotal arity=Some(0)
+- "calls cpp.sample.shop::helper -> clamp_min arity=Some(2)"

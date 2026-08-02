@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"c_sharp/Sample.cs\"))"
+---
+- imports c_sharp.Sample -> System arity=None
+- imports c_sharp.Sample -> System.Collections.Generic arity=None
+- calls c_sharp.Sample.Invoice.Total -> Subtotal arity=Some(0)
