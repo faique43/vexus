@@ -62,17 +62,17 @@ case "$os-$arch" in
       x86_64) target="x86_64-unknown-linux-gnu" ;;
       *) target="aarch64-unknown-linux-gnu" ;;
     esac
-    # musl (Alpine): uname says Linux/x86_64, but the glibc binary won't
-    # even exec. Detect via the dynamic loader.
+    # musl (Alpine): uname says Linux/x86_64, but a glibc binary won't even
+    # exec, so this has to be caught before anything is downloaded. Detect
+    # via the dynamic loader.
     if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ] ||
       ldd --version 2>&1 | grep -qi musl; then
-      if [ "$arch" = "x86_64" ]; then
-        target="x86_64-unknown-linux-musl"
-        variant="-structural"
-        structural_note "this is a musl system (Alpine?); the full build needs glibc"
-      else
-        die "no prebuilt binary for musl on $arch — build from source: cargo install --git https://github.com/$repo vexus-cli --no-default-features"
-      fi
+      # Not a packaging gap, and not fixable by dropping the embedding
+      # runtime: sqlite-vec's C source uses the BSD-only u_int8_t /
+      # u_int16_t / u_int64_t typedefs, which glibc supplies and musl does
+      # not, so it fails to compile against musl even with
+      # --no-default-features.
+      die "musl systems (Alpine) are not supported — vexus's vector-search dependency does not build against musl. A glibc container (e.g. the -slim Debian images) is the workaround."
     else
       # The full build's embedded ONNX Runtime needs glibc 2.39+. On older
       # distros (Ubuntu 22.04, Debian 12, RHEL 9) it fails at exec with

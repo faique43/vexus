@@ -19,16 +19,19 @@ files it cost more tokens than grep. All three are fixed.
   verification. CI runs the full suite on `windows-latest`, and a
   `.gitattributes` forces LF checkouts so snapshots and blake3 file hashes
   match across platforms.
-- **Intel macOS, glibc < 2.39, and musl/Alpine are no longer stranded.** A
-  default `onnx` cargo feature compiles the embedding runtime out under
+- **Intel macOS and glibc < 2.39 are no longer stranded.** A default
+  `onnx` cargo feature compiles the embedding runtime out under
   `--no-default-features`, which is what frees those targets from ort's
   prebuilt-binary matrix. Releases ship `-structural` artifacts for
-  `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` (glibc 2.35) and
-  `x86_64-unknown-linux-musl` (fully static): keyword and call-graph search
-  work fully, semantic search is off, and both the startup line and
-  `status` say so. `install.sh` detects musl and pre-2.39 glibc — it used
-  to install a binary that failed at exec — and Intel macOS is no longer a
-  hard error. A CI job keeps the no-ONNX build compiling.
+  `x86_64-apple-darwin` and `x86_64-unknown-linux-gnu` (glibc 2.35):
+  keyword and call-graph search work fully, semantic search is off, and
+  both the startup line and `status` say so. `install.sh` detects pre-2.39
+  glibc — it used to install a binary that failed at exec — and Intel
+  macOS is no longer a hard error. A CI job keeps the no-ONNX build
+  compiling. **musl/Alpine remains unsupported**: compiling ort out is not
+  enough there, because `sqlite-vec`'s C source needs the BSD-only
+  `u_int8_t` family of typedefs that musl doesn't provide. `install.sh`
+  now says so instead of downloading an artifact that doesn't exist.
 - **Every release artifact is smoke-tested before packaging**: the built
   binary runs `--version`, indexes a three-file fixture, and must report
   its symbols. Nothing previously executed a release binary, so one that

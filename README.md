@@ -160,9 +160,10 @@ the binary.
 Hosts the full build can't run on get a **structural-only** build instead —
 the embedding runtime is compiled out, so semantic search is off but keyword
 and call-graph search work fully. `install.sh` detects these cases itself
-and says so: Intel macOS, Linux with glibc older than 2.39 (Ubuntu 22.04,
-Debian 12, RHEL 9), and musl/Alpine (x64). `vexus status` reports which
-build is running. See [Limitations](#limitations).
+and says so: Intel macOS, and Linux with glibc older than 2.39 (Ubuntu
+22.04, Debian 12, RHEL 9). `vexus status` reports which build is running.
+musl systems (Alpine) are not supported at all — the vector-search
+dependency does not build against musl. See [Limitations](#limitations).
 On an older Linux distro the binary will not start. Ubuntu 22.04, Debian 12
 and RHEL 9 are all below the floor, and building from source does not help
 there; see [Limitations](#limitations). Intel macOS isn't supported either.

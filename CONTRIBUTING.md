@@ -132,13 +132,18 @@ Query-authoring conventions (the shared extraction code assumes these):
   `std::fs::File::try_lock` (LockFileEx there), CI runs the full suite on
   `windows-latest`, and releases ship `.zip` archives installed via
   `install.ps1`.
-- **Intel macOS, glibc < 2.39, musl:** served by the *structural-only*
-  build (`cargo build -p vexus-cli --no-default-features`) — the ONNX
-  runtime is compiled out, so no semantic search, but keyword+graph search
-  work fully. `install.sh` detects these hosts and installs the
-  `-structural` artifact; CI keeps the shape compiling (`structural` job).
-  Full semantic support there still means vendoring an ONNX Runtime build
-  or switching backends — open for contribution.
+- **Intel macOS and glibc < 2.39:** served by the *structural-only* build
+  (`cargo build -p vexus-cli --no-default-features`) — the ONNX runtime is
+  compiled out, so no semantic search, but keyword+graph search work fully.
+  `install.sh` detects these hosts and installs the `-structural` artifact;
+  CI keeps the shape compiling (`structural` job). Full semantic support
+  there still means vendoring an ONNX Runtime build or switching backends —
+  open for contribution.
+- **musl (Alpine): unsupported, and the structural build does not rescue
+  it.** `sqlite-vec`'s C source uses the BSD-only `u_int8_t`/`u_int16_t`/
+  `u_int64_t` typedefs, which glibc supplies and musl does not, so its
+  build script fails regardless of feature flags. Supporting musl means
+  patching or replacing `sqlite-vec`, not restoring a matrix line.
 - **Intel macOS:** unsupported. The ONNX Runtime build the embedding backend
   pulls has no `x86_64-apple-darwin` target, so it fails at build time on any
   runner, and `cargo install` fails the same way. Supporting it means vendoring

@@ -38,18 +38,22 @@ jobs:
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, max_glibc: "" }
           - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, max_glibc: "" }
           # Structural-only legs (`--no-default-features`): the ONNX
-          # runtime is compiled out, which is exactly what frees these
-          # targets from ort's prebuilt-binary constraint — Intel macOS
-          # (no runtime at all), glibc 2.35 (ubuntu-22.04), and musl
-          # (fully static). Keyword+graph search only; install.sh picks
-          # these when it detects an incompatible host.
+          # runtime is compiled out, which frees these targets from ort's
+          # prebuilt-binary constraint — Intel macOS (no runtime at all)
+          # and glibc 2.35 (ubuntu-22.04). Keyword+graph search only;
+          # install.sh picks these when it detects an incompatible host.
+          #
+          # No musl leg: compiling ort out is not enough there. sqlite-vec's
+          # C source uses the BSD-only u_int8_t/u_int16_t/u_int64_t
+          # typedefs, which musl does not provide, so the build fails in
+          # its build script regardless of feature flags. Adding musl back
+          # means patching or replacing sqlite-vec, not restoring a line.
           #
           # The Intel-mac leg cross-compiles on the arm64 runner (fine
           # without ort — clang handles -arch x86_64) and skips the smoke
           # run rather than betting on Rosetta being present.
           - { runner: macos-15, target: x86_64-apple-darwin, variant: structural, flags: --no-default-features, skip_smoke: true, max_glibc: "" }
           - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu, variant: structural, flags: --no-default-features, max_glibc: "2.35" }
-          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, variant: structural, flags: --no-default-features, max_glibc: "" }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -58,10 +62,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install musl toolchain
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
         # --locked so a release is built from the committed dependency
