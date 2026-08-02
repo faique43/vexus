@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Wave 4 languages: Dart, Lua, Bash — vexus now indexes 18 languages.**
+  Dart rides its grammar's quirks (top-level functions parse as
+  lambda_expression; class_member_definition wraps signature+body);
+  extensions and mixins are captured. Lua's `M.f`/`M:m` definitions keep
+  the trailing identifier as the name so dotted call sites resolve by
+  suffix; colon methods get receiver-free arity. Bash captures functions
+  and treats each command invocation as a potential callee (builtins
+  excluded) — script-local calls resolve, the rest collapse as
+  unresolved. Binary size for all 15 new grammars: +27 MB unstripped
+  (~40 → ~66 MB); release binaries are stripped, and feature-gating
+  grammars is an option if this ever matters.
 - **Wave 3 languages: Ruby, PHP, Scala, Elixir.** Ruby captures modules,
   classes, methods (optional parameters — `def subtotal` gets arity None)
   and `def self.x` singletons; bare no-paren calls parse as identifiers,

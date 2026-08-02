@@ -289,3 +289,17 @@
 - caller: notifier.dispatcher.Shop.Notifier.Dispatcher.dispatch
   callee: notifier.dispatcher.Shop.Notifier.Dispatcher.deliver
   expected: resolved
+
+# --- wave-4 languages (Dart, Lua, Bash). Read back from a real index run.
+
+- caller: flutter.cart_badge.CartBadge.badgeCount
+  callee: flutter.cart_badge.CartBadge.capAt
+  expected: resolved
+
+- caller: gamescripts.loyalty.tier_label
+  callee: gamescripts.loyalty.points_for
+  expected: resolved
+
+- caller: ops.backup.run_backup
+  callee: ops.backup.backup_name
+  expected: resolved

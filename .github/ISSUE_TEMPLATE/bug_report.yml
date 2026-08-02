@@ -64,7 +64,7 @@ body:
     id: languages
     attributes:
       label: Languages in the repo
-      placeholder: Python, TypeScript, JavaScript, Rust, Go, Java, C, C++, C#, Kotlin, Swift, Ruby, PHP, Scala, Elixir
+      placeholder: any of the 18 supported languages (see README)
     validations:
       required: false
 

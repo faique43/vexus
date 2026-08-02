@@ -1,0 +1,15 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"dart/sample.dart\"))"
+---
+- "module dart.sample [1-28] arity=None parent=None sig=None"
+- "class dart.sample.Cart [3-14] arity=None parent=Some(0) sig=Some(\"class Cart {\")"
+- "method dart.sample.Cart.Cart [6-6] arity=Some(1) parent=Some(1) sig=Some(\"Cart(this.items);\")"
+- "method dart.sample.Cart.total [9-11] arity=Some(1) parent=Some(1) sig=Some(\"int total(int tax) {\")"
+- "method dart.sample.Cart.subtotal [13-13] arity=Some(0) parent=Some(1) sig=Some(\"int subtotal() => items.fold(0, (a, b) => a + b);\")"
+- "trait dart.sample.Loggable [16-18] arity=None parent=Some(0) sig=Some(\"mixin Loggable {\")"
+- "method dart.sample.Loggable.log [17-17] arity=Some(1) parent=Some(5) sig=Some(\"void log(String msg) {}\")"
+- "enum dart.sample.Color [20-20] arity=None parent=Some(0) sig=Some(\"enum Color { red, green }\")"
+- "class dart.sample.CartX [22-24] arity=None parent=Some(0) sig=Some(\"extension CartX on Cart {\")"
+- "method dart.sample.CartX.describe [23-23] arity=Some(0) parent=Some(8) sig=Some(\"String describe() => 'cart';\")"
+- "function dart.sample.checkoutTotal [26-28] arity=Some(2) parent=Some(0) sig=Some(\"int checkoutTotal(Cart cart, int tax) {\")"

@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"bash/sample.sh\"))"
+---
+- calls bash.sample.deploy -> log_line arity=None
+- calls bash.sample.deploy -> rsync arity=None
+- calls bash.sample -> deploy arity=None

@@ -1,0 +1,8 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "edge_lines(&parse_fixture(\"dart/sample.dart\"))"
+---
+- "imports dart.sample -> 'package:shop/pricing.dart' arity=None"
+- calls dart.sample.Cart.total -> subtotal arity=Some(0)
+- calls dart.sample.Cart.subtotal -> fold arity=Some(2)
+- calls dart.sample.checkoutTotal -> total arity=Some(1)

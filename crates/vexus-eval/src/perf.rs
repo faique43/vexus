@@ -39,6 +39,11 @@ const QUERY_REPS: usize = 200;
 /// produces was really indexed, for all 3 languages.
 const QUERY_SYMBOL_MOD: usize = 150;
 
+// Deliberately still 3 of the 18 supported languages: this harness
+// measures pipeline scaling (walk/parse/chunk/store throughput), not
+// language coverage — parse_snapshots and the polyglot eval corpus own
+// per-language correctness. Extending the generators ×18 would multiply
+// advisory-job CI time for no additional signal.
 const LANGS: [&str; 3] = ["python", "typescript", "rust"];
 
 /// Which of the 3 languages file index `i` gets, round-robin. For a

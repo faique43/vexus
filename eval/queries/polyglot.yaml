@@ -362,3 +362,36 @@
   graded:
     legacy.coupons.coupon_discount_cents: 3
     legacy.coupons.coupon_is_active: 2
+
+# --- wave-4 languages (Dart, Lua, Bash). Qualnames read back from a real
+# `vexus index` run (VEXUS_EMBEDDER=none). -------------------------------
+
+- q: "where is the cart badge count capped"
+  expect:
+    - flutter.cart_badge.CartBadge.badgeCount
+  graded:
+    flutter.cart_badge.CartBadge.badgeCount: 3
+    flutter.cart_badge.CartBadge.capAt: 2
+
+- q: "where are loyalty points computed from a purchase"
+  expect:
+    - gamescripts.loyalty.points_for
+  graded:
+    gamescripts.loyalty.points_for: 3
+    gamescripts.loyalty.tier_label: 1
+
+- q: "where is the nightly database backup written"
+  expect:
+    - ops.backup.run_backup
+  graded:
+    ops.backup.run_backup: 3
+    ops.backup.backup_name: 2
+
+- q: "how is the loyalty tier decided"
+  tool: explore
+  expect:
+    - gamescripts.loyalty.tier_label
+    - gamescripts.loyalty.points_for
+  graded:
+    gamescripts.loyalty.tier_label: 3
+    gamescripts.loyalty.points_for: 2

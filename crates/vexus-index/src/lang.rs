@@ -135,6 +135,28 @@ static LANGS: &[Lang] = &[
         symbols_scm: include_str!("../queries/elixir.scm"),
         edges_scm: include_str!("../queries/elixir_edges.scm"),
     },
+    // tree-sitter-dart exposes language(), not a LANGUAGE constant.
+    Lang {
+        name: "dart",
+        extensions: &["dart"],
+        grammar: tree_sitter_dart::language,
+        symbols_scm: include_str!("../queries/dart.scm"),
+        edges_scm: include_str!("../queries/dart_edges.scm"),
+    },
+    Lang {
+        name: "lua",
+        extensions: &["lua"],
+        grammar: || tree_sitter_lua::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/lua.scm"),
+        edges_scm: include_str!("../queries/lua_edges.scm"),
+    },
+    Lang {
+        name: "bash",
+        extensions: &["sh", "bash"],
+        grammar: || tree_sitter_bash::LANGUAGE.into(),
+        symbols_scm: include_str!("../queries/bash.scm"),
+        edges_scm: include_str!("../queries/bash_edges.scm"),
+    },
 ];
 
 pub fn for_path(path: &Path) -> Option<&'static Lang> {

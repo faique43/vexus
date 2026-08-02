@@ -1,0 +1,7 @@
+---
+source: crates/vexus-index/tests/parse_snapshots.rs
+expression: "symbol_lines(&parse_fixture(\"bash/sample.sh\"))"
+---
+- "module bash.sample [1-14] arity=None parent=None sig=None"
+- "function bash.sample.log_line [5-7] arity=None parent=Some(0) sig=Some(\"log_line() {\")"
+- "function bash.sample.deploy [9-12] arity=None parent=Some(0) sig=Some(\"function deploy() {\")"

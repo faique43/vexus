@@ -293,6 +293,51 @@ fn elixir_chunks() {
     insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("elixir/sample.ex")));
 }
 
+#[test]
+fn dart_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("dart/sample.dart")));
+}
+
+#[test]
+fn dart_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("dart/sample.dart")));
+}
+
+#[test]
+fn dart_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("dart/sample.dart")));
+}
+
+#[test]
+fn lua_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("lua/sample.lua")));
+}
+
+#[test]
+fn lua_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("lua/sample.lua")));
+}
+
+#[test]
+fn lua_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("lua/sample.lua")));
+}
+
+#[test]
+fn bash_symbols() {
+    insta::assert_yaml_snapshot!(symbol_lines(&parse_fixture("bash/sample.sh")));
+}
+
+#[test]
+fn bash_edges() {
+    insta::assert_yaml_snapshot!(edge_lines(&parse_fixture("bash/sample.sh")));
+}
+
+#[test]
+fn bash_chunks() {
+    insta::assert_yaml_snapshot!(chunk_lines(&parse_fixture("bash/sample.sh")));
+}
+
 /// Field report: `export const readDataStream = async function* <T>(...)`
 /// produced no symbol at all — `callers`/`callees`/`impact` answered "no
 /// symbol found" for it while arrow consts worked. Every const-assigned
