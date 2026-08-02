@@ -78,13 +78,44 @@ poor gate.
 This is the most contributor-friendly change in the repo, and it needs no
 parser code:
 
-1. Add the tree-sitter grammar to `crates/vexus-index/Cargo.toml`.
+1. Add the tree-sitter grammar to `crates/vexus-index/Cargo.toml`. It must
+   load against the workspace's `tree-sitter` version (ABI 14 or 15 as of
+   tree-sitter 0.25) — check with a scratch `Parser::set_language` before
+   writing queries.
 2. Write a `.scm` query file next to the existing ones in
    `crates/vexus-index/queries/`. The parser is driven entirely by capture
    names, so match the ones the existing languages use.
 3. Register the language in the registry alongside Python, TypeScript and Rust.
 4. Add a fixture under `eval/corpora/` and a few graded queries so the new
    language is actually measured, not just parsed.
+
+Query-authoring conventions (the shared extraction code assumes these):
+
+- **Capture vocabulary.** Symbols: `@def.function`, `@def.method`,
+  `@def.class`, `@def.struct`, `@def.enum`, `@def.trait`, `@def.interface`,
+  `@def.const`, `@def.type`, `@def.module`, plus `@def.name` (required —
+  no name, no symbol) and `@def.params` (optional; feeds arity). Edges:
+  `@call`/`@call.name`/`@call.args` and `@import.module`. Unknown captures
+  are silently ignored.
+- **`@def.method` vs `@def.function`.** Use `@def.method` only where
+  methodness is syntactic (Go's `method_declaration`, Ruby's
+  `def self.x`). A plain `@def.function` nested inside a class-like parent
+  is promoted to Method automatically; functions inside a `@def.module`
+  (namespace) parent deliberately stay functions.
+- **`@def.module`** is for namespace-like containers (Ruby `module`,
+  C++/C#/PHP `namespace`, Elixir `defmodule`). Members nest under it for
+  qualnames.
+- **`@def.params` captures the value-parameter list only.** Keep receivers
+  out by field selection (Go's receiver lives in its own field; Rust's
+  `self_parameter` is skipped in shared code). Arity feeds `name_arity`
+  edge resolution, so a receiver-polluted count degrades resolution.
+- **Qualnames are always dot-joined** internally, whatever the language's
+  real separator. Edge-side names keep their native separators — the
+  resolver's suffix matching understands `.`, `::`, `/`, and `\`.
+- **Owner qualification follows the Rust precedent**: `impl`-style members
+  defined outside the type's body (Go receiver methods, Swift extensions,
+  C++ out-of-class definitions) attach to the file root unless the name
+  node itself carries the qualifier.
 
 ## Platform reality
 
