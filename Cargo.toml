@@ -4,7 +4,7 @@ members = ["crates/vexus-core", "crates/vexus-index", "crates/vexus-cli", "crate
 
 [workspace.package]
 edition = "2021"
-version = "0.1.4"
+version = "0.2.0"
 license = "MIT"
 
 [workspace.dependencies]
