@@ -703,6 +703,20 @@ impl Store {
             chunks: one("SELECT count(*) FROM chunks")?,
         })
     }
+
+    /// One indexed `COUNT(*)` — cheap enough (sub-millisecond at any size
+    /// that matters) to run per retrieval call rather than cache; a cached
+    /// copy would go stale invisibly in reader processes that share the DB
+    /// with a separate writer.
+    pub fn chunk_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?)
+    }
+
+    pub fn corpus_tier(&self) -> Result<crate::model::CorpusTier> {
+        Ok(crate::model::CorpusTier::from_chunks(self.chunk_count()?))
+    }
 }
 
 #[cfg(test)]

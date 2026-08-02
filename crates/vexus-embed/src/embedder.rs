@@ -6,6 +6,27 @@ pub trait Embedder: Send + Sync {
     fn dim(&self) -> usize;
     /// One L2-normalized vector per input text, in order.
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    /// L2-distance ceiling above which a KNN candidate should not count as
+    /// a real semantic match (`None` = no floor, keep every candidate).
+    /// A property of the embedder, not of retrieval: the distance
+    /// distribution is model-specific, and the mock embedder's hash vectors
+    /// have no meaningful notion of "near" at all — so it stays `None`
+    /// there, which also keeps the mock-mode eval baseline untouched.
+    fn distance_floor(&self) -> Option<f64> {
+        None
+    }
+}
+
+/// The floor retrieval should actually use for `embedder`: the
+/// `VEXUS_KNN_FLOOR` env var when set (a calibration override; `0` disables
+/// the floor entirely), else the embedder's own `distance_floor()`.
+pub fn effective_distance_floor(embedder: &dyn Embedder) -> Option<f64> {
+    if let Ok(v) = std::env::var("VEXUS_KNN_FLOOR") {
+        if let Ok(f) = v.trim().parse::<f64>() {
+            return if f > 0.0 { Some(f) } else { None };
+        }
+    }
+    embedder.distance_floor()
 }
 
 pub struct MockEmbedder;

@@ -49,6 +49,15 @@ impl OnnxEmbedder {
     }
 }
 
+/// Default KNN floor for jina-code-v2, as an L2 distance over unit vectors
+/// (sqlite-vec's vec0 default metric; d = sqrt(2 - 2·cos)). 1.1 ≈ cosine
+/// 0.4 — lenient on purpose: it only exists to shed candidates that are
+/// genuinely unrelated to the query, which on a small corpus is most of it
+/// (vec0's `k = N` returns the N nearest regardless of distance, so a
+/// 30-file repo hands RRF its entire corpus for every query). Calibration
+/// override: `VEXUS_KNN_FLOOR` (see `effective_distance_floor`).
+const JINA_CODE_V2_KNN_FLOOR: f64 = 1.1;
+
 impl Embedder for OnnxEmbedder {
     fn id(&self) -> &str {
         &self.id
@@ -56,6 +65,10 @@ impl Embedder for OnnxEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    fn distance_floor(&self) -> Option<f64> {
+        Some(JINA_CODE_V2_KNN_FLOOR)
     }
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {

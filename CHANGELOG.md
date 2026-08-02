@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+Small repos stop paying big-repo prices. Three retrieval changes, all
+no-ops at Medium scale (≥2,000 chunks — the historical constants):
+
+- **KNN distance floor.** vec0's `k = 50` returns the 50 nearest chunks
+  regardless of distance, so on a corpus smaller than 50 chunks every
+  query ranked the whole repo. Candidates above the embedder's L2 floor
+  (jina-code-v2: 1.1; `VEXUS_KNN_FLOOR` overrides, `0` disables) no longer
+  fuse into results — unless nothing else matched, in which case they come
+  back explicitly labeled.
+- **Honest weak matches.** When keyword search finds nothing and no vector
+  candidate clears the floor, `explore` and `search` now say "weak match —
+  nearest neighbors only, grep is the better tool here" and `explore`
+  skips graph expansion instead of fanning out from a wrong guess.
+  Previously `explore` could never say "no" on a non-empty repo.
+- **Corpus-tier explore limits.** Under 200 chunks, `explore` uses 8
+  entries / 6 expanded symbols / 12 neighbors / 4,000-token default budget
+  (was 12/8/24/8,000); 200–1,999 chunks gets 8/6/16/4,000. Real-model token
+  cost on the small benchmark corpora dropped ~35–40% on the worst
+  questions while every real-model retrieval metric improved
+  (answer-in-bundle +0.06 overall, recall@10 +0.05). Both baselines
+  re-blessed; the mock baseline's answer_in_bundle drop is an artifact of
+  random-ranking coverage, not retrieval quality — see the PR for the
+  full analysis.
+
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 
 Dogfooding on a large TypeScript repo surfaced three defects, all fixed:

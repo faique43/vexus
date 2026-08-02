@@ -223,7 +223,13 @@ fn score_search_query(
         let store = state
             .lock_store_fresh()
             .map_err(|msg| anyhow::anyhow!("{msg}"))?;
-        store.search_hybrid(&query.q, query_vec.as_deref(), SEARCH_FETCH_LIMIT)?
+        // The embedder's own floor so the real-model eval exercises exactly
+        // what serving does; the mock embedder declares no floor, keeping
+        // the CI baseline untouched.
+        let floor = vexus_embed::effective_distance_floor(embedder.as_ref());
+        store
+            .search_hybrid_scored(&query.q, query_vec.as_deref(), floor, SEARCH_FETCH_LIMIT)?
+            .0
     };
     // Binding rule: "ranked qualnames from SearchHit.qualname (None -> skip
     // row)" — a preamble/module-level chunk carries no qualname at all, so it
