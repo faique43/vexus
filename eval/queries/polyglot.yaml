@@ -139,6 +139,22 @@
   graded:
     service.src.utils.retry.retry_with_backoff: 3
 
+- q: "turn a completed checkout into an analytics label"
+  expect:
+    - frontend.src.utils.telemetry.describeCheckout
+    - frontend.src.utils.telemetry.purchase
+  graded:
+    frontend.src.utils.telemetry.describeCheckout: 3
+    frontend.src.utils.telemetry.purchase: 2
+
+- q: "spend loyalty points earned on a purchase"
+  expect:
+    - gamescripts.loyalty.redeem
+    - gamescripts.loyalty.points_for
+  graded:
+    gamescripts.loyalty.redeem: 3
+    gamescripts.loyalty.points_for: 2
+
 # --- callers (>=5 queries) ----------------------------------------------
 
 - q: service.src.services.order_service.persist_status

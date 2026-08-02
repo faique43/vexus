@@ -7,3 +7,5 @@ expression: "edge_lines(&parse_fixture(\"javascript/sample.js\"))"
 - calls javascript.sample.sumTotals -> reduce arity=Some(2)
 - calls javascript.sample.legacyHelper -> renderRow arity=Some(2)
 - calls javascript.sample.Cart.total -> sumTotals arity=Some(1)
+- calls javascript.sample.use -> renderRow arity=Some(2)
+- calls javascript.sample.render -> sumTotals arity=Some(1)

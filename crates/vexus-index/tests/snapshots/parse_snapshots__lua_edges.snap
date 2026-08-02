@@ -7,3 +7,5 @@ expression: "edge_lines(&parse_fixture(\"lua/sample.lua\"))"
 - calls lua.sample.receipt_line -> format_cents arity=Some(1)
 - calls lua.sample.describe -> receipt_line arity=Some(2)
 - calls lua.sample.standalone -> clamp arity=Some(2)
+- calls lua.sample.round -> floor arity=Some(1)
+- calls lua.sample.triple -> double arity=Some(1)

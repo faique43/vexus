@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.2.1 — assignment-defined functions
+
+A dogfood pass over one real OSS repo per supported language found that
+JavaScript, TypeScript and Lua were only indexing functions written as
+*declarations*. Every function defined as a *value* — the dominant idiom in
+both ecosystems — was invisible to search, `callers`, `callees` and
+`impact`.
+
+### Indexing
+
+- **JS/TS: `app.use = function use(fn) {}` and friends now index.** Member
+  assignment (`app.use = ...`, `Foo.prototype.bar = ...`,
+  `exports.parse = ...`), `var f = function () {}` (a `variable_declaration`
+  node, distinct from the `lexical_declaration` `const`/`let` produce) and
+  object-literal function values (`module.exports = { parse: () => {} }`)
+  are all captured, in each case for the arrow, function-expression and
+  generator forms. The property is the symbol name, so the resolver's
+  existing `.` suffix matching ties `app.use(...)` call sites back to the
+  definition. Measured on express: 123 -> 284 symbols and 5702 -> 6014
+  resolved edges, with `lib/application.js`'s entire public API (`use`,
+  `route`, `engine`, `param`, `set`, ...) going from two indexed symbols to
+  all of them. On a modern TS codebase (zod) it is +19% symbols.
+- **Lua: `M.helper = function(...)` now indexes**, along with
+  `local f = function(...)` and table-constructor fields
+  (`M = { helper = function(...) end }`). Lua defines about as many
+  functions this way as it does with `function name(...)`: on plenary.nvim
+  the split is 400 declared to 427 assigned, so over half the API was
+  missing. Measured there: 399 -> 825 symbols, 2743 -> 4270 resolved edges.
+
+### Measurement
+
+- **`vexus-eval perf --real` times the shipped ONNX model.** The harness
+  hardcoded the mock embedder, so its numbers described a pipeline with the
+  model taken out and could not honestly be quoted — embedding the 500-file
+  synthetic corpus takes ~0.26 s mock and ~13.6 s real. The default is
+  still mock (CI never downloads a model); `--real` reports and stops
+  rather than gating against mock-calibrated budgets, and every
+  `bench/history.jsonl` row now carries a `mode` field so the two scales
+  cannot be averaged together.
+- Retrieval metrics moved with the fix: against the real model, overall
+  recall@5 0.8411 -> 0.8593, MRR 0.5826 -> 0.6010, edge precision/recall
+  0.8843/0.9386 -> 0.8871/0.9402. Both baselines were re-blessed. The mock
+  baseline's `answer_in_bundle` drops 0.48 -> 0.44 purely because mock
+  vectors rank at random, so any corpus growth dilutes bundle coverage by
+  construction; the real run holds flat at 0.92.
+
+### Fixed
+
+- **A watcher test that failed intermittently under a full-parallel
+  `cargo test --workspace`** was one test spawning a real watcher without
+  taking `WATCHER_TEST_LOCK`. A second FSEvents stream in the same process
+  starves the first badly enough to blow a 20 s poll deadline — which is
+  exactly what that lock exists to prevent. `vexus-watch`'s suite also
+  drops from ~28 s to ~10 s.
+- Two leftover documentation contradictions from the v0.2.0 merge: the
+  README and CONTRIBUTING both still called Intel macOS unsupported a few
+  lines after describing the structural build that supports it.
+
 ## v0.2.0 — Windows, 18 languages, and small repos that pay their way
 
 The three things that kept vexus off real machines: it did not run on

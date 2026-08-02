@@ -1102,6 +1102,10 @@ mod tests {
     /// serve` against the same DB) last wrote.
     #[test]
     fn run_writer_start_clears_last_event_at_but_preserves_last_index_failed() {
+        // Spawns a real watcher, so it takes the lock like every other
+        // watcher test: a second FSEvents stream running alongside one of
+        // them starves it long enough to blow a 20s poll deadline.
+        let _watcher_lock = watcher_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         write(&root, "a.py", "def helper():\n    return 1\n");

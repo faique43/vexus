@@ -303,3 +303,18 @@
 - caller: ops.backup.run_backup
   callee: ops.backup.backup_name
   expected: resolved
+
+# --- assignment-defined functions: `M.fn = function(...)` in Lua, an
+# --- object-literal handler table and a member assignment in TS.
+
+- caller: gamescripts.loyalty.redeem
+  callee: gamescripts.loyalty.points_for
+  expected: resolved
+
+- caller: frontend.src.utils.telemetry.purchase
+  callee: frontend.src.utils.telemetry.describeCheckout
+  expected: resolved
+
+- caller: frontend.src.utils.telemetry.describeCheckout
+  callee: frontend.src.utils.format.formatMoney
+  expected: resolved

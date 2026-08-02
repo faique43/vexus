@@ -2,9 +2,12 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "symbol_lines(&parse_fixture(\"lua/sample.lua\"))"
 ---
-- "module lua.sample [1-28] arity=None parent=None sig=None"
+- "module lua.sample [1-43] arity=None parent=None sig=None"
 - "function lua.sample.format_cents [6-8] arity=Some(1) parent=Some(0) sig=Some(\"function M.format_cents(cents)\")"
 - "function lua.sample.receipt_line [11-13] arity=Some(2) parent=Some(0) sig=Some(\"function M.receipt_line(label, cents)\")"
 - "method lua.sample.describe [15-17] arity=Some(0) parent=Some(0) sig=Some(\"function M:describe()\")"
 - "function lua.sample.clamp [19-22] arity=Some(2) parent=Some(0) sig=Some(\"local function clamp(x, floor)\")"
 - "function lua.sample.standalone [24-26] arity=Some(2) parent=Some(0) sig=Some(\"function standalone(a, b)\")"
+- "function lua.sample.round [29-31] arity=Some(1) parent=Some(0) sig=Some(\"M.round = function(x)\")"
+- "function lua.sample.double [33-35] arity=Some(1) parent=Some(0) sig=Some(\"local double = function(x)\")"
+- "function lua.sample.triple [38-40] arity=Some(1) parent=Some(0) sig=Some(\"triple = function(x)\")"

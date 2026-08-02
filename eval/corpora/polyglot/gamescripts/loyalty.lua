@@ -14,4 +14,10 @@ function M.tier_label(points)
   return "silver"
 end
 
+-- Redemption is written as an assigned function value — the other common
+-- way a Lua module exposes part of its API.
+M.redeem = function(points, cents)
+  return points - M.points_for(cents)
+end
+
 return M

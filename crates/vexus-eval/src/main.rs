@@ -73,6 +73,12 @@ enum Cmd {
         /// job never passes this (it's advisory, continue-on-error: true).
         #[arg(long)]
         enforce: bool,
+        /// Time the real ONNX model instead of the mock embedder. The
+        /// mock never embeds anything, so a default run's embed/search
+        /// numbers describe a pipeline with the model taken out — use
+        /// this for any figure quoted as vexus's performance.
+        #[arg(long)]
+        real: bool,
     },
     /// Measure how many tokens answering each `eval/token-bench/tasks.yaml`
     /// question costs with grep+read versus with vexus, and regenerate
@@ -399,7 +405,7 @@ fn main() -> Result<()> {
         Cmd::Run { real, corpus } => run(real, corpus),
         Cmd::Check { real } => check(real),
         Cmd::Bless { real } => bless(real),
-        Cmd::Perf { enforce } => perf::run(enforce),
+        Cmd::Perf { enforce, real } => perf::run(enforce, real),
         Cmd::TokenBench { real } => token_bench(real),
     }
 }

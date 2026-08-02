@@ -37,7 +37,7 @@ Run these before pushing. They are the same three jobs that gate a PR:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --workspace                          # ~281 tests
+cargo test --workspace                          # ~360 tests
 cargo run --release -p vexus-eval -- check      # retrieval-metric ratchet
 ```
 
@@ -64,11 +64,18 @@ every qualname in the YAML resolves to a real, unambiguous symbol.
 
 ## A warning about the perf harness
 
-`cargo run --release -p vexus-eval -- perf` hardcodes the **mock** embedder. Its
-numbers describe a run that never embeds anything, so they are useful for
-catching algorithmic regressions and useless as user-facing performance. Do not
-quote them in docs. Real-model figures belong in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
-and the README, measured with the real model.
+`cargo run --release -p vexus-eval -- perf` defaults to the **mock** embedder,
+which never embeds anything: its embed and query numbers describe a pipeline
+with the model taken out. They catch algorithmic regressions — that is what CI
+tracks, and why CI never downloads a model — but they are not user-facing
+performance and must not be quoted as such.
+
+Add `--real` for a run that loads the shipped ONNX model. Those numbers are the
+quotable ones, and the gap is not a rounding error: embedding the 500-file
+synthetic corpus takes ~0.26 s mock and ~13.6 s real. `--real` prints its
+results and stops rather than comparing them to `bench/budgets.json`, which is
+calibrated against the mock run; each row of `bench/history.jsonl` carries a
+`mode` field so the two scales never end up averaged into one column.
 
 Timing is advisory in CI, never a merge blocker: runner variance makes it a
 poor gate.
@@ -144,12 +151,9 @@ Query-authoring conventions (the shared extraction code assumes these):
   `u_int64_t` typedefs, which glibc supplies and musl does not, so its
   build script fails regardless of feature flags. Supporting musl means
   patching or replacing `sqlite-vec`, not restoring a matrix line.
-- **Intel macOS:** unsupported. The ONNX Runtime build the embedding backend
-  pulls has no `x86_64-apple-darwin` target, so it fails at build time on any
-  runner, and `cargo install` fails the same way. Supporting it means vendoring
-  a runtime or switching backends.
 
-The Intel macOS and old-glibc gaps are open for contribution if you want them.
+Semantic search on Intel macOS and old-glibc Linux is open for contribution
+if you want it.
 
 ## Commits and PRs
 
