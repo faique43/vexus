@@ -25,6 +25,28 @@ no-ops at Medium scale (≥2,000 chunks — the historical constants):
   re-blessed; the mock baseline's answer_in_bundle drop is an artifact of
   random-ranking coverage, not retrieval quality — see the PR for the
   full analysis.
+- **Cold `vexus serve` no longer loads the embedding model twice.** The
+  writer path builds its embedder once and seeds the shared state with it;
+  previously the startup index build and the writer thread each constructed
+  their own ORT session from the ~160 MB model file.
+- **The model download reports progress** — a stderr line every ~10% with
+  MB downloaded/total — instead of going silent for minutes after the
+  initial "downloading …" announcement.
+- **A first-ever embed pass narrates regardless of size.** The progress
+  gate only announced backlogs above 256 chunks, so a small repo's first
+  index — the run that also pays the one-time model download — was the
+  most silent one. First passes (nothing embedded yet) now always print;
+  the watcher's steady-state updates stay silent.
+- **Real cross-platform writer locking.** The advisory writer lock on
+  `.vexus/lock` now uses `std::fs::File::try_lock` — flock(2) on Unix,
+  LockFileEx on Windows — replacing the raw `libc::flock` call and the
+  non-unix stub that handed every process a writer lock. Mutual exclusion
+  now holds on every platform, and the mutual-exclusion test runs
+  unconditionally. `libc` is no longer a dependency.
+- CI runs the full test suite on `windows-latest` alongside Ubuntu and
+  macOS. A `.gitattributes` forces LF checkouts so snapshot tests and
+  blake3 file hashes are byte-identical across platforms. (Windows release
+  artifacts and an installer land separately.)
 
 ## v0.1.4 — index every const function form, budget and de-noise the graph tools
 

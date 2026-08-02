@@ -400,6 +400,22 @@ impl Store {
         Ok(n)
     }
 
+    /// Count of chunks that already have an embedding. Zero on a
+    /// structural-only index (nothing can be flagged embedded without a vec
+    /// table) — which is exactly what lets callers detect "first-ever embed
+    /// pass" cheaply.
+    pub fn embedded_count(&self) -> Result<i64> {
+        if !self.vec_available {
+            return Ok(0);
+        }
+        let n: i64 =
+            self.conn
+                .query_row("SELECT count(*) FROM chunks WHERE embedded = 1", [], |r| {
+                    r.get(0)
+                })?;
+        Ok(n)
+    }
+
     /// Delete the DB file plus its WAL/SHM sidecars, ignoring "not found" errors.
     fn remove_db_files(path: &Path) -> Result<()> {
         let mut wal = path.as_os_str().to_owned();
