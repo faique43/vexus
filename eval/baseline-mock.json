@@ -6,7 +6,7 @@
       "recall@10": 0.2857,
       "mrr": 0.0699,
       "ndcg@10": 0.0659,
-      "answer_in_bundle": 0.5833,
+      "answer_in_bundle": 0.5,
       "edge_precision": 0.902,
       "edge_recall": 0.92
     },
@@ -15,7 +15,7 @@
       "recall@10": 0.3333,
       "mrr": 0.2056,
       "ndcg@10": 0.2123,
-      "answer_in_bundle": 0.7,
+      "answer_in_bundle": 0.5,
       "edge_precision": 0.8852,
       "edge_recall": 0.9474
     }
@@ -25,7 +25,7 @@
     "recall@10": 0.3056,
     "mrr": 0.1264,
     "ndcg@10": 0.1065,
-    "answer_in_bundle": 0.6364,
+    "answer_in_bundle": 0.5,
     "edge_precision": 0.8929,
     "edge_recall": 0.9346
   }

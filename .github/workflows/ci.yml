@@ -8,13 +8,10 @@ jobs:
   test:
     strategy:
       matrix:
-        # Unix only, matching the support the README states: the advisory
-        # writer lock is flock, and the non-unix stub hands every `serve` a
-        # writer lock, so concurrent instances would race. Running a
-        # required job against a platform the project does not claim to
-        # support just pins the badge red. Restore this entry as part of
-        # adding real Windows locking, not before.
-        os: [ubuntu-latest, macos-latest]
+        # windows-latest joined the matrix when the writer lock moved to
+        # std::fs::File::try_lock (flock on Unix, LockFileEx on Windows) —
+        # real mutual exclusion on every platform, no stub.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       VEXUS_EMBEDDER: mock
@@ -27,6 +24,23 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  structural:
+    # The structural-only build (`--no-default-features`, ONNX compiled
+    # out) ships as real release artifacts for Intel macOS / old-glibc /
+    # musl — this keeps its cfg surface from rotting between releases.
+    name: structural-only build (no ONNX)
+    runs-on: ubuntu-latest
+    env:
+      VEXUS_EMBEDDER: mock
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+      - run: cargo test --workspace --no-default-features
 
   eval-gate:
     name: eval-gate (retrieval-metric ratchet)
