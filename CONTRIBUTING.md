@@ -119,7 +119,8 @@ Query-authoring conventions (the shared extraction code assumes these):
 
 ## Platform reality
 
-- **Supported:** Linux (x64, arm64, glibc 2.39+), macOS on Apple Silicon.
+- **Supported:** Linux (x64, arm64, glibc 2.39+), macOS on Apple Silicon,
+  Windows (x64, arm64).
   The glibc floor is set by the prebuilt ONNX Runtime `ort` downloads, not by
   our runner choice: it is compiled against glibc 2.38 and references
   `__isoc23_strtol`, so building on ubuntu-22.04 fails at link time with
@@ -127,16 +128,23 @@ Query-authoring conventions (the shared extraction code assumes these):
   binary. ubuntu-24.04 is the oldest image that links, which is where 2.39
   comes from. A step in the release workflow fails if the floor drifts above
   2.39, so a newer runner image cannot raise it unnoticed.
-- **Windows:** unsupported. The advisory writer lock is `flock`, and the
-  non-unix stub hands every `serve` a writer lock, so concurrent instances
-  would race. Real support means a Windows locking implementation, not a
-  `#[cfg]` tweak. CI does not run Windows for this reason.
+- **Windows (x64, arm64):** supported. The writer lock is
+  `std::fs::File::try_lock` (LockFileEx there), CI runs the full suite on
+  `windows-latest`, and releases ship `.zip` archives installed via
+  `install.ps1`.
+- **Intel macOS, glibc < 2.39, musl:** served by the *structural-only*
+  build (`cargo build -p vexus-cli --no-default-features`) — the ONNX
+  runtime is compiled out, so no semantic search, but keyword+graph search
+  work fully. `install.sh` detects these hosts and installs the
+  `-structural` artifact; CI keeps the shape compiling (`structural` job).
+  Full semantic support there still means vendoring an ONNX Runtime build
+  or switching backends — open for contribution.
 - **Intel macOS:** unsupported. The ONNX Runtime build the embedding backend
   pulls has no `x86_64-apple-darwin` target, so it fails at build time on any
   runner, and `cargo install` fails the same way. Supporting it means vendoring
   a runtime or switching backends.
 
-Both are open for contribution if you want them.
+The Intel macOS and old-glibc gaps are open for contribution if you want them.
 
 ## Commits and PRs
 

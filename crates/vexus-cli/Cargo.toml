@@ -8,6 +8,12 @@ license.workspace = true
 name = "vexus"
 path = "src/main.rs"
 
+[features]
+# Structural-only builds (`--no-default-features`) compile the ONNX
+# runtime out entirely — see crates/vexus-embed/Cargo.toml.
+default = ["onnx"]
+onnx = ["vexus-embed/onnx", "vexus-mcp/onnx", "vexus-watch/onnx"]
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
@@ -16,10 +22,10 @@ clap = { version = "4", features = ["derive"] }
 # their keys alphabetically on every merge would be gratuitous churn.
 serde_json = { version = "1", features = ["preserve_order"] }
 vexus-core = { path = "../vexus-core" }
-vexus-embed = { path = "../vexus-embed" }
+vexus-embed = { path = "../vexus-embed", default-features = false }
 vexus-index = { path = "../vexus-index" }
-vexus-mcp = { path = "../vexus-mcp" }
-vexus-watch = { path = "../vexus-watch" }
+vexus-mcp = { path = "../vexus-mcp", default-features = false }
+vexus-watch = { path = "../vexus-watch", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

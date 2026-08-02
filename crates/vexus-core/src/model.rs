@@ -112,3 +112,30 @@ pub struct Counts {
     pub edges: i64,
     pub chunks: i64,
 }
+
+/// Corpus-size tier retrieval defaults scale with. On a corpus of a few
+/// dozen files the Medium constants return most of the repo for every
+/// query (the project's own token benchmark measured explore at 0.2×–0.4×
+/// grep's cost there); the smaller tiers shrink candidate pools, entry
+/// limits and budgets to match what the corpus can actually distinguish.
+/// `Medium` values are byte-identical to the historical constants, so
+/// behavior on real-sized repos is unchanged by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorpusTier {
+    /// < 200 chunks — a handful of files; grep territory.
+    Tiny,
+    /// 200–1,999 chunks — small project.
+    Small,
+    /// ≥ 2,000 chunks — everything the defaults were originally tuned on.
+    Medium,
+}
+
+impl CorpusTier {
+    pub fn from_chunks(chunks: i64) -> Self {
+        match chunks {
+            i64::MIN..=199 => CorpusTier::Tiny,
+            200..=1999 => CorpusTier::Small,
+            _ => CorpusTier::Medium,
+        }
+    }
+}

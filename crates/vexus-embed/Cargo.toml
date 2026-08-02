@@ -4,6 +4,15 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# Default builds carry the real ONNX embedding runtime. `--no-default-features`
+# produces the *structural-only* build: keyword+graph search, no vectors —
+# the escape hatch for targets ort ships no prebuilt runtime for (Intel
+# macOS, glibc < 2.39, musl). MockEmbedder and the download/manifest module
+# stay unconditional so tests and model metadata work in both shapes.
+default = ["onnx"]
+onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
@@ -15,7 +24,7 @@ sha2.workspace = true
 # host without libssl-dev/pkg-config. Verify with `grep -c openssl
 # Cargo.lock` — NOT `cargo tree --target`, which only filters normal deps and
 # resolves build-deps for the host.
-ort = { version = "2.0.0-rc.12", default-features = false, features = [
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = [
     "std",
     "ndarray",
     "tracing",
@@ -24,8 +33,8 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = [
     "copy-dylibs",
     "api-24",
 ] }
-tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
-ndarray = "0.17"
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["onig"] }
+ndarray = { version = "0.17", optional = true }
 vexus-core = { path = "../vexus-core" }
 
 [dev-dependencies]

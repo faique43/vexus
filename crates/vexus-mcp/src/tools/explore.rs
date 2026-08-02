@@ -1,14 +1,19 @@
 //! `explore` tool (the flagship): answer a question about the codebase in
 //! one call. Pipeline (binding):
 //!
-//! 1. `search_hybrid(question, embed(question), 12)` → entry chunks,
-//!    rendered as `BundleItem`s carrying their RRF score.
+//! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
+//!    → entry chunks, rendered as `BundleItem`s carrying their RRF score.
+//!    `entry_limit` (and every other limit below) scales with the corpus
+//!    tier — see `params_for`; the Medium tier is 12/8/24/8000, identical
+//!    to the historical constants. A `WeakVectorOnly` outcome (no keyword
+//!    hit, nothing under the KNN floor) renders the entries under a "weak
+//!    match" note and skips steps 2–3 entirely.
 //! 2. For each entry chunk's `symbol_id` (deduped, first-seen score wins,
-//!    max 8 distinct symbols — `search_hybrid`'s results are already score-
-//!    descending, so "first 8 distinct" is "top 8 by score"): walk
-//!    `callers_of(id, 1, 10)`, `callees_of(id, 1, 10)`, and `imports_of(id)`
-//!    for neighbor symbol ids. Only resolved neighbors (id != -1) count;
-//!    collection stops once 24 distinct neighbor ids are found.
+//!    max `max_entry_symbols` distinct — `search_hybrid`'s results are
+//!    already score-descending, so first-N distinct is top-N by score):
+//!    walk `callers_of(id, 1, 10)`, `callees_of(id, 1, 10)`, and
+//!    `imports_of(id)` for neighbor symbol ids. Only resolved neighbors
+//!    (id != -1) count; collection stops at `max_neighbor_ids` distinct.
 //! 3. Each neighbor's `symbol_source` chunks become `BundleItem`s too, with
 //!    score = the parent entry's score × 0.5 (a neighbor reached from
 //!    multiple entries keeps the max of those).
@@ -29,31 +34,77 @@ use crate::format::render_bundle;
 use crate::state::{freshness_header, AppState};
 use crate::tools::{apply_header, clamp_budget, embed_query};
 
-const DEFAULT_BUDGET_TOKENS: u32 = 8000;
-const ENTRY_LIMIT: u32 = 12;
-const MAX_ENTRY_SYMBOLS: usize = 8;
-const MAX_NEIGHBOR_IDS: usize = 24;
 const NEIGHBOR_DEPTH: u32 = 1;
 const NEIGHBOR_LIMIT: u32 = 10;
 const NEIGHBOR_SCORE_FACTOR: f64 = 0.5;
 
+/// Per-tier limits: entry hits, distinct entry symbols to expand, distinct
+/// neighbor ids, and the default token budget (still overridable per call).
+/// `Medium` is byte-identical to the historical constants (12/8/24/8000);
+/// smaller tiers shrink everything so a question against a 30-file repo
+/// returns hundreds of tokens, not the whole repo — the token benchmark
+/// measured the old defaults at 0.2×–0.4× grep's cost on such corpora.
+struct ExploreParams {
+    entry_limit: u32,
+    max_entry_symbols: usize,
+    max_neighbor_ids: usize,
+    default_budget: u32,
+}
+
+fn params_for(tier: vexus_core::model::CorpusTier) -> ExploreParams {
+    use vexus_core::model::CorpusTier;
+    match tier {
+        CorpusTier::Tiny => ExploreParams {
+            entry_limit: 8,
+            max_entry_symbols: 6,
+            max_neighbor_ids: 12,
+            default_budget: 4000,
+        },
+        CorpusTier::Small => ExploreParams {
+            entry_limit: 8,
+            max_entry_symbols: 6,
+            max_neighbor_ids: 16,
+            default_budget: 4000,
+        },
+        CorpusTier::Medium => ExploreParams {
+            entry_limit: 12,
+            max_entry_symbols: 8,
+            max_neighbor_ids: 24,
+            default_budget: 8000,
+        },
+    }
+}
+
 const NO_MATCH_TEXT: &str = "nothing indexed matches that question — try 'search' with distinctive words from the code, or 'status' to check index coverage.";
+
+const WEAK_MATCH_TEXT: &str = "weak match — nothing indexed clearly matches this question; the snippets below are only the nearest neighbors. For exact strings or comments, grep is the better tool here.";
 
 /// Pure inner implementation of the `explore` tool.
 pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>) -> String {
-    let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
     let question_header = format!("explore: \"{question}\"\n\n");
 
     // Embed before locking: a real embedder's inference call must not hold
     // the store mutex, or it stalls every other tool call for its duration.
     let query_vec = embed_query(state, question);
+    let knn_floor = super::knn_floor(state);
 
     let store = match state.lock_store_fresh() {
         Ok(s) => s,
         Err(msg) => return msg,
     };
     let fresh_header = freshness_header(&store);
-    let hits = match store.search_hybrid(question, query_vec.as_deref(), ENTRY_LIMIT) {
+    let params = params_for(
+        store
+            .corpus_tier()
+            .unwrap_or(vexus_core::model::CorpusTier::Medium),
+    );
+    let budget_tokens = clamp_budget(budget_tokens, params.default_budget);
+    let (hits, outcome) = match store.search_hybrid_scored(
+        question,
+        query_vec.as_deref(),
+        knn_floor,
+        params.entry_limit,
+    ) {
         Ok(h) => h,
         Err(e) => return apply_header(fresh_header, format!("explore error: {e:#}")),
     };
@@ -61,6 +112,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     if hits.is_empty() {
         return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
+    let weak = outcome == vexus_core::search::SearchOutcome::WeakVectorOnly;
 
     // Step 1: entry chunks as BundleItems, plus the deduped (symbol_id,
     // score) list step 2 expands from. `hits` is already score-descending
@@ -68,7 +120,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     // is that symbol's best score among the entries, and capping at the
     // first 8 distinct ids keeps the top 8 by score.
     let mut items: Vec<BundleItem> = Vec::with_capacity(hits.len());
-    let mut entry_symbols: Vec<(i64, f64)> = Vec::with_capacity(MAX_ENTRY_SYMBOLS);
+    let mut entry_symbols: Vec<(i64, f64)> = Vec::with_capacity(params.max_entry_symbols);
     for hit in &hits {
         items.push(BundleItem {
             path: hit.path.clone(),
@@ -79,8 +131,15 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             score: hit.score,
             chunk_id: hit.chunk_id,
         });
+        // A weak match skips graph expansion entirely: fanning out through
+        // callers/callees of a nearest-neighbor guess is where the
+        // small-repo token bloat came from, and the neighbors of a wrong
+        // entry are just more wrongness.
+        if weak {
+            continue;
+        }
         if let Some(sid) = hit.symbol_id {
-            if entry_symbols.len() < MAX_ENTRY_SYMBOLS
+            if entry_symbols.len() < params.max_entry_symbols
                 && !entry_symbols.iter().any(|(id, _)| *id == sid)
             {
                 entry_symbols.push((sid, hit.score));
@@ -120,7 +179,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
                 .or_insert(neighbor_score);
             if !neighbor_order.contains(&nid) {
                 neighbor_order.push(nid);
-                if neighbor_order.len() >= MAX_NEIGHBOR_IDS {
+                if neighbor_order.len() >= params.max_neighbor_ids {
                     break 'entries;
                 }
             }
@@ -152,9 +211,17 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
 
     // Step 4: pack + render.
     let (selected, omitted) = pack(items, budget_tokens);
+    let weak_note = if weak {
+        format!("{WEAK_MATCH_TEXT}\n\n")
+    } else {
+        String::new()
+    };
     apply_header(
         fresh_header,
-        format!("{question_header}{}", render_bundle(&selected, &omitted)),
+        format!(
+            "{question_header}{weak_note}{}",
+            render_bundle(&selected, &omitted)
+        ),
     )
 }
 
@@ -277,6 +344,79 @@ mod tests {
                 "explore: \"\"\n\nnothing indexed matches that question — try 'search' with \
                  distinctive words from the code, or 'status' to check index coverage."
             )
+        );
+    }
+
+    /// `MockEmbedder` that declares a distance floor no hash vector will
+    /// ever clear — every KNN candidate lands above it, so a query with no
+    /// keyword overlap must come back `WeakVectorOnly`. A wrapper type
+    /// (rather than the `VEXUS_KNN_FLOOR` env override) keeps the test free
+    /// of env races with concurrently running tests.
+    struct FlooredMock;
+    impl vexus_embed::Embedder for FlooredMock {
+        fn id(&self) -> &str {
+            "mock"
+        }
+        fn dim(&self) -> usize {
+            vexus_embed::MockEmbedder.dim()
+        }
+        fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            vexus_embed::MockEmbedder.embed(texts)
+        }
+        fn distance_floor(&self) -> Option<f64> {
+            Some(1e-4)
+        }
+    }
+
+    /// Like `keyword_only_state`, but embedded with the mock model and a
+    /// floor-declaring embedder installed, so the weak-match path is
+    /// reachable (it needs a query vector AND a floor).
+    fn floored_mock_state(root: &std::path::Path) -> AppState {
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        pipeline::index_repo(root, &mut store).unwrap();
+        let embedder = FlooredMock;
+        store
+            .set_model(
+                vexus_embed::Embedder::id(&embedder),
+                vexus_embed::Embedder::dim(&embedder),
+            )
+            .unwrap();
+        pipeline::embed_pending(&mut store, &embedder).unwrap();
+        let embedder_slot: OnceLock<Option<std::sync::Arc<dyn vexus_embed::Embedder>>> =
+            OnceLock::new();
+        let _ = embedder_slot.set(Some(std::sync::Arc::new(FlooredMock)));
+        AppState {
+            store: Mutex::new(Some(store)),
+            embedder: embedder_slot,
+            root: root.to_path_buf(),
+            last_generation: std::sync::atomic::AtomicU64::new(0),
+            is_writer: true,
+        }
+    }
+
+    #[test]
+    fn explore_weak_match_prepends_note_and_skips_graph_expansion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        chain_repo(root);
+        let state = floored_mock_state(root);
+
+        // No keyword overlap with the fixture, and the floor guarantees no
+        // KNN candidate counts as near: weak match. (On a corpus this tiny
+        // every chunk comes back as an entry hit via the nearest-neighbor
+        // fallback, so skipping expansion isn't observable in the output —
+        // the note is the contract this test pins.)
+        let out = explore_text(&state, "zzqqxx unrelated nonsense", None);
+        assert!(
+            out.contains("weak match —"),
+            "weak note must be present: {out:?}"
+        );
+
+        // A query with keyword overlap stays strong: no weak note.
+        let out = explore_text(&state, "alpha_process", None);
+        assert!(
+            !out.contains("weak match —"),
+            "keyword hit must suppress the weak note: {out:?}"
         );
     }
 
