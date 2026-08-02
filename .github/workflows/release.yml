@@ -14,51 +14,61 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.target }}
+    name: ${{ matrix.target }}${{ matrix.variant && format(' ({0})', matrix.variant) || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Native runners for every target — no cross-compilation. ort's
-          # build script fetches a prebuilt ONNX Runtime for the host, so
-          # cross-building would mean fetching for the wrong one.
-          - { runner: macos-15, target: aarch64-apple-darwin }
-          # No x86_64-apple-darwin: ort ships no prebuilt ONNX Runtime for
-          # that target, so the build script fails there regardless of the
-          # runner image. Adding it back means vendoring an ONNX Runtime
-          # build or switching backends, not just restoring a matrix line.
-          #
-          # ubuntu-24.04 is the OLDEST image these targets can build on, and
-          # the floor is set by the dependency, not by this choice. The
-          # prebuilt ONNX Runtime that ort downloads is itself compiled
-          # against glibc 2.38+ and references __isoc23_strtol /
-          # __isoc23_strtoull, which do not exist before 2.38. Building on
-          # ubuntu-22.04 (glibc 2.35) therefore fails at link time with
-          # "undefined symbol: __isoc23_strtol" rather than producing a more
-          # portable binary. Lowering the floor means building ONNX Runtime
-          # from source or switching backends. The step below pins the
-          # resulting floor so a jump to a newer image cannot raise it
-          # silently.
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # Full builds run on native runners — ort's build script fetches a
+          # prebuilt ONNX Runtime for the build target, and only these
+          # targets have one. ubuntu-24.04 is the OLDEST image the Linux
+          # full builds can use: the prebuilt runtime is compiled against
+          # glibc 2.38+ and references __isoc23_strtol, so ubuntu-22.04
+          # fails at link time rather than producing a more portable
+          # binary. The glibc-floor step pins each leg's documented floor
+          # so a runner-image jump can't raise it silently.
+          - { runner: macos-15, target: aarch64-apple-darwin, max_glibc: "" }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, max_glibc: "2.39" }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, max_glibc: "2.39" }
           # Windows became buildable when the writer lock moved to
           # std::fs::File::try_lock (LockFileEx there); ort ships prebuilt
           # CPU runtimes for both Windows targets. Packaged as .zip with a
           # vexus.exe inside; installed via install.ps1.
-          - { runner: windows-latest, target: x86_64-pc-windows-msvc }
-          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, max_glibc: "" }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, max_glibc: "" }
+          # Structural-only legs (`--no-default-features`): the ONNX
+          # runtime is compiled out, which is exactly what frees these
+          # targets from ort's prebuilt-binary constraint — Intel macOS
+          # (no runtime at all), glibc 2.35 (ubuntu-22.04), and musl
+          # (fully static). Keyword+graph search only; install.sh picks
+          # these when it detects an incompatible host.
+          #
+          # The Intel-mac leg cross-compiles on the arm64 runner (fine
+          # without ort — clang handles -arch x86_64) and skips the smoke
+          # run rather than betting on Rosetta being present.
+          - { runner: macos-15, target: x86_64-apple-darwin, variant: structural, flags: --no-default-features, skip_smoke: true, max_glibc: "" }
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu, variant: structural, flags: --no-default-features, max_glibc: "2.35" }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, variant: structural, flags: --no-default-features, max_glibc: "" }
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
         # --locked so a release is built from the committed dependency
-        # versions, not whatever resolves that day.
-        run: cargo build --release --locked -p vexus-cli
+        # versions, not whatever resolves that day. Explicit --target on
+        # every leg so the binary path is uniform (and the Intel-mac leg
+        # genuinely cross-compiles).
+        run: cargo build --release --locked -p vexus-cli --target ${{ matrix.target }} ${{ matrix.flags }}
 
       # A binary that needs a newer glibc than the user has fails at exec
       # with "version `GLIBC_2.xx' not found" and looks like a broken
@@ -67,13 +77,13 @@ jobs:
       # without anyone noticing. It is a drift alarm, not an aspiration —
       # see the matrix comment for why the floor cannot simply be lowered.
       - name: Check the glibc floor
-        if: runner.os == 'Linux'
+        if: matrix.max_glibc != ''
         shell: bash
         env:
-          MAX_GLIBC: "2.39"
+          MAX_GLIBC: ${{ matrix.max_glibc }}
         run: |
           set -euo pipefail
-          need="$(readelf -V target/release/vexus \
+          need="$(readelf -V target/${{ matrix.target }}/release/vexus \
             | grep -oE 'GLIBC_2\.[0-9]+' | sort -u -V | tail -n 1)"
           echo "highest required: ${need:-none} (allowed: GLIBC_$MAX_GLIBC)"
           [ -n "$need" ] || exit 0
@@ -88,12 +98,13 @@ jobs:
       # Mock embedder: no model download in CI, and it exercises exactly
       # what a structural/keyword run does at the user's machine.
       - name: Smoke test the binary
+        if: ${{ !matrix.skip_smoke }}
         shell: bash
         env:
           VEXUS_EMBEDDER: mock
         run: |
           set -euo pipefail
-          bin=target/release/vexus
+          bin=target/${{ matrix.target }}/release/vexus
           [ "$RUNNER_OS" = "Windows" ] && bin="$bin.exe"
           "$bin" --version
           mkdir -p smoke/src
@@ -127,16 +138,22 @@ jobs:
             echo "tag v$version does not match the workspace version in Cargo.toml" >&2
             exit 1
           }
+          # Structural artifacts carry a suffix so install.sh can pick them
+          # deliberately and nobody mistakes one for a full build.
           name="vexus-${version}-${{ matrix.target }}"
+          if [ -n "${{ matrix.variant }}" ]; then
+            name="$name-${{ matrix.variant }}"
+          fi
           mkdir -p "dist/$name"
+          bindir="target/${{ matrix.target }}/release"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cp target/release/vexus.exe "dist/$name/"
+            cp "$bindir/vexus.exe" "dist/$name/"
             cp README.md LICENSE "dist/$name/"
             (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
             echo "archive=dist/$name.zip" >> "$GITHUB_OUTPUT"
           else
-            strip target/release/vexus || true
-            cp target/release/vexus "dist/$name/"
+            strip "$bindir/vexus" || true
+            cp "$bindir/vexus" "dist/$name/"
             cp README.md LICENSE "dist/$name/"
             tar -C dist -czf "dist/$name.tar.gz" "$name"
             echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
@@ -144,7 +161,9 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
+          # target alone would collide: x86_64-unknown-linux-gnu ships both
+          # a full and a structural artifact.
+          name: ${{ matrix.target }}${{ matrix.variant && '-' || '' }}${{ matrix.variant }}
           path: ${{ steps.package.outputs.archive }}
 
   publish:

@@ -62,6 +62,20 @@ no-ops at Medium scale (≥2,000 chunks — the historical constants):
   built binary runs `--version`, indexes a 3-file fixture and must report
   its symbols — catching binaries that link but crash at load, on every
   target including the ONNX-static ones.
+- **Structural-only builds un-strand Intel macOS, old-glibc Linux, and
+  musl/Alpine.** A new default `onnx` cargo feature compiles the ONNX
+  runtime out under `--no-default-features`; the release ships
+  `-structural` artifacts for `x86_64-apple-darwin`,
+  `x86_64-unknown-linux-gnu` (glibc 2.35 floor) and
+  `x86_64-unknown-linux-musl` (fully static). Keyword and call-graph
+  search work fully; semantic search is off, and both the startup stderr
+  line and `status` say so. `install.sh` now detects musl and pre-2.39
+  glibc — previously it silently installed a binary that failed at exec —
+  and installs the structural artifact with an honest note; Intel macOS
+  stops being a hard `die`. A CI job keeps the no-ONNX shape compiling.
+- The watcher canonicalizes the root via `dunce`, so Windows
+  ReadDirectoryChangesW events (plain `C:\...`) match the watched root
+  instead of failing `strip_prefix` against a `\\?\`-prefixed path.
 - The watcher canonicalizes the root via `dunce`, so Windows
   ReadDirectoryChangesW events (plain `C:\...`) match the watched root
   instead of failing `strip_prefix` against a `\\?\`-prefixed path.

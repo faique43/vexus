@@ -211,6 +211,13 @@ pub fn status_text(store: &vexus_core::Store, role: Option<bool>) -> Result<Stri
         format!("model: {model_id}  embed backlog: {backlog}  vec: {vec_status}"),
         freshness_line,
     ];
+    // Structural-only builds compile the ONNX runtime out (targets it has
+    // no prebuilt binaries for). Surface that here, in the tool output —
+    // not only on stderr at startup — so "why is semantic search off?"
+    // has a visible answer.
+    #[cfg(not(feature = "onnx"))]
+    lines
+        .push("embeddings: unavailable (structural-only build — keyword+graph search only)".into());
     if let Some(is_writer) = role {
         if let Some(role) = role_line(is_writer) {
             lines.push(role);
