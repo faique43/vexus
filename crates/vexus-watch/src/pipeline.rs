@@ -217,20 +217,6 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
 
     store.resolve_all_edges()?;
 
-    // embed_cache is keyed purely by content hash with
-    // no foreign key back to any chunk, so a chunk that's deleted or edited
-    // into different content leaves its old cached embedding behind with
-    // nothing else left to ever clean it up. A full reindex is the natural
-    // point to sweep those orphans — by now every chunk this repo currently
-    // has (this run's own replace_file calls, plus whatever survived
-    // unchanged) is already known. `IndexReport` deliberately isn't extended
-    // with this count; it's a housekeeping side effect, not a fact about
-    // this run's own files, so it only goes to stderr.
-    let pruned = store.prune_orphaned_embed_cache()?;
-    if pruned > 0 {
-        eprintln!("vexus: pruned {pruned} orphaned embed_cache row(s)");
-    }
-
     // Persisted so a later `status` call (possibly in a different process,
     // e.g. the MCP server) can report "skipped files" from the *last* run
     // without re-walking the repo.
@@ -249,7 +235,6 @@ pub fn index_repo(root: &Path, store: &mut Store) -> Result<IndexReport> {
 #[derive(Debug, Default)]
 pub struct EmbedReport {
     pub embedded: usize,
-    pub from_cache: usize,
 }
 
 /// Backlogs at or below this stay silent. The watcher calls `embed_pending`
@@ -257,20 +242,15 @@ pub struct EmbedReport {
 /// where minutes of silence read as a hang — is worth narrating.
 const EMBED_PROGRESS_MIN_BACKLOG: i64 = 256;
 
-/// Embed every chunk missing a vector, in batches, reusing `embed_cache` hits
-/// (keyed by content hash) so unchanged content across re-indexes never pays
-/// for a fresh model call. A no-op (vec unavailable, or nothing missing)
-/// returns an empty report immediately.
+/// Embed every chunk missing a vector, in batches. A no-op (vec
+/// unavailable, or nothing missing) returns an empty report immediately.
 ///
 /// Large backlogs report progress to stderr: the first index of a real repo
 /// embeds for minutes on CPU, and with no output that is indistinguishable
 /// from a hang (users ^C it — the exact first-run failure this line exists
 /// to prevent).
 pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<EmbedReport> {
-    let mut report = EmbedReport {
-        embedded: 0,
-        from_cache: 0,
-    };
+    let mut report = EmbedReport { embedded: 0 };
     let total = store.embed_backlog()?;
     // Big backlogs always narrate. A first-ever embed pass (nothing embedded
     // yet) narrates regardless of size: on a small repo the cold run's only
@@ -297,16 +277,7 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
             break;
         }
         let mut ready: Vec<(i64, Vec<f32>)> = Vec::new();
-        let mut to_embed: Vec<(i64, String, Vec<u8>)> = Vec::new();
-        for (id, content, hash) in missing {
-            match store.embed_cache_get(&hash)? {
-                Some(v) if v.len() == embedder.dim() => {
-                    ready.push((id, v));
-                    report.from_cache += 1;
-                }
-                _ => to_embed.push((id, content, hash)),
-            }
-        }
+        let to_embed: Vec<(i64, String, Vec<u8>)> = missing;
         for batch in to_embed.chunks(32) {
             let texts: Vec<&str> = batch.iter().map(|(_, c, _)| c.as_str()).collect();
             let vecs = embedder.embed(&texts)?;
@@ -322,18 +293,14 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
                     batch.len()
                 );
             }
-            for ((id, _, hash), v) in batch.iter().zip(vecs) {
-                store.embed_cache_put(hash, &v)?;
+            for ((id, _, _hash), v) in batch.iter().zip(vecs) {
                 ready.push((*id, v));
                 report.embedded += 1;
             }
         }
         store.put_embeddings(&ready)?;
         if announce {
-            eprintln!(
-                "vexus: embedded {}/{total} chunks",
-                report.embedded + report.from_cache
-            );
+            eprintln!("vexus: embedded {}/{total} chunks", report.embedded);
         }
 
         // Defensive: we just processed a non-empty batch of missing rows, so
@@ -362,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_pending_embeds_all_chunks_and_uses_cache() {
+    fn embed_pending_embeds_every_chunk_missing_a_vector() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write(root, "a.py", "def f1():\n    pass\n");
@@ -374,17 +341,13 @@ mod tests {
         store.set_model(embedder.id(), embedder.dim()).unwrap();
         let r = embed_pending(&mut store, &embedder).unwrap();
         assert!(r.embedded >= 2);
-        assert_eq!(r.from_cache, 0);
         assert_eq!(store.embed_backlog().unwrap(), 0);
 
-        // touch a file -> chunks re-created with same content -> cache hits, no re-embeds
+        // Editing a file re-creates its chunks; whatever is missing a vector
+        // afterwards gets embedded, and the backlog returns to zero.
         write(root, "a.py", "def f1():\n    pass\n# comment\n");
         index_repo(root, &mut store).unwrap();
-        let r = embed_pending(&mut store, &embedder).unwrap();
-        assert!(
-            r.from_cache >= 1,
-            "unchanged chunk content must hit embed_cache"
-        );
+        embed_pending(&mut store, &embedder).unwrap();
         assert_eq!(store.embed_backlog().unwrap(), 0);
     }
 
@@ -456,48 +419,6 @@ mod tests {
             store.generation().unwrap(),
             2,
             "a run that removes a stale file is a real change and must bump"
-        );
-    }
-
-    /// A full reindex that changes a file's chunk
-    /// content (so its old chunks, and the embed_cache rows keyed to their
-    /// content hash, are now orphaned) must prune those rows away — nothing
-    /// else in the system ever revisits `embed_cache` by anything other than
-    /// content hash, so an unpruned orphan would sit there forever.
-    #[test]
-    fn index_repo_prunes_orphaned_embed_cache_rows_after_full_reindex() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        write(root, "a.py", "def old_helper():\n    return 1\n");
-
-        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        index_repo(root, &mut store).unwrap();
-
-        let embedder = vexus_embed::MockEmbedder;
-        store.set_model(embedder.id(), embedder.dim()).unwrap();
-        embed_pending(&mut store, &embedder).unwrap();
-
-        let before = store.embed_cache_len().unwrap();
-        assert!(
-            before > 0,
-            "expected at least one cached embedding after the first embed pass"
-        );
-
-        // Replace a.py's content entirely: brand new chunk content and
-        // content hashes, so the old chunk (and its embed_cache row) is now
-        // orphaned — nothing embeds again here, so any survivor is purely
-        // from the old, now-deleted chunk.
-        write(
-            root,
-            "a.py",
-            "def brand_new_and_totally_different():\n    return 999\n",
-        );
-        index_repo(root, &mut store).unwrap();
-
-        assert_eq!(
-            store.embed_cache_len().unwrap(),
-            0,
-            "the old chunk's orphaned embed_cache row must be pruned by the full reindex"
         );
     }
 

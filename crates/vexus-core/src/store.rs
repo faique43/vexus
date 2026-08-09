@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use rusqlite::{Connection, OpenFlags};
 
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 const SCHEMA: &str = include_str!("schema.sql");
 
 static VEC_INIT: std::sync::Once = std::sync::Once::new();
@@ -35,12 +35,6 @@ fn register_sqlite_vec() {
 
 fn f32s_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
-}
-
-fn blob_to_f32s(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
 }
 
 /// `files.id` for `path`, or `None` if it isn't indexed. Takes a bare
@@ -234,7 +228,6 @@ impl Store {
         }
         let vec_available = self.vec_available;
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM embed_cache", [])?;
         tx.execute("DROP TABLE IF EXISTS vec_chunks", [])?;
         // Every vector just went away with the table, so nothing is embedded
         // under the new model until it's re-embedded.
@@ -282,57 +275,6 @@ impl Store {
             ))
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    pub fn embed_cache_get(&self, hash: &[u8]) -> Result<Option<Vec<f32>>> {
-        let v: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT embedding FROM embed_cache WHERE content_hash = ?1",
-                [hash],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                e => Err(e),
-            })?;
-        Ok(v.map(|b| blob_to_f32s(&b)))
-    }
-
-    pub fn embed_cache_put(&mut self, hash: &[u8], v: &[f32]) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO embed_cache (content_hash, embedding) VALUES (?1, ?2)",
-            rusqlite::params![hash, f32s_to_blob(v)],
-        )?;
-        Ok(())
-    }
-
-    /// Total rows currently in `embed_cache` — a small utility for callers
-    /// (tests, `status`-style diagnostics) that want a cheap sense of the
-    /// cache's size without reaching for a bespoke query.
-    pub fn embed_cache_len(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT count(*) FROM embed_cache", [], |r| r.get(0))?)
-    }
-
-    /// Deletes every `embed_cache` row whose `content_hash` no longer
-    /// belongs to any current `chunks` row. `embed_cache` is keyed purely by
-    /// content hash — no foreign key back to a chunk or file — so an edit or
-    /// deletion that changes a chunk's content (and so its hash) leaves the
-    /// old cached embedding behind with nothing else ever cleaning it up; a
-    /// full `index_repo` run (see `pipeline::index_repo`) is the natural
-    /// point to sweep those, since by the time it finishes every chunk the
-    /// repo currently has is already known. Returns the number of rows
-    /// removed, so the caller can log a non-zero prune without needing a
-    /// separate count query.
-    pub fn prune_orphaned_embed_cache(&mut self) -> Result<usize> {
-        Ok(self.conn.execute(
-            "DELETE FROM embed_cache WHERE content_hash NOT IN \
-             (SELECT DISTINCT content_hash FROM chunks)",
-            [],
-        )?)
     }
 
     /// Upsert embeddings for chunks in one transaction. No-op when vec is
@@ -749,7 +691,7 @@ mod tests {
             SCHEMA_VERSION
         );
         // core tables exist
-        for t in ["files", "symbols", "edges", "chunks", "embed_cache"] {
+        for t in ["files", "symbols", "edges", "chunks"] {
             let n: i64 = store
                 .conn
                 .query_row(
@@ -1145,13 +1087,7 @@ mod tests {
 
         let missing = store.chunks_missing_embedding(100).unwrap();
         assert_eq!(missing.len(), 1);
-        let (chunk_id, _content, hash) = missing[0].clone();
-
-        store.embed_cache_put(&hash, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        assert_eq!(
-            store.embed_cache_get(&hash).unwrap().unwrap(),
-            vec![1.0, 0.0, 0.0, 0.0]
-        );
+        let (chunk_id, _content, _hash) = missing[0].clone();
 
         store
             .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
@@ -1167,41 +1103,11 @@ mod tests {
             .unwrap();
         assert_eq!(store.embed_backlog().unwrap(), 1); // new chunk id, no vec row
 
-        // model change wipes cache + vec table
+        // model change wipes the vec table
         assert!(store.set_model("other-model", 4).unwrap());
-        assert!(store.embed_cache_get(&hash).unwrap().is_none());
         assert_eq!(store.knn_chunks(&[1.0, 0.0, 0.0, 0.0], 5).unwrap().len(), 0);
 
         assert!(!store.set_model("other-model", 4).unwrap()); // same model: no wipe
-    }
-
-    /// `embed_cache` rows are keyed purely by content
-    /// hash, with no foreign key back to any chunk — a hash that no current
-    /// chunk references anymore (its chunk was deleted, or edited into
-    /// different content) is an orphan `prune_orphaned_embed_cache` must
-    /// remove, while a hash a live chunk still references must survive.
-    #[test]
-    fn prune_orphaned_embed_cache_removes_only_hashes_with_no_matching_chunk() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
-        store
-            .replace_file("a.py", "python", &[1u8; 32], &sample_index())
-            .unwrap();
-        let (_chunk_id, _content, live_hash) =
-            store.chunks_missing_embedding(100).unwrap()[0].clone();
-
-        store.embed_cache_put(&live_hash, &[1.0, 0.0]).unwrap();
-        // A hash no chunk references at all.
-        store.embed_cache_put(&[9u8; 32], &[2.0, 0.0]).unwrap();
-        assert_eq!(store.embed_cache_len().unwrap(), 2);
-
-        let pruned = store.prune_orphaned_embed_cache().unwrap();
-        assert_eq!(pruned, 1, "exactly the orphaned row must be pruned");
-        assert_eq!(store.embed_cache_len().unwrap(), 1);
-        assert!(
-            store.embed_cache_get(&live_hash).unwrap().is_some(),
-            "a hash still referenced by a live chunk must survive the prune"
-        );
     }
 
     #[test]
@@ -1260,15 +1166,13 @@ mod tests {
         store
             .replace_file("a.py", "python", &[1u8; 32], &sample_index())
             .unwrap();
-        let (chunk_id, _, hash) = store.chunks_missing_embedding(100).unwrap()[0].clone();
-        store.embed_cache_put(&hash, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let (chunk_id, _, _hash) = store.chunks_missing_embedding(100).unwrap()[0].clone();
         store
             .put_embeddings(&[(chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
             .unwrap();
 
         // Same model_id, different dim: must be treated as a real change.
         assert!(store.set_model("mock", 8).unwrap());
-        assert!(store.embed_cache_get(&hash).unwrap().is_none());
         assert_eq!(
             store
                 .knn_chunks(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5)

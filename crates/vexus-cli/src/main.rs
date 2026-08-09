@@ -11,7 +11,7 @@ use vexus_watch::pipeline;
 /// worth comparing between their old and new build.
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    "\nindex schema: 2",
+    "\nindex schema: 3",
     "\nembedding model: jina-code-v2-q",
 );
 
@@ -19,7 +19,7 @@ const LONG_VERSION: &str = concat!(
 // written out rather than interpolated — which would let it drift silently
 // the next time the schema changes. This fails the build instead.
 const _: () = assert!(
-    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'2' && vexus_core::SCHEMA_VERSION.len() == 1,
+    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'3' && vexus_core::SCHEMA_VERSION.len() == 1,
     "LONG_VERSION's hardcoded schema version no longer matches vexus_core::SCHEMA_VERSION"
 );
 
@@ -366,10 +366,7 @@ fn main() -> Result<()> {
                         // (e.g. a flaky ONNX run) must not abort the command.
                         match pipeline::embed_pending(&mut store, embedder.as_ref()) {
                             Ok(er) => {
-                                println!(
-                                    "embedded: {} (cache hits: {})",
-                                    er.embedded, er.from_cache
-                                )
+                                println!("embedded: {}", er.embedded)
                             }
                             Err(e) => {
                                 eprintln!(
