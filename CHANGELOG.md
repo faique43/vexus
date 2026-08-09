@@ -1,5 +1,110 @@
 # Changelog
 
+## v0.3.0 — retrieval quality, honest edges, half the index
+
+`explore` used to rank a test function above the production symbol it tests
+whenever both matched a query, and there was no eval case capable of
+noticing. This release fixes the ranking, builds the ground truth that
+proves it, and takes several other things off the "known but unmeasured"
+list.
+
+**This release rebuilds your index** (schema 2 → 3, see *Storage*). Run
+`vexus index` once after upgrading; `status` will tell you if you forget.
+
+### Retrieval quality
+
+- **Structural ranking priors.** Chunks that are rarely the answer are now
+  demoted before the top-N cut, so they no longer decide what `explore`
+  expands from: test code ×0.4 (by path convention, or by a `#[cfg(test)]`
+  content sniff for Rust's inline test modules, which live on production
+  paths), module import preamble ×0.7, and sub-32-token fragments ×0.7. The
+  test penalty is suspended entirely when the question is *about* tests, so
+  "unit tests for X" still finds them. Coefficients are overridable via
+  `VEXUS_PRIOR_*` for tuning, and are backed by a documented sweep rather
+  than intuition.
+
+  Measured on the real embedder: `clean@5` 0.3333 → 1.0000,
+  `answer_in_bundle` 0.8966 → 1.0000, MRR 0.5719 → 0.7890, nDCG@10 0.5960 →
+  0.7191, recall@5 0.8758 → 0.9061.
+
+- **Negative labels in the eval corpora.** Queries can now declare
+  `expect_not` — qualnames a correct answer must *not* surface — feeding two
+  new metrics: `clean@5` (search) and `bundle_clean` (explore). Every metric
+  before this was recall-shaped, so "the right answer is in there, buried
+  under four test functions" scored identically to a clean result. The
+  corpora gained test code in three shapes (a `tests/` directory, inline
+  `#[cfg(test)]` modules on production paths, and `*.test.ts`) plus an
+  import-heavy barrel file, and 4 queries that deliberately *seek* tests.
+
+### Call graph
+
+- **The resolver no longer guesses a callee out of a crowd.** A
+  receiver-qualified call site (`metrics.push(x)`) extracts as the bare
+  method name, so `push` proposed every `push` in the repo and the arity
+  tier picked whichever came first — a confidently wrong edge that nothing
+  downstream could distinguish from a real one. Cross-file matches now
+  require the name to be unambiguous (or the candidate set small); anything
+  else stays an honest `[unresolved]` row. Same-file definitions are exempt,
+  so a local definition still wins however common the name is elsewhere.
+  Edge precision 0.8943 → 0.9091 with **recall unchanged** — every discarded
+  match was wrong.
+
+- **Elixir def heads no longer emit self-edges.** `def total(items, tax) do`
+  parses as a call containing another call — the def head — so every Elixir
+  function carried an edge to itself, indistinguishable from real
+  single-line recursion. `@moduledoc` leaked the same way. Edge precision
+  0.8871 → 0.8943.
+
+- **Duplicate resolved rows collapse in `callees`.** A parent calling the
+  same callee from four sites rendered four byte-identical rows (`EdgeHit`
+  carries no call-site position). They now render once with `×4`; headers
+  still report the raw call-site count.
+
+### Storage
+
+- **`embed_cache` is gone — indexes are roughly half the size.** Every
+  embedding was stored twice: in `vec_chunks` (what KNN searches) and again
+  in a content-hash-keyed cache read only when re-embedding. On this repo's
+  own index: **18.96 MB → 8.80 MB**. The cost is re-embedding content that
+  churns away and comes back; the cache charged every index a third of its
+  size for that case.
+
+- **Schema 2 → 3.** Writers rebuild, readers say so. As always, the index is
+  a cache with no migration path, on purpose.
+
+### Staying current
+
+- **vexus now tells you when it is out of date.** A stale install is
+  invisible — it keeps working, minus whatever the newer version fixed. One
+  line now appears in `status`, in `serve`'s stderr banner, and after
+  `vexus index`. The read path never touches the network (`status` is on an
+  agent's hot path, and the banner runs before the MCP handshake): refreshes
+  happen off-thread or after indexing, cached for 24h, silent on failure,
+  and disabled entirely by `VEXUS_NO_UPDATE_CHECK=1`.
+
+### Agent adoption — measured for the first time
+
+The agent-in-the-loop harness had never produced a number, and the reason
+was a bug rather than neglect: `--output-format json` returns only the final
+result object in current Claude Code, with no record of tool calls, so every
+counter read zero regardless of how the agent behaved. It now reads
+`stream-json` and counts `tool_use` blocks.
+
+First real run (2026-08-09, `claude-sonnet-4-5`, pyapp fixture): **5 vexus
+calls, 0 Grep/Glob/Read — a 100% vexus share**, each task answered in a
+single `explore`/`impact` call. Four questions on a 30-file fixture is not a
+broad result, and the README says so, but the steering claim is no longer
+unmeasured. The harness also gained model pinning, real session-cost
+reporting, and works with a logged-in `claude` CLI (no separate API key).
+
+### Testing and dependencies
+
+- Explore's **Medium tier** (≥2000 chunks — what real repositories hit) is
+  now pinned by a generated 800-file fixture; both eval corpora are small
+  enough that its parameters had never been exercised.
+- tree-sitter 0.26, tree-sitter-rust 0.24, tree-sitter-python 0.25, ureq 3
+  (which also removes a duplicate major from the tree).
+
 ## v0.2.1 — assignment-defined functions
 
 A dogfood pass over one real OSS repo per supported language found that
