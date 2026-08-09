@@ -71,7 +71,9 @@ pub struct CorpusAccum {
     pub recall_at_10: Accum,
     pub mrr: Accum,
     pub ndcg_at_10: Accum,
+    pub clean_at_5: Accum,
     pub answer_in_bundle: Accum,
+    pub bundle_clean: Accum,
     pub edges: EdgeCounts,
 }
 
@@ -82,7 +84,9 @@ impl CorpusAccum {
             recall_at_10: self.recall_at_10.combine(other.recall_at_10),
             mrr: self.mrr.combine(other.mrr),
             ndcg_at_10: self.ndcg_at_10.combine(other.ndcg_at_10),
+            clean_at_5: self.clean_at_5.combine(other.clean_at_5),
             answer_in_bundle: self.answer_in_bundle.combine(other.answer_in_bundle),
+            bundle_clean: self.bundle_clean.combine(other.bundle_clean),
             edges: self.edges.combine(other.edges),
         }
     }
@@ -94,7 +98,9 @@ impl CorpusAccum {
             recall_at_10: metrics::round4(self.recall_at_10.mean()),
             mrr: metrics::round4(self.mrr.mean()),
             ndcg_at_10: metrics::round4(self.ndcg_at_10.mean()),
+            clean_at_5: metrics::round4(self.clean_at_5.mean()),
             answer_in_bundle: metrics::round4(self.answer_in_bundle.mean()),
+            bundle_clean: metrics::round4(self.bundle_clean.mean()),
             edge_precision: metrics::round4(self.edges.precision()),
             edge_recall: metrics::round4(self.edges.recall()),
         }
@@ -251,6 +257,13 @@ fn score_search_query(
             .ndcg_at_10
             .push(metrics::ndcg_at_10(&ranked, &query.graded));
     }
+    // Same "not applicable, don't push" contract as `graded`/ndcg@10: an
+    // empty forbidden set contributes nothing rather than a fake 0.0.
+    if !query.expect_not.is_empty() {
+        accum
+            .clean_at_5
+            .push(metrics::clean_at_k(&ranked, &query.expect_not, 5));
+    }
     Ok(())
 }
 
@@ -263,6 +276,13 @@ fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut Cor
         first_chunk_content(state, qualname)
     });
     accum.answer_in_bundle.push(if passed { 1.0 } else { 0.0 });
+    if !query.expect_not.is_empty() {
+        accum.bundle_clean.push(metrics::bundle_clean(
+            &bundle,
+            &query.expect_not,
+            |qualname| first_chunk_content(state, qualname),
+        ));
+    }
 }
 
 /// The first (lowest `start_line`) source chunk's content for a resolved

@@ -25,6 +25,13 @@ pub struct Query {
     pub tool: String,
     #[serde(default)]
     pub expect: Vec<String>,
+    /// Qualnames a correct result must NOT surface — the negative side of
+    /// `expect`. Feeds `clean@5` (search: not in the top-5 ranked qualnames)
+    /// and `bundle_clean` (explore: first chunk not present in the bundle).
+    /// Queries with an empty list simply don't contribute to those metrics,
+    /// same as `graded` and `ndcg@10`.
+    #[serde(default)]
+    pub expect_not: Vec<String>,
     #[serde(default)]
     pub graded: HashMap<String, u8>,
 }

@@ -161,6 +161,48 @@ pub fn answer_in_bundle(
         .all(|qualname| first_chunk_content(qualname).is_some_and(|c| bundle_text.contains(&c)))
 }
 
+/// clean@k for one `search` query: the fraction of `expect_not` qualnames
+/// NOT present in the first `k` entries of `ranked` — the precision mirror
+/// of [`recall_at_k`], measuring that results a correct answer must exclude
+/// (e.g. a test double of the production symbol) stay out of the top ranks.
+/// Higher is better; `1.0` means every forbidden qualname stayed out.
+/// `0.0` when `expect_not` is empty — callers must skip pushing the metric
+/// for such queries (an empty forbidden set is "not applicable", not a
+/// perfect score), the same contract `ndcg_at_10` has with `graded`.
+pub fn clean_at_k(ranked: &[String], expect_not: &[String], k: usize) -> f64 {
+    if expect_not.is_empty() {
+        return 0.0;
+    }
+    let top_k: HashSet<&str> = ranked.iter().take(k).map(String::as_str).collect();
+    let kept_out = expect_not
+        .iter()
+        .filter(|e| !top_k.contains(e.as_str()))
+        .count();
+    kept_out as f64 / expect_not.len() as f64
+}
+
+/// bundle_clean for one `explore` query: the fraction of `expect_not`
+/// qualnames whose first source chunk does NOT appear verbatim (substring)
+/// in `bundle_text` — the precision mirror of [`answer_in_bundle`]. A
+/// forbidden qualname that fails to resolve (`first_chunk_content` returns
+/// `None`) counts as kept-out: nothing of it can be in the bundle.
+/// Higher is better. `0.0` when `expect_not` is empty — same "not
+/// applicable, don't push" contract as [`clean_at_k`].
+pub fn bundle_clean(
+    bundle_text: &str,
+    expect_not: &[String],
+    mut first_chunk_content: impl FnMut(&str) -> Option<String>,
+) -> f64 {
+    if expect_not.is_empty() {
+        return 0.0;
+    }
+    let kept_out = expect_not
+        .iter()
+        .filter(|qualname| first_chunk_content(qualname).is_none_or(|c| !bundle_text.contains(&c)))
+        .count();
+    kept_out as f64 / expect_not.len() as f64
+}
+
 /// One labeled ground-truth call edge (`eval/edges/{repo}.yaml` row) — just
 /// the two qualnames; `resolved` vs `heuristic` (the yaml's `expected` field)
 /// doesn't change how a pair is scored (see `edge_counts`'s doc comment).
@@ -269,14 +311,17 @@ pub fn edge_counts(
     }
 }
 
-/// The exact seven metrics reported: `recall@5`, `recall@10`, `mrr`,
-/// `ndcg@10` (search); `answer_in_bundle` (explore); `edge_precision`,
-/// `edge_recall` (callers/callees vs labeled ground truth). Each is
+/// The exact nine metrics reported: `recall@5`, `recall@10`, `mrr`,
+/// `ndcg@10`, `clean@5` (search); `answer_in_bundle`, `bundle_clean`
+/// (explore); `edge_precision`, `edge_recall` (callers/callees vs labeled
+/// ground truth). Each is
 /// already rounded to 4 decimal
 /// places via [`round4`] — the shape written to `eval/last-run.json`, both
 /// per corpus and for "overall". Field names are renamed on serialization to
 /// match the literal metric names (`@` is a valid JSON string-key
-/// character).
+/// character). `clean@5` and `bundle_clean` carry `#[serde(default)]` so a
+/// baseline JSON blessed before they existed still parses (reading as 0.0,
+/// which can only ever ratchet upward).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MetricSet {
     #[serde(rename = "recall@5")]
@@ -286,7 +331,11 @@ pub struct MetricSet {
     pub mrr: f64,
     #[serde(rename = "ndcg@10")]
     pub ndcg_at_10: f64,
+    #[serde(rename = "clean@5", default)]
+    pub clean_at_5: f64,
     pub answer_in_bundle: f64,
+    #[serde(default)]
+    pub bundle_clean: f64,
     pub edge_precision: f64,
     pub edge_recall: f64,
 }
@@ -367,6 +416,59 @@ mod tests {
         // — the top-k set dedupes naturally.
         let ranked = strings(&["a", "a", "a"]);
         assert_eq!(recall_at_k(&ranked, &strings(&["a"]), 5), 1.0);
+    }
+
+    // ---- clean_at_k --------------------------------------------------------
+
+    #[test]
+    fn clean_at_k_hand_computed() {
+        // Forbidden set has 3 qualnames; top-5 window contains 1 of them
+        // (bad_a) -> 2 of 3 kept out.
+        let ranked = strings(&["good", "bad_a", "x", "y", "z", "bad_b"]);
+        let forbidden = strings(&["bad_a", "bad_b", "bad_c"]);
+        assert!((clean_at_k(&ranked, &forbidden, 5) - 2.0 / 3.0).abs() < 1e-12);
+        // Widening to top-6 pulls bad_b in too -> 1 of 3 kept out.
+        assert!((clean_at_k(&ranked, &forbidden, 6) - 1.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn clean_at_k_perfect_and_zero() {
+        let ranked = strings(&["a", "b"]);
+        assert_eq!(clean_at_k(&ranked, &strings(&["x", "y"]), 5), 1.0);
+        assert_eq!(clean_at_k(&ranked, &strings(&["a", "b"]), 5), 0.0);
+    }
+
+    #[test]
+    fn clean_at_k_empty_forbidden_is_zero_not_applicable() {
+        // Callers must not push this value — 0.0 here is a sentinel for
+        // "skip", never a score.
+        assert_eq!(clean_at_k(&strings(&["a"]), &[], 5), 0.0);
+    }
+
+    // ---- bundle_clean ------------------------------------------------------
+
+    #[test]
+    fn bundle_clean_hand_computed() {
+        let bundle = "fn prod() {}\nfn test_prod() { prod() }";
+        let chunks: HashMap<&str, &str> = [
+            ("app.test_prod", "fn test_prod() { prod() }"), // present -> leaked
+            ("app.other_test", "fn other_test() {}"),       // absent  -> kept out
+        ]
+        .into();
+        let forbidden = strings(&["app.test_prod", "app.other_test"]);
+        let got = bundle_clean(bundle, &forbidden, |q| chunks.get(q).map(|s| s.to_string()));
+        assert!((got - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bundle_clean_unresolvable_forbidden_qualname_counts_as_kept_out() {
+        let got = bundle_clean("anything", &strings(&["gone.symbol"]), |_| None);
+        assert_eq!(got, 1.0);
+    }
+
+    #[test]
+    fn bundle_clean_empty_forbidden_is_zero_not_applicable() {
+        assert_eq!(bundle_clean("anything", &[], |_| Some("x".into())), 0.0);
     }
 
     // ---- reciprocal_rank ---------------------------------------------------
@@ -608,7 +710,9 @@ mod tests {
             recall_at_10: 0.9,
             mrr: 0.75,
             ndcg_at_10: 0.6667,
+            clean_at_5: 0.7,
             answer_in_bundle: 0.5,
+            bundle_clean: 0.6,
             edge_precision: 0.95,
             edge_recall: 0.85,
         };
@@ -617,9 +721,25 @@ mod tests {
         assert_eq!(json["recall@10"], 0.9);
         assert_eq!(json["mrr"], 0.75);
         assert_eq!(json["ndcg@10"], 0.6667);
+        assert_eq!(json["clean@5"], 0.7);
         assert_eq!(json["answer_in_bundle"], 0.5);
+        assert_eq!(json["bundle_clean"], 0.6);
         assert_eq!(json["edge_precision"], 0.95);
         assert_eq!(json["edge_recall"], 0.85);
+    }
+
+    #[test]
+    fn metric_set_parses_a_baseline_json_written_before_the_clean_metrics_existed() {
+        // Committed baselines predating clean@5/bundle_clean must keep
+        // parsing — both fields default to 0.0, which can only ratchet up.
+        let json = r#"{
+            "recall@5": 0.2, "recall@10": 0.23, "mrr": 0.1, "ndcg@10": 0.1,
+            "answer_in_bundle": 0.44, "edge_precision": 0.88, "edge_recall": 0.94
+        }"#;
+        let set: MetricSet = serde_json::from_str(json).unwrap();
+        assert_eq!(set.clean_at_5, 0.0);
+        assert_eq!(set.bundle_clean, 0.0);
+        assert_eq!(set.recall_at_5, 0.2);
     }
 
     // ---- round4 --------------------------------------------------------------
