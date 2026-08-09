@@ -13,16 +13,33 @@ actually did.
 
 ```sh
 cargo build --release -p vexus-cli
-ANTHROPIC_API_KEY=... bash eval/agent/run.sh
+VEXUS_AGENT_MODEL=claude-sonnet-4-5 bash eval/agent/run.sh
 ```
 
-Requirements: the `claude` CLI on `PATH`, a real API key, and a built
-binary. It copies a fixture corpus to a temp directory, indexes it, writes an
+Requirements: the `claude` CLI on `PATH`, a built binary, and working auth —
+**either** an `ANTHROPIC_API_KEY` **or** a `claude` CLI that is already
+logged in (subscription auth works; no separate API key purchase needed).
+The script says which one it is using, and aborts on the first failed
+session rather than reporting a summary of zeros that would read as a
+steering result.
+
+It copies a fixture corpus to a temp directory, indexes it, writes an
 `.mcp.json` pointing at `vexus serve`, and runs each task as a separate
 `claude -p` session with a JSON transcript.
 
-Results land in `eval/agent/results/`: one transcript per task plus a
-`summary.txt` with the counts.
+| variable | effect |
+| --- | --- |
+| `VEXUS_AGENT_MODEL` | Pins the model. **Set it** — an unpinned run uses whatever the CLI defaults to that day, so its numbers aren't comparable to a previous one. Recorded in `summary.txt` either way. |
+| `VEXUS_AGENT_CORPUS` | Points at a different repo. The default fixture is 30 files; a few thousand is where tool choice actually gets interesting, so pointing this at a real checkout is the more realistic run. |
+| `VEXUS_BINARY` | Uses a different `vexus` build. |
+
+Results land in `eval/agent/results/` (gitignored): one transcript per task
+plus a `summary.txt` carrying the model, date, per-task counts, the vexus
+share, and the total session cost. Cost comes from each transcript's own
+`total_cost_usd`; a CLI that doesn't emit it reports `?` rather than a
+fabricated zero.
+
+Expect a handful of cents per run on the default corpus.
 
 ## Reading the result
 

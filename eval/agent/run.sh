@@ -12,10 +12,15 @@
 # harness: the thing under test is a real agent session, so the closer this
 # is to how someone actually runs one, the more the result means.
 #
-# Usage:  ANTHROPIC_API_KEY=... bash eval/agent/run.sh
-# Output: eval/agent/results/{task-N.json,summary.txt}
+# Usage:  bash eval/agent/run.sh
+#   Auth: an ANTHROPIC_API_KEY env var, or a `claude` CLI already logged in
+#   (subscription auth) — either works; without both, sessions fail fast.
+#   Model: set VEXUS_AGENT_MODEL to pin one (recorded in the summary either
+#   way — unpinned runs aren't comparable across time).
+# Output: eval/agent/results/{task-N.jsonl,summary.txt}
 #
-# Costs real API tokens. Nothing in CI runs it without an explicit key.
+# Costs real API tokens or subscription usage. Nothing in CI runs it
+# without an explicit key.
 
 set -euo pipefail
 
@@ -23,14 +28,17 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 corpus="${VEXUS_AGENT_CORPUS:-$repo_root/eval/corpora/pyapp}"
 results="$repo_root/eval/agent/results"
 binary="${VEXUS_BINARY:-$repo_root/target/release/vexus}"
+model="${VEXUS_AGENT_MODEL:-}"
 
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ANTHROPIC_API_KEY is not set — this harness makes real API calls." >&2
-  exit 1
-fi
 if ! command -v claude >/dev/null 2>&1; then
   echo "the 'claude' CLI is not on PATH — install Claude Code to run this." >&2
   exit 1
+fi
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  # A logged-in CLI (subscription auth) works too — announce which auth is
+  # in play so a failed run reads correctly, and fail fast on the first
+  # session rather than pretending "0 vexus calls" was a steering result.
+  echo "note: ANTHROPIC_API_KEY not set — relying on the claude CLI's own login." >&2
 fi
 if [ ! -x "$binary" ]; then
   echo "no vexus binary at $binary — run: cargo build --release -p vexus-cli" >&2
@@ -47,7 +55,11 @@ tasks=(
 )
 
 mkdir -p "$results"
-: > "$results/summary.txt"
+{
+  echo "model: ${model:-cli default (unpinned — set VEXUS_AGENT_MODEL for comparable runs)}"
+  echo "date:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo
+} > "$results/summary.txt"
 
 # Work on a copy: the agent may write, and the corpus is committed fixture
 # data that the retrieval metrics depend on being byte-stable.
@@ -63,25 +75,41 @@ EOF
 
 vexus_total=0
 grep_total=0
+cost_total="0"
+cost_known=1
 
 for i in "${!tasks[@]}"; do
   task="${tasks[$i]}"
   echo "task $((i + 1)): $task"
-  out="$results/task-$((i + 1)).json"
+  out="$results/task-$((i + 1)).jsonl"
+  model_args=()
+  if [ -n "$model" ]; then
+    model_args=(--model "$model")
+  fi
 
-  # --output-format json gives a machine-readable transcript including the
-  # tool calls, which is the whole measurement.
+  # --output-format stream-json (with --verbose) emits every message as it
+  # happens, including the assistant's tool_use blocks — that stream IS the
+  # measurement. Plain `--output-format json` returns only the final result
+  # object, with no record of which tools ran, so it cannot answer the
+  # question this harness exists to ask.
   # --allowedTools is not optional: `claude -p` won't auto-approve a project
   # .mcp.json server, and Grep/Read are permitted more readily than MCP tools.
   # Without it the harness would report "the agent didn't use vexus" for a
   # permissions reason and read as a steering failure — a biased measurement
   # is worse than none.
   (cd "$workdir/repo" && claude -p "$task" \
-      --output-format json \
+      --output-format stream-json --verbose \
       --mcp-config .mcp.json \
+      "${model_args[@]}" \
       --allowedTools "mcp__vexus__explore,mcp__vexus__search,mcp__vexus__open,mcp__vexus__callers,mcp__vexus__callees,mcp__vexus__impact,mcp__vexus__status,Grep,Glob,Read" \
       > "$out") || {
     echo "  session failed; see $out" >&2
+    if [ "$i" -eq 0 ]; then
+      # First session failing is almost always auth/setup, not steering —
+      # aborting beats a summary full of zeros that reads as a result.
+      echo "aborting: the first session failed (check auth: API key or 'claude' login)." >&2
+      exit 1
+    fi
     continue
   }
 
@@ -90,13 +118,27 @@ for i in "${!tasks[@]}"; do
   # `|| true` on each: under `set -o pipefail` a grep with no matches exits 1
   # and would abort the harness — and "no vexus calls" is exactly the result
   # worth recording, not crashing on.
-  vexus_calls=$( { grep -o '"name":"mcp__vexus__[a-z]*"' "$out" || true; } | wc -l | tr -d ' ')
-  grep_calls=$( { grep -oE '"name":"(Grep|Glob|Read)"' "$out" || true; } | wc -l | tr -d ' ')
+  # Count only names attached to a tool_use block, so a tool merely
+  # *mentioned* in prose can't inflate the count.
+  vexus_calls=$( { grep -o '"type":"tool_use"[^}]*"name":"mcp__vexus__[a-z]*"' "$out" || true; } | wc -l | tr -d ' ')
+  grep_calls=$( { grep -oE '"type":"tool_use"[^}]*"name":"(Grep|Glob|Read)"' "$out" || true; } | wc -l | tr -d ' ')
   vexus_total=$((vexus_total + vexus_calls))
   grep_total=$((grep_total + grep_calls))
 
-  printf 'task %d: vexus=%s grep/read=%s :: %s\n' \
-    "$((i + 1))" "$vexus_calls" "$grep_calls" "$task" >> "$results/summary.txt"
+  # Session cost, from the transcript's own result object. Absent (older
+  # CLI, different schema) reports as "?" rather than a fabricated 0 — the
+  # header promises this number, so it must be real or visibly missing.
+  cost=$( { grep -o '"total_cost_usd":[0-9.]*' "$out" | tail -1 | cut -d: -f2 || true; } )
+  if [ -n "$cost" ]; then
+    cost_total=$(awk -v a="$cost_total" -v b="$cost" 'BEGIN { printf "%.4f", a + b }')
+    cost_label="\$$cost"
+  else
+    cost_known=0
+    cost_label="?"
+  fi
+
+  printf 'task %d: vexus=%s grep/read=%s cost=%s :: %s\n' \
+    "$((i + 1))" "$vexus_calls" "$grep_calls" "$cost_label" "$task" >> "$results/summary.txt"
 done
 
 {
@@ -105,6 +147,11 @@ done
   if [ "$((vexus_total + grep_total))" -gt 0 ]; then
     printf 'vexus share: %d%%\n' \
       $(( vexus_total * 100 / (vexus_total + grep_total) ))
+  fi
+  if [ "$cost_known" -eq 1 ]; then
+    echo "session cost: \$$cost_total"
+  else
+    echo "session cost: unavailable (no total_cost_usd in this CLI's transcript)"
   fi
 } >> "$results/summary.txt"
 
