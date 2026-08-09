@@ -218,6 +218,11 @@ pub fn status_text(store: &vexus_core::Store, role: Option<bool>) -> Result<Stri
     #[cfg(not(feature = "onnx"))]
     lines
         .push("embeddings: unavailable (structural-only build — keyword+graph search only)".into());
+    // Cache-only read (see `update`): `status` is on an agent's hot path and
+    // must never make a network call.
+    if let Some(notice) = crate::update::notice() {
+        lines.push(notice);
+    }
     if let Some(is_writer) = role {
         if let Some(role) = role_line(is_writer) {
             lines.push(role);

@@ -13,6 +13,7 @@ anyhow.workspace = true
 vexus-core = { path = "../vexus-core" }
 vexus-embed = { path = "../vexus-embed", default-features = false }
 vexus-watch = { path = "../vexus-watch", default-features = false }
+ureq.workspace = true
 rmcp = { version = "3.0.0-beta.2", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 
