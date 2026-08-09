@@ -259,3 +259,54 @@
   expect:
     - utils.retry.retry_with_backoff
     - services.billing_service._submit_charge
+
+# --- negative labels: production answers must beat their own tests --------
+# Each expect_not row names test symbols that quote the production
+# vocabulary verbatim (tests/test_invoices.py, tests/test_auth.py) — the
+# clean@5 / bundle_clean headroom the priors work is tuned against.
+
+- q: "where are invoices created and persisted"
+  expect:
+    - services.invoice_service.create_invoice
+  expect_not:
+    - tests.test_invoices.test_create_invoice_persists_and_notifies
+    - tests.test_invoices.test_create_invoice_rejects_zero_amount
+
+- q: "how does an invoice get created and the customer notified"
+  tool: explore
+  expect:
+    - services.invoice_service.create_invoice
+    - services.notification_service.notify_invoice_created
+  expect_not:
+    - tests.test_invoices.test_create_invoice_persists_and_notifies
+
+- q: "how does brute force login protection work"
+  expect:
+    - services.auth_service.authenticate
+    - services.rate_limiter.RateLimiter.allow
+  expect_not:
+    - tests.test_auth.test_authenticate_throttles_repeated_login_attempts
+
+- q: "how are session tokens issued and revoked"
+  expect:
+    - services.auth_service.issue_token
+    - services.auth_service.revoke_token
+  expect_not:
+    - tests.test_auth.test_issue_and_revoke_token_round_trip
+
+- q: "how does refunding an invoice work"
+  tool: explore
+  expect:
+    - services.invoice_service.refund_invoice
+  expect_not:
+    - tests.test_invoices.test_refund_invoice_marks_the_invoice_refunded
+
+# A query that ASKS for tests must get them — pins the query-aware bypass
+# so the test penalty never hides tests from someone looking for tests.
+- q: "unit tests for invoice creation"
+  expect:
+    - tests.test_invoices.test_create_invoice_persists_and_notifies
+
+- q: "tests covering login throttling"
+  expect:
+    - tests.test_auth.test_authenticate_throttles_repeated_login_attempts

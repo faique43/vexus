@@ -411,3 +411,56 @@
   graded:
     gamescripts.loyalty.tier_label: 3
     gamescripts.loyalty.points_for: 2
+
+# --- negative labels: production answers must beat their own tests --------
+# Test symbols live in three shapes on purpose: inline #[cfg(test)] mod
+# tests (non-test path — exercises content sniffing), service/tests/
+# integration.rs (tests/ dir pattern), and orders.test.ts (*.test.ts
+# filename pattern).
+
+- q: "where is an order cancelled"
+  expect:
+    - service.src.services.order_service.cancel_order
+  expect_not:
+    - service.src.services.order_service.cancel_order_persists_the_cancelled_status
+    - service.tests.integration.cancelling_an_unknown_order_still_notifies
+
+- q: "how does cancelling an order notify the customer"
+  tool: explore
+  expect:
+    - service.src.services.order_service.cancel_order
+    - service.src.services.notifications.notify_order_cancelled
+  expect_not:
+    - service.src.services.order_service.cancel_order_persists_the_cancelled_status
+    - service.tests.integration.cancelling_an_unknown_order_still_notifies
+
+- q: "how does the frontend place a new order"
+  expect:
+    - frontend.src.api.orders.placeOrder
+  expect_not:
+    - frontend.src.api.orders.test.placeOrderRejectsADuplicateSubmission
+    - frontend.src.api.orders.test.fetchOrderRequestsTheOrderEndpoint
+
+- q: "how is a placed order persisted with retries"
+  tool: explore
+  expect:
+    - service.src.services.order_service.place_order
+    - service.src.utils.retry.retry_with_backoff
+  expect_not:
+    - service.src.services.order_service.place_order_returns_a_generated_order_id
+    - service.tests.integration.order_lifecycle_place_pay_cancel
+
+- q: "where do we validate a session token"
+  expect:
+    - service.src.services.auth.validate
+  expect_not:
+    - service.src.services.auth.validate_rejects_an_empty_session_token
+
+# Test-seeking queries must still find tests — pins the query-aware bypass.
+- q: "integration tests for the order lifecycle"
+  expect:
+    - service.tests.integration.order_lifecycle_place_pay_cancel
+
+- q: "unit tests for duplicate order submission"
+  expect:
+    - frontend.src.api.orders.test.placeOrderRejectsADuplicateSubmission

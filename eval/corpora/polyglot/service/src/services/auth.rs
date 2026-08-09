@@ -17,3 +17,18 @@ pub fn register_user(email: &str, display_name: &str) -> String {
 pub fn validate(token: &str) -> bool {
     !token.is_empty()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_user_mints_a_user_id() {
+        assert!(register_user("a@example.com", "A").starts_with("usr"));
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_session_token() {
+        assert!(!validate(""));
+    }
+}
