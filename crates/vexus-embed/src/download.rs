@@ -63,10 +63,12 @@ fn fetch(url: &str, name: &str, dest: &Path) -> Result<()> {
         .call()
         .with_context(|| format!("GET {url}"))?;
     let total: Option<u64> = resp
-        .header("Content-Length")
+        .headers()
+        .get(ureq::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .filter(|&n| n >= PROGRESS_MIN_BYTES);
-    let mut reader = resp.into_reader();
+    let mut reader = resp.into_body().into_reader();
     let mut out = std::fs::File::create(dest)?;
     match total {
         None => {
