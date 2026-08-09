@@ -6,6 +6,7 @@ pub mod format;
 pub mod server;
 pub mod state;
 pub mod tools;
+pub mod update;
 mod writer;
 
 use std::path::{Path, PathBuf};
@@ -69,6 +70,13 @@ async fn serve_async(root: PathBuf) -> Result<()> {
         root.display(),
         if is_writer { "writer" } else { "reader" }
     );
+    if let Some(notice) = update::notice() {
+        eprintln!("vexus: {notice}");
+    }
+    // Refresh off-thread and detached: the handshake must not wait on a
+    // network round-trip, and a slow or hanging request must not delay
+    // shutdown. Whatever it learns is picked up by the next invocation.
+    std::thread::spawn(update::refresh_if_stale);
 
     // Only the writer does startup indexing. The writer also always needs an
     // embedder (for `start_writer` below), so it's built exactly once here
