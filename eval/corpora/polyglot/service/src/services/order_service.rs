@@ -34,3 +34,25 @@ fn persist_order(order: &Order) -> bool {
 fn persist_status(order_id: &str, status: &str) -> bool {
     !order_id.is_empty() && !status.is_empty()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn place_order_returns_a_generated_order_id() {
+        let id = place_order("cus_1", vec![("sku_1".to_string(), 2)], 4200);
+        assert!(id.starts_with("ord"));
+    }
+
+    #[test]
+    fn cancel_order_persists_the_cancelled_status() {
+        let id = place_order("cus_2", vec![("sku_2".to_string(), 1)], 900);
+        assert!(cancel_order("cus_2", &id));
+    }
+
+    #[test]
+    fn mark_order_paid_rejects_an_empty_order_id() {
+        assert!(!mark_order_paid(""));
+    }
+}

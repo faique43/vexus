@@ -185,6 +185,13 @@ fn validate_corpus(repo: &str) {
         "{repo}: expected >= 10 queries with a `graded` map, got {graded_total}"
     );
 
+    let expect_not_total = queries.iter().filter(|q| !q.expect_not.is_empty()).count();
+    assert!(
+        expect_not_total >= 5,
+        "{repo}: expected >= 5 queries with an `expect_not` list (the clean@5 / \
+         bundle_clean ground truth), got {expect_not_total}"
+    );
+
     for tool in ["callers", "callees"] {
         let count = queries.iter().filter(|q| q.tool == tool).count();
         assert!(
