@@ -13,7 +13,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 blake3 = "1"
 tempfile = "3"
 ureq = "2"
-sha2 = "0.10"
+sha2 = "0.11"
 notify = "8"
 dunce = "1"
 ignore = "0.4"
