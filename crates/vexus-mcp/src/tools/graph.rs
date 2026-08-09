@@ -30,23 +30,33 @@ fn sort_unresolved_last(edges: &mut [EdgeHit]) {
     edges.sort_by_key(|e| (e.depth, e.confidence.is_none()));
 }
 
-/// Collapse duplicate unresolved rows (same name at the same depth) into a
-/// single row with a count — seven `useCallback [unresolved]` rows carry no
-/// more information than one (field report: a React hook's callees were 18
-/// rows, all duplicated builtins). Resolved rows pass through untouched:
-/// they point at distinct real locations even when names repeat.
-fn collapse_unresolved(edges: &[EdgeHit]) -> Vec<(EdgeHit, usize)> {
+/// Collapse duplicate rows (at the same depth) into a single row with a
+/// count — seven `useCallback [unresolved]` rows carry no more information
+/// than one (field report: a React hook's callees were 18 rows, all
+/// duplicated builtins), and a parent that calls the same resolved callee
+/// from four call sites produces four byte-identical rows on the `callees`
+/// path (it deliberately emits one row per edge; `EdgeHit` carries no
+/// call-site location, so the rows add nothing but repetition).
+///
+/// Keys: unresolved rows match on `(depth, qualname)` — their "qualname" is
+/// just the raw call-site text. Resolved rows match on
+/// `(depth, symbol.id, via_name)`: the symbol id pins the real target, and
+/// `via_name` keeps differently-spelled call sites (`foo()` vs
+/// `mod::foo()`) reaching the same symbol as distinct rows.
+fn collapse_rows(edges: &[EdgeHit]) -> Vec<(EdgeHit, usize)> {
     let mut out: Vec<(EdgeHit, usize)> = Vec::new();
     for e in edges {
-        if e.confidence.is_none() {
-            if let Some(prev) = out.iter_mut().find(|(p, _)| {
-                p.confidence.is_none()
-                    && p.depth == e.depth
-                    && p.symbol.qualname == e.symbol.qualname
-            }) {
-                prev.1 += 1;
-                continue;
-            }
+        let dup = out.iter_mut().find(|(p, _)| {
+            p.depth == e.depth
+                && if e.confidence.is_none() {
+                    p.confidence.is_none() && p.symbol.qualname == e.symbol.qualname
+                } else {
+                    p.confidence.is_some() && p.symbol.id == e.symbol.id && p.via_name == e.via_name
+                }
+        });
+        if let Some(prev) = dup {
+            prev.1 += 1;
+            continue;
         }
         out.push((e.clone(), 1));
     }
@@ -113,7 +123,7 @@ pub fn callers_text(
         info.qualname,
         depth
     );
-    let rows = collapse_unresolved(&edges);
+    let rows = collapse_rows(&edges);
     apply_header(fresh_header, render_capped(header, &rows, budget_tokens))
 }
 
@@ -143,13 +153,15 @@ pub fn callees_text(
     drop(store);
 
     sort_unresolved_last(&mut edges);
+    // Header counts raw call sites (pre-collapse) — a parent calling one
+    // callee four times still has 4 callee edges, rendered as one ×4 row.
     let header = format!(
         "{} callee(s) of {} (depth {}):",
         edges.len(),
         info.qualname,
         depth
     );
-    let rows = collapse_unresolved(&edges);
+    let rows = collapse_rows(&edges);
     apply_header(fresh_header, render_capped(header, &rows, budget_tokens))
 }
 
@@ -534,9 +546,39 @@ mod tests {
             !out.contains("(:0)"),
             "synthetic unresolved rows must not render a fake location: {out:?}"
         );
-        // resolved row untouched
+        // resolved single-call row untouched
         assert!(out.contains("hooks.helper"), "got: {out:?}");
         assert!(!out.contains("hooks.helper  ×"), "got: {out:?}");
+    }
+
+    /// Field report: resolved rows duplicated too — `metrics.push ×4` as
+    /// four byte-identical rows, same qualname, same location (`callees_of`
+    /// deliberately emits one row per edge, and `EdgeHit` carries no
+    /// call-site position to tell them apart). Same-symbol resolved rows at
+    /// the same depth must collapse with a ×count; the header keeps the raw
+    /// call-site count.
+    #[test]
+    fn duplicate_resolved_callees_collapse_with_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "hooks.py",
+            "def helper():\n    pass\n\n\ndef main():\n    helper()\n    helper()\n    helper()\n",
+        );
+        let state = indexed_state(root);
+
+        let out = callees_text(&state, "hooks.main", Some(1), None);
+        assert_eq!(
+            out.matches("hooks.helper").count(),
+            1,
+            "3 calls to the same resolved callee must render as ONE row: {out:?}"
+        );
+        assert!(out.contains("×3"), "collapsed row must show ×3: {out:?}");
+        assert!(
+            out.contains("3 callee(s)"),
+            "header must keep the raw call-site count: {out:?}"
+        );
     }
 
     /// Field report: `impact` on a hot symbol returned ~100k chars and blew
