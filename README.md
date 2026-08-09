@@ -329,7 +329,8 @@ The things worth knowing before you rely on it:
   revision, checksum-verified). Without it vexus still runs keyword-and-graph
   only, and `status` tells you so.
 - **The index is a cache.** Any schema or model change rebuilds it. There is no
-  migration path, on purpose.
+  migration path, on purpose — v0.3.0 bumps the schema, so upgrading to it
+  re-indexes once.
 - **Agent adoption is measured, but on a small sample.** In the first
   agent-in-the-loop run (`eval/agent/`, 2026-08-09, `claude-sonnet-4-5`), an
   agent with both vexus and Grep/Glob/Read available chose vexus for **5 of 5**
@@ -351,7 +352,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 ```sh
 export VEXUS_EMBEDDER=mock                 # no model download needed to develop
 
-cargo test --workspace                     # ~360 tests
+cargo test --workspace                     # ~370 tests
 cargo run -p vexus-eval -- check           # retrieval-metric gate
 cargo run -p vexus-eval -- perf            # timings (mock embedder — see below)
 cargo run -p vexus-eval -- perf --real     # same, timing the real model
