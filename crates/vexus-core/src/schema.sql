@@ -69,7 +69,3 @@ CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
   INSERT INTO fts_chunks(fts_chunks, rowid, content) VALUES ('delete', old.id, old.content);
 END;
 
-CREATE TABLE embed_cache (
-  content_hash BLOB PRIMARY KEY,
-  embedding BLOB NOT NULL
-);
