@@ -247,10 +247,7 @@ fn build_startup_index_if_empty(
                     Some(embedder) => {
                         store.set_model(embedder.id(), embedder.dim())?;
                         match pipeline::embed_pending(store, embedder) {
-                            Ok(er) => eprintln!(
-                                "vexus: embedded {} chunks (cache hits: {})",
-                                er.embedded, er.from_cache
-                            ),
+                            Ok(er) => eprintln!("vexus: embedded {} chunks", er.embedded),
                             Err(e) => {
                                 eprintln!(
                                     "vexus: embedding failed ({e:#}); serving structural-only"
