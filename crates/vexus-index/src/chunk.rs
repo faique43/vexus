@@ -148,16 +148,27 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
         }
     }
 
-    // 3. Module preamble: one chunk per contiguous run of uncovered, non-blank lines.
+    // 3. Module preamble: one chunk per run of uncovered lines, where a run
+    // ends only at a covered line or EOF — NOT at a blank line. An import
+    // block split into stdlib/third-party/local groups is one piece of
+    // context, and ending runs at blanks emitted one chunk (one embedding,
+    // one `Related` entry) per group: `mod:1-3, mod:5-5, mod:7-9` for what
+    // is really a single import header. Interior blanks stay in the content;
+    // trailing ones are trimmed so the line range stays honest.
     let mut run_start: Option<usize> = None;
     for i in 0..=lines.len() {
-        let uncovered_nonblank = i < lines.len() && !covered[i] && !lines[i].trim().is_empty();
-        if uncovered_nonblank {
-            if run_start.is_none() {
+        let uncovered = i < lines.len() && !covered[i];
+        if uncovered {
+            if run_start.is_none() && !lines[i].trim().is_empty() {
                 run_start = Some(i);
             }
         } else if let Some(rs) = run_start.take() {
-            let run_text: String = lines[rs..i].iter().map(|l| format!("{l}\n")).collect();
+            let end = lines[rs..i]
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map(|off| rs + off + 1)
+                .unwrap_or(i);
+            let run_text: String = lines[rs..end].iter().map(|l| format!("{l}\n")).collect();
             // Punctuation-only runs (a lone `}`, `);`, etc. left over between
             // symbols) carry no searchable content and just pollute the
             // index — skip them rather than emitting a chunk for them.
@@ -165,7 +176,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                 chunks.push(NewChunk {
                     symbol: Some(0),
                     start_line: (rs + 1) as u32,
-                    end_line: i as u32,
+                    end_line: end as u32,
                     content: cap_content(run_text),
                 });
             }
@@ -481,6 +492,47 @@ def decorated():
         assert_eq!(pre[0].content, "import a\n");
         assert_eq!((pre[1].start_line, pre[1].end_line), (6, 7));
         assert_eq!(pre[1].content, "CONST = 1\nOTHER = 2\n");
+    }
+
+    /// Blank lines group an import header (stdlib / third-party / local)
+    /// without ending it. Splitting there produced one chunk, one embedding
+    /// and one `Related` entry per group for a single piece of context —
+    /// only a covered line (a real symbol) or EOF ends a preamble run.
+    #[test]
+    fn blank_separated_import_groups_stay_one_preamble_chunk() {
+        let source =
+            "import os\n\nimport requests\n\nfrom .util import x\n\n\ndef f():\n    pass\n";
+        //            1           2 3                 4 5                    6 7 8          9
+        let mut idx = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 9,
+                    parent: None,
+                    arity: None,
+                },
+                f("f", SymbolKind::Function, 8, 9, Some(0)),
+            ],
+            edges: vec![],
+            chunks: vec![],
+        };
+        crate::chunk::build_chunks(&mut idx, source);
+
+        let pre: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(0)).collect();
+        assert_eq!(pre.len(), 1, "three import groups must merge: {pre:?}");
+        assert_eq!(
+            (pre[0].start_line, pre[0].end_line),
+            (1, 5),
+            "the range must end at the last line with content, not at the blanks before `def`"
+        );
+        assert_eq!(
+            pre[0].content,
+            "import os\n\nimport requests\n\nfrom .util import x\n"
+        );
     }
 
     #[test]
