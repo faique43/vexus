@@ -160,6 +160,11 @@ impl Store {
             }
         }
 
+        // Structural priors run over the full candidate map BEFORE the sort
+        // and truncation below, so they decide membership of the top-N (and
+        // therefore explore's graph-expansion seeds), not just display order.
+        self.apply_ranking_priors(query_text, &mut scores, &crate::priors::Priors::from_env())?;
+
         let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         ranked.truncate(limit as usize);
@@ -169,6 +174,57 @@ impl Store {
             SearchOutcome::WeakVectorOnly
         };
         Ok((self.hydrate_hits(&ranked)?, outcome))
+    }
+
+    /// Multiply each candidate chunk's fused score by the structural
+    /// penalties it earns (see `priors.rs` for the rationale and
+    /// magnitudes): test code — by path convention, or by a Rust
+    /// `#[cfg(test)]`/`#[test]` content sniff since inline test modules
+    /// live on production paths — module-level preamble (the chunk's owning
+    /// symbol is the file's module), and sub-floor tiny fragments. The test
+    /// penalty is suspended entirely when the query itself asks about tests.
+    ///
+    /// One point lookup per candidate (≤ 2×CANDIDATES rows, same
+    /// prepared-statement pattern as `hydrate_hits`) — sub-millisecond
+    /// against the ranking work already done.
+    fn apply_ranking_priors(
+        &self,
+        query_text: &str,
+        scores: &mut std::collections::HashMap<i64, f64>,
+        priors: &crate::priors::Priors,
+    ) -> Result<()> {
+        let skip_test_penalty = priors.test == 1.0 || crate::priors::query_seeks_tests(query_text);
+        let all_disabled = skip_test_penalty && priors.preamble == 1.0 && priors.tiny == 1.0;
+        if all_disabled {
+            return Ok(());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT c.token_count, f.path, s.kind,
+                    (f.lang = 'rust' AND (instr(c.content, '#[cfg(test)]') > 0
+                                          OR instr(c.content, '#[test]') > 0))
+             FROM chunks c JOIN files f ON f.id = c.file_id
+             LEFT JOIN symbols s ON s.id = c.symbol_id WHERE c.id = ?1",
+        )?;
+        for (chunk_id, score) in scores.iter_mut() {
+            let row: Option<(i64, String, Option<String>, bool)> = stmt
+                .query_row([chunk_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .optional()?;
+            let Some((token_count, path, kind, rust_test_sniff)) = row else {
+                continue; // chunk deleted between rank and lookup
+            };
+            if !skip_test_penalty && (crate::priors::is_test_path(&path) || rust_test_sniff) {
+                *score *= priors.test;
+            }
+            if kind.as_deref() == Some("module") {
+                *score *= priors.preamble;
+            }
+            if token_count < priors.tiny_floor as i64 {
+                *score *= priors.tiny;
+            }
+        }
+        Ok(())
     }
 
     fn hydrate_hits(&self, ranked: &[(i64, f64)]) -> Result<Vec<SearchHit>> {
@@ -208,6 +264,213 @@ impl Store {
 mod tests {
     use crate::model::*;
     use crate::Store;
+
+    /// A one-symbol, one-chunk file whose chunk is comfortably above the
+    /// tiny-penalty floor and mentions `keyword` — the building block for
+    /// the prior tests below.
+    fn one_fn_file(qualname: &str, keyword: &str) -> FileIndex {
+        let filler = "the quick brown fox jumps over the lazy dog and keeps on running ";
+        FileIndex {
+            symbols: vec![NewSymbol {
+                name: qualname.rsplit('.').next().unwrap().into(),
+                qualname: qualname.into(),
+                kind: SymbolKind::Function,
+                sig: None,
+                start_line: 1,
+                end_line: 4,
+                parent: None,
+                arity: Some(0),
+            }],
+            edges: vec![],
+            chunks: vec![NewChunk {
+                symbol: Some(0),
+                start_line: 1,
+                end_line: 4,
+                content: format!(
+                    "def f():\n    # {keyword} {keyword}\n    {filler}{filler}{filler}\n"
+                ),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_path_chunk_ranks_below_identical_production_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "billing.py",
+                "python",
+                &[1u8; 32],
+                &one_fn_file("billing.charge", "frobnicate"),
+            )
+            .unwrap();
+        store
+            .replace_file(
+                "tests/test_billing.py",
+                "python",
+                &[2u8; 32],
+                &one_fn_file("tests.test_billing.test_charge", "frobnicate"),
+            )
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].path, "billing.py",
+            "identical keyword match: production chunk must outrank the test chunk"
+        );
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn rust_cfg_test_sniff_demotes_inline_tests_on_a_production_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "src/billing.rs",
+                "rust",
+                &[1u8; 32],
+                &one_fn_file("src.billing.charge", "frobnicate"),
+            )
+            .unwrap();
+        let mut sniffed = one_fn_file("src.orders.charge_twice", "frobnicate");
+        sniffed.chunks[0].content = format!("#[cfg(test)]\n{}", sniffed.chunks[0].content);
+        store
+            .replace_file("src/orders.rs", "rust", &[2u8; 32], &sniffed)
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].path, "src/billing.rs",
+            "the #[cfg(test)]-sniffed chunk must rank below the clean one \
+             despite both living on production paths"
+        );
+    }
+
+    #[test]
+    fn test_seeking_query_suspends_the_test_penalty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "billing.py",
+                "python",
+                &[1u8; 32],
+                &one_fn_file("billing.charge", "frobnicate"),
+            )
+            .unwrap();
+        // The test file mentions the keyword more, so pure relevance puts it
+        // first — and a query asking for tests must let it stay there.
+        let mut test_idx = one_fn_file("tests.test_billing.test_charge", "frobnicate");
+        test_idx.chunks[0]
+            .content
+            .push_str("frobnicate frobnicate tests\n");
+        store
+            .replace_file("tests/test_billing.py", "python", &[2u8; 32], &test_idx)
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("tests for frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(
+            hits[0].path, "tests/test_billing.py",
+            "a query asking about tests must not have test chunks penalized"
+        );
+    }
+
+    #[test]
+    fn module_preamble_and_tiny_chunks_are_demoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let filler = "the quick brown fox jumps over the lazy dog and keeps on running ";
+        let idx = FileIndex {
+            symbols: vec![
+                NewSymbol {
+                    name: "m".into(),
+                    qualname: "m".into(),
+                    kind: SymbolKind::Module,
+                    sig: None,
+                    start_line: 1,
+                    end_line: 20,
+                    parent: None,
+                    arity: None,
+                },
+                NewSymbol {
+                    name: "work".into(),
+                    qualname: "m.work".into(),
+                    kind: SymbolKind::Function,
+                    sig: None,
+                    start_line: 10,
+                    end_line: 14,
+                    parent: Some(0),
+                    arity: Some(0),
+                },
+            ],
+            edges: vec![],
+            chunks: vec![
+                // Module-preamble chunk: owned by the module symbol, and
+                // tiny — an import line. Earns both penalties.
+                NewChunk {
+                    symbol: Some(0),
+                    start_line: 1,
+                    end_line: 1,
+                    content: "from frobnicate import frobnicate\n".into(),
+                },
+                NewChunk {
+                    symbol: Some(1),
+                    start_line: 10,
+                    end_line: 14,
+                    content: format!("def work():\n    # frobnicate\n    {filler}{filler}\n"),
+                },
+            ],
+        };
+        store
+            .replace_file("m.py", "python", &[1u8; 32], &idx)
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].qualname.as_deref(),
+            Some("m.work"),
+            "the function body must outrank the import-preamble fragment: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_priors_leave_scores_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "tests/test_billing.py",
+                "python",
+                &[1u8; 32],
+                &one_fn_file("tests.test_billing.test_charge", "frobnicate"),
+            )
+            .unwrap();
+        let mut scores = std::collections::HashMap::from([(1i64, 0.5f64)]);
+        let expected = scores.clone();
+        let off = crate::priors::Priors {
+            test: 1.0,
+            preamble: 1.0,
+            tiny: 1.0,
+            tiny_floor: 32,
+        };
+        store
+            .apply_ranking_priors("frobnicate", &mut scores, &off)
+            .unwrap();
+        assert_eq!(scores, expected, "all-1.0 coefficients must be a no-op");
+    }
 
     #[test]
     fn keyword_search_ranks_and_survives_weird_queries() {

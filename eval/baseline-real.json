@@ -2,36 +2,36 @@
   "mode": "real",
   "per_corpus": {
     "polyglot": {
-      "recall@5": 0.8857,
+      "recall@5": 0.9429,
       "recall@10": 0.9857,
-      "mrr": 0.5765,
-      "ndcg@10": 0.5968,
-      "clean@5": 0.3333,
-      "answer_in_bundle": 0.8824,
-      "bundle_clean": 0.25,
+      "mrr": 0.7993,
+      "ndcg@10": 0.7438,
+      "clean@5": 1.0,
+      "answer_in_bundle": 1.0,
+      "bundle_clean": 0.5,
       "edge_precision": 0.9032,
       "edge_recall": 0.9333
     },
     "pyapp": {
-      "recall@5": 0.8583,
+      "recall@5": 0.8417,
       "recall@10": 0.925,
-      "mrr": 0.5638,
-      "ndcg@10": 0.5925,
-      "clean@5": 0.3333,
-      "answer_in_bundle": 0.9167,
+      "mrr": 0.7708,
+      "ndcg@10": 0.6105,
+      "clean@5": 1.0,
+      "answer_in_bundle": 1.0,
       "bundle_clean": 0.0,
       "edge_precision": 0.8852,
       "edge_recall": 0.9474
     }
   },
   "overall": {
-    "recall@5": 0.8758,
+    "recall@5": 0.9061,
     "recall@10": 0.9636,
-    "mrr": 0.5719,
-    "ndcg@10": 0.596,
-    "clean@5": 0.3333,
-    "answer_in_bundle": 0.8966,
-    "bundle_clean": 0.125,
+    "mrr": 0.789,
+    "ndcg@10": 0.7191,
+    "clean@5": 1.0,
+    "answer_in_bundle": 1.0,
+    "bundle_clean": 0.25,
     "edge_precision": 0.8943,
     "edge_recall": 0.9402
   }
