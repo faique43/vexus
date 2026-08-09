@@ -5,15 +5,33 @@
 //!
 //! Why multiplicative, and why these magnitudes: adjacent RRF ranks differ
 //! by ~1.6% (`1/(60+r)` steps), and appearing in both candidate lists vs one
-//! roughly doubles a score. A 0.4 factor therefore pushes a rank-1
+//! roughly doubles a score. A test factor of 0.4 pushes a rank-1
 //! single-list test hit below essentially every single-list production hit
-//! in the candidate window while keeping it retrievable; 0.7 demotes by a
-//! few ranks without hiding. `1.0` disables a penalty. Penalties stack
-//! (an import preamble is typically preamble+tiny ⇒ 0.49).
+//! in the candidate window while keeping it retrievable; the softer
+//! preamble/tiny factors demote by a few ranks without hiding. `1.0`
+//! disables a penalty. Penalties stack (an import preamble is typically
+//! preamble+tiny).
 //!
-//! Tuned against the eval corpora's `clean@5` / `bundle_clean` ground truth
-//! (queries carrying `expect_not`) — change coefficients through a sweep
-//! against those metrics, not by hand.
+//! The values below came out of a sweep against the eval corpora's
+//! `clean@5` / `answer_in_bundle` ground truth (queries carrying
+//! `expect_not`), not out of intuition — change them the same way:
+//!
+//! - `test`: 0.2, 0.3 and 0.4 score identically; 0.5 loses `clean@5`
+//!   (1.0000 -> 0.7500). 0.4 is the least-aggressive value that still
+//!   scores perfectly, so it penalizes as little as the ground truth allows.
+//! - `preamble`: disabling it (1.0) costs `answer_in_bundle`
+//!   (1.0000 -> 0.9655) — the penalty earns its keep. 0.6 edges out 0.7 on
+//!   the real embedder, but see below.
+//! - `tiny`: 1.0 scores highest on search alone while also costing
+//!   `answer_in_bundle`, so the penalty earns its keep too; 0.8 is the best
+//!   value that holds `answer_in_bundle` at 1.0000.
+//!
+//! `preamble: 0.6, tiny: 0.8` was measured and deliberately NOT taken: on
+//! the real embedder it buys recall@5 0.9061 -> 0.9152 and ndcg@10 0.7191
+//! -> 0.7239 with mrr flat, but it costs the mock gate 0.0345 of
+//! `answer_in_bundle`. Trading a real regression in the blind-mode ratchet
+//! that guards every future change for a fractional gain here is a bad
+//! bargain, so the values stay where the sweep says they are safest.
 
 /// Multiplicative penalty coefficients. Constructed via [`Priors::from_env`]
 /// in production; tests build custom values directly.
