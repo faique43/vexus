@@ -389,6 +389,14 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            // A network round-trip is acceptable here — indexing already
+            // took orders of magnitude longer, and the result only surfaces
+            // on the NEXT invocation (status/serve read the cache, never
+            // the network). No-ops inside the TTL or when disabled.
+            vexus_mcp::update::refresh_if_stale();
+            if let Some(notice) = vexus_mcp::update::notice() {
+                eprintln!("vexus: {notice}");
+            }
         }
         Cmd::Status { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
