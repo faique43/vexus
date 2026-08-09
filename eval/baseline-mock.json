@@ -9,7 +9,7 @@
       "clean@5": 1.0,
       "answer_in_bundle": 0.7647,
       "bundle_clean": 1.0,
-      "edge_precision": 0.9032,
+      "edge_precision": 0.918,
       "edge_recall": 0.9333
     },
     "pyapp": {
@@ -20,7 +20,7 @@
       "clean@5": 1.0,
       "answer_in_bundle": 0.5833,
       "bundle_clean": 1.0,
-      "edge_precision": 0.8852,
+      "edge_precision": 0.9,
       "edge_recall": 0.9474
     }
   },
@@ -32,7 +32,7 @@
     "clean@5": 1.0,
     "answer_in_bundle": 0.6897,
     "bundle_clean": 1.0,
-    "edge_precision": 0.8943,
+    "edge_precision": 0.9091,
     "edge_recall": 0.9402
   }
 }

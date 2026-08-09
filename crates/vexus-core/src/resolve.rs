@@ -65,6 +65,12 @@ impl Store {
         Ok(total)
     }
 
+    /// How many same-name, same-arity candidates a cross-file match may
+    /// compete with before the edge is left unresolved instead. A `push`
+    /// with dozens of same-arity definitions carries no information; a
+    /// handful is a plausible guess worth labelling `[name_arity]`.
+    const AMBIGUOUS_CANDIDATE_LIMIT: usize = 5;
+
     fn resolve_where(&mut self, cond: &str, params: &[&String]) -> Result<u64> {
         let sql = format!(
             "SELECT e.id, s.file_id, e.dst_name, e.dst_arity
@@ -106,19 +112,55 @@ impl Store {
                 rows
             };
 
+            // A receiver-qualified call site (`metrics.push(x)`) extracts as
+            // the bare method name, so `push` proposes every `push` in the
+            // repo as a candidate. The lower two tiers therefore refuse to
+            // guess out of a crowd: an unresolved row is honest and renders
+            // compactly, while a confidently wrong `[name_arity]` edge is
+            // indistinguishable from a real one downstream (callers,
+            // callees, impact, and explore's neighbour expansion all treat
+            // any non-null dst_id as fact). Same-file candidates are exempt
+            // — `cands` is ordered same-file-first, so a local definition
+            // stays the answer no matter how common the name is elsewhere.
+            let src_file = e.src_file;
             let hit = cands
                 .iter()
                 .find(|c| c.2 == e.dst_name)
                 .map(|c| (c.0, Confidence::Exact))
                 .or_else(|| {
                     e.dst_arity.and_then(|a| {
-                        cands
+                        let matching: Vec<&(i64, i64, String, Option<u32>)> =
+                            cands.iter().filter(|c| c.3 == Some(a)).collect();
+                        matching
                             .iter()
-                            .find(|c| c.3 == Some(a))
+                            .find(|c| c.1 == src_file)
+                            .copied()
+                            .or_else(|| {
+                                if matching.len() <= Self::AMBIGUOUS_CANDIDATE_LIMIT {
+                                    matching.first().copied()
+                                } else {
+                                    None
+                                }
+                            })
                             .map(|c| (c.0, Confidence::NameArity))
                     })
                 })
-                .or_else(|| cands.first().map(|c| (c.0, Confidence::NameOnly)));
+                .or_else(|| {
+                    // Name-only is the weakest signal there is; take it only
+                    // when the name is unambiguous repo-wide or the match is
+                    // in the caller's own file.
+                    cands
+                        .iter()
+                        .find(|c| c.1 == src_file)
+                        .or_else(|| {
+                            if cands.len() == 1 {
+                                cands.first()
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|c| (c.0, Confidence::NameOnly))
+                });
 
             if let Some((dst_id, conf)) = hit {
                 tx.execute(
@@ -211,7 +253,10 @@ mod tests {
         };
         let mut store = store_with(&[("a.py", callers), ("b.py", callees)]);
         let n = store.resolve_all_edges().unwrap();
-        assert_eq!(n, 3); // 'missing' stays unresolved
+        // 'missing' has no candidate at all; the arity-9 `target` has two
+        // cross-file candidates and no arity evidence to choose between
+        // them, so it stays unresolved rather than guessing (see below).
+        assert_eq!(n, 2);
 
         let rows: Vec<(String, Option<String>, String)> = store
             .conn
@@ -237,12 +282,128 @@ mod tests {
                 "name_arity".into()
             )
         );
-        // arity 9 matches nothing exactly → name_only, tie → lowest id (b.target)
-        assert_eq!(
-            rows[2],
-            ("target".into(), Some("b.target".into()), "name_only".into())
-        );
+        // Arity 9 matches no candidate's arity, and both `target`s live in
+        // another file — with nothing to separate them, picking the
+        // lowest-id one would be a coin flip rendered as a fact.
+        assert_eq!(rows[2], ("target".into(), None, "name_only".into()));
         assert_eq!(rows[3], ("missing".into(), None, "name_only".into()));
+    }
+
+    /// A receiver-qualified call (`metrics.push(x)`) extracts as the bare
+    /// method name, so the candidate set is every same-named symbol in the
+    /// repo. Matching one of a crowd by arity alone produced a confidently
+    /// wrong edge indistinguishable from a real one; past the ambiguity
+    /// limit the edge must stay unresolved instead.
+    #[test]
+    fn a_crowded_cross_file_name_stays_unresolved() {
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "a.caller", SymbolKind::Function, Some(0))],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Calls,
+                dst_name: "push".into(),
+                dst_arity: Some(1),
+            }],
+            chunks: vec![],
+        };
+        // Seven unrelated one-argument `push` definitions, none in a.py.
+        let crowd = FileIndex {
+            symbols: (0..7)
+                .map(|i| sym("push", &format!("b.T{i}.push"), SymbolKind::Method, Some(1)))
+                .collect(),
+            edges: vec![],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("a.py", caller), ("b.py", crowd)]);
+        store.resolve_all_edges().unwrap();
+
+        let (dst, conf): (Option<i64>, String) = store
+            .conn
+            .query_row("SELECT dst_id, confidence FROM edges LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            dst, None,
+            "a name shared by 7 cross-file symbols must not resolve"
+        );
+        assert_eq!(conf, "name_only");
+    }
+
+    /// The strictness must never cost a local definition: a same-file
+    /// candidate wins however common the name is elsewhere.
+    #[test]
+    fn a_same_file_definition_still_wins_over_a_crowd() {
+        let caller = FileIndex {
+            symbols: vec![
+                sym("caller", "a.caller", SymbolKind::Function, Some(0)),
+                sym("push", "a.push", SymbolKind::Function, Some(1)),
+            ],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Calls,
+                dst_name: "push".into(),
+                dst_arity: Some(1),
+            }],
+            chunks: vec![],
+        };
+        let crowd = FileIndex {
+            symbols: (0..7)
+                .map(|i| sym("push", &format!("b.T{i}.push"), SymbolKind::Method, Some(1)))
+                .collect(),
+            edges: vec![],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("a.py", caller), ("b.py", crowd)]);
+        store.resolve_all_edges().unwrap();
+
+        let qual: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT s.qualname FROM edges e LEFT JOIN symbols s ON s.id = e.dst_id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qual.as_deref(), Some("a.push"));
+    }
+
+    /// An unambiguous cross-file name still resolves — the limit only
+    /// refuses to pick out of a crowd, it doesn't require locality.
+    #[test]
+    fn a_unique_cross_file_name_still_resolves() {
+        let caller = FileIndex {
+            symbols: vec![sym("caller", "a.caller", SymbolKind::Function, Some(0))],
+            edges: vec![NewEdge {
+                src: 0,
+                kind: EdgeKind::Calls,
+                dst_name: "singleton".into(),
+                dst_arity: None,
+            }],
+            chunks: vec![],
+        };
+        let other = FileIndex {
+            symbols: vec![sym(
+                "singleton",
+                "b.singleton",
+                SymbolKind::Function,
+                Some(3),
+            )],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let mut store = store_with(&[("a.py", caller), ("b.py", other)]);
+        store.resolve_all_edges().unwrap();
+
+        let qual: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT s.qualname FROM edges e LEFT JOIN symbols s ON s.id = e.dst_id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qual.as_deref(), Some("b.singleton"));
     }
 
     #[test]
