@@ -15,3 +15,9 @@ eval/last-run.json
 bench/history.jsonl
 /target
 eval/agent/results/
+# Written by `vexus init --agent claude-code` for local dogfooding — machine-
+# local MCP wiring; every contributor generates their own.
+.mcp.json
+# Agent-local settings and steering-pack files that `vexus init` (and agent
+# CLIs themselves) create in a checkout — per-machine, never shared.
+.claude/
