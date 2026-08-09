@@ -330,10 +330,14 @@ The things worth knowing before you rely on it:
   only, and `status` tells you so.
 - **The index is a cache.** Any schema or model change rebuilds it. There is no
   migration path, on purpose.
-- **Agent adoption is unproven.** The tool descriptions are written to steer
-  agents away from grep, but whether they actually do is measured by a harness
-  (`eval/agent/`) that hasn't been run against a live model yet. Treat the
-  steering as a design intent, not a demonstrated result.
+- **Agent adoption is measured, but on a small sample.** In the first
+  agent-in-the-loop run (`eval/agent/`, 2026-08-09, `claude-sonnet-4-5`), an
+  agent with both vexus and Grep/Glob/Read available chose vexus for **5 of 5**
+  code-navigation calls across the four tasks — a 100% vexus share, answering
+  each in a single `explore`/`impact` call. That is four questions on a
+  30-file fixture, not a broad result: read it as "the steering works on the
+  cases it was designed for", and re-run it (pointing `VEXUS_AGENT_CORPUS` at
+  a real checkout) after any change to the tool descriptions.
 
 ## Contributing
 
