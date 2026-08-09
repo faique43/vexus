@@ -197,6 +197,9 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
             }
         }
         if let (Some(node), Some(name)) = (call_node, call_name) {
+            if is_definition_head_call(node, source) {
+                continue;
+            }
             let src = enclosing_symbol(&idx, node, false);
             let arity = call_args.map(|a| a.named_child_count() as u32);
             idx.edges.push(NewEdge {
@@ -217,6 +220,62 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
 
     crate::chunk::build_chunks(&mut idx, source);
     idx
+}
+
+/// True when a captured `(call)` node is not a real call site but part of a
+/// definition's own syntax, which happens in grammars (Elixir) where `def`
+/// itself parses as a call:
+///
+/// - a def head — `def total(items, tax) do` nests `total(items, tax)` as a
+///   `(call)` inside the `def` keyword-call's arguments. Emitting an edge for
+///   it fabricates a self-recursion edge on every function definition,
+///   indistinguishable from real single-line recursion.
+/// - a module attribute — `@moduledoc "..."` is a `(call)` under the `@`
+///   unary operator, not an invocation of anything.
+///
+/// The checks key on the Elixir grammar's `target` field and keyword set, so
+/// call nodes from other grammars (whose calls use `function`/`method`
+/// fields) never match. A real call under a different unary operator
+/// (`!authorized?(user)`) keeps its edge — only `@` is an attribute marker.
+fn is_definition_head_call(call_node: Node, source: &str) -> bool {
+    const DEF_KEYWORDS: [&str; 11] = [
+        "def",
+        "defp",
+        "defmodule",
+        "defmacro",
+        "defmacrop",
+        "defprotocol",
+        "defimpl",
+        "defdelegate",
+        "defguard",
+        "defguardp",
+        "defexception",
+    ];
+    let Some(parent) = call_node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "arguments" => {
+            let Some(grand) = parent.parent() else {
+                return false;
+            };
+            if grand.kind() != "call" {
+                return false;
+            }
+            let Some(target) = grand.child_by_field_name("target") else {
+                return false;
+            };
+            let text = target.utf8_text(source.as_bytes()).unwrap_or("");
+            DEF_KEYWORDS.contains(&text)
+        }
+        "unary_operator" => {
+            parent
+                .child(0)
+                .map(|op| op.utf8_text(source.as_bytes()).unwrap_or(""))
+                == Some("@")
+        }
+        _ => false,
+    }
 }
 
 /// Index (into idx.symbols) of the innermost symbol whose line range strictly
