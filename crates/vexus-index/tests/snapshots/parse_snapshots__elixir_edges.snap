@@ -2,10 +2,7 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "edge_lines(&parse_fixture(\"elixir/sample.ex\"))"
 ---
-- calls elixir.sample.Shop.Cart -> moduledoc arity=Some(1)
 - imports elixir.sample -> Enum arity=None
 - imports elixir.sample -> Shop.Pricing arity=None
-- calls elixir.sample.Shop.Cart.total -> total arity=Some(2)
 - calls elixir.sample.Shop.Cart.total -> subtotal arity=Some(1)
-- calls elixir.sample.Shop.Cart.subtotal -> subtotal arity=Some(1)
 - calls elixir.sample.Shop.Cart.subtotal -> sum arity=Some(1)
