@@ -38,6 +38,12 @@ struct Query {
     tool: String,
     #[serde(default)]
     expect: Vec<String>,
+    /// Qualnames a correct result must NOT surface (feeds `clean@5` /
+    /// `bundle_clean`). Validated here exactly like `expect`: every entry
+    /// must resolve to a real, unambiguous symbol — a forbidden qualname
+    /// that doesn't exist would make the metric pass vacuously forever.
+    #[serde(default)]
+    expect_not: Vec<String>,
     #[serde(default)]
     graded: HashMap<String, u8>,
 }
@@ -147,6 +153,20 @@ fn validate_corpus(repo: &str) {
                 &store,
                 qualname,
                 &format!("{repo} queries.yaml row {i} (q={:?}) expect", query.q),
+            );
+        }
+        for qualname in &query.expect_not {
+            assert_resolves_exact(
+                &store,
+                qualname,
+                &format!("{repo} queries.yaml row {i} (q={:?}) expect_not", query.q),
+            );
+            assert!(
+                !query.expect.contains(qualname),
+                "{repo} queries.yaml row {i} (q={:?}): {qualname:?} appears in both \
+                 `expect` and `expect_not` — a symbol cannot be simultaneously \
+                 required and forbidden",
+                query.q
             );
         }
         for qualname in query.graded.keys() {
