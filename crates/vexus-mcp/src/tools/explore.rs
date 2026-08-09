@@ -260,6 +260,71 @@ mod tests {
         }
     }
 
+    /// Every eval corpus is 30-40 files, i.e. Tiny or Small — the Medium
+    /// tier's parameters (`entry_limit: 12`, `max_entry_symbols: 8`,
+    /// `max_neighbor_ids: 24`, `default_budget: 8000`), which is what any
+    /// real repository actually hits, are never exercised by a graded
+    /// query. This generates a deterministic corpus past the 2000-chunk
+    /// boundary and pins the behaviour there: the tier resolves to Medium,
+    /// explore answers within the larger default budget, and a production
+    /// symbol still outranks a byte-identical copy of itself sitting on a
+    /// test path.
+    #[test]
+    fn medium_tier_corpus_uses_medium_params_and_still_prefers_production_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // ~3 chunks per file (module preamble + two functions) — 800 files
+        // clears the 2000-chunk Medium boundary with room to spare.
+        for i in 0..800 {
+            write(
+                root,
+                &format!("pkg/mod_{i:04}.py"),
+                &format!(
+                    "import os\n\n\ndef helper_{i:04}(x):\n    return x + {i}\n\n\ndef caller_{i:04}():\n    return helper_{i:04}({i})\n"
+                ),
+            );
+        }
+        // The distinctive symbol under test, plus a byte-identical copy of
+        // it on a test path — same content, so only the structural prior
+        // can separate them.
+        let body = "def reticulate_splines(count):\n    \"\"\"Reticulate the splines.\"\"\"\n    return count * 2\n";
+        write(root, "pkg/splines.py", body);
+        write(root, "tests/test_splines.py", body);
+
+        let state = keyword_only_state(root);
+        {
+            let store = state.lock_store_fresh().unwrap();
+            assert_eq!(
+                store.corpus_tier().unwrap(),
+                vexus_core::model::CorpusTier::Medium,
+                "fixture must clear the 2000-chunk boundary; got {} chunks",
+                store.counts().unwrap().chunks
+            );
+        }
+
+        let out = explore_text(&state, "reticulate splines", None);
+        assert!(
+            out.contains("pkg/splines.py"),
+            "the production definition must be in the bundle: {out}"
+        );
+        let prod_at = out.find("pkg/splines.py");
+        let test_at = out.find("tests/test_splines.py");
+        if let (Some(p), Some(t)) = (prod_at, test_at) {
+            assert!(
+                p < t,
+                "production must be ranked above its identical test-path copy: {out}"
+            );
+        }
+        // Medium's default budget is 8000 tokens; the rendered bundle must
+        // stay under it rather than falling back to a smaller tier's cap.
+        let tokens = vexus_core::model::estimate_tokens(&out);
+        assert!(
+            tokens <= 8000,
+            "bundle must respect the Medium default budget, got ~{tokens} tokens"
+        );
+        assert!(tokens > 0, "bundle must not be empty on a Medium corpus");
+    }
+
     /// `alpha_process` calls `unique_marker_beta`. The query text
     /// ("alpha_process") appears in alpha's own chunk (both its `def` line
     /// and the call site) but nowhere in beta's chunk, whose only content
