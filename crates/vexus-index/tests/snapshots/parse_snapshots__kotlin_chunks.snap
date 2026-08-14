@@ -2,8 +2,7 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "chunk_lines(&parse_fixture(\"kotlin/sample.kt\"))"
 ---
-- "sym=Some(0) [1-1] tokens~3 :: package shop⏎"
-- "sym=Some(0) [3-3] tokens~5 :: import kotlin.math.max⏎"
+- "sym=Some(0) [1-3] tokens~9 :: package shop⏎⏎import kotlin.math.max⏎"
 - "sym=Some(1) [5-5] tokens~6 :: const val MAX_ITEMS = 100⏎"
 - "sym=Some(2) [7-10] tokens~26 :: // One shopping cart.⏎class Cart(val items: List<Int>) {⏎    fun total(tax: Int)"
 - "sym=Some(3) [9-9] tokens~12 ::     fun total(tax: Int): Int = items.sum() + tax⏎"
