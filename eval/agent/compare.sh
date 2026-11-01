@@ -9,13 +9,14 @@
 # showed vexus costing twice what plain tools did on real repos, on the same
 # day the synthetic table said 37x cheaper.
 #
-# Both arms run isolated from the user's own plugins, memory and MCP servers,
+# Output is split as plain/vexus. Both arms run isolated from the user's own plugins, memory and MCP servers,
 # which would otherwise skew the numbers. Skills stay off on both sides because
 # the built-in skill list alone adds about 3,000 tokens per session.
 #
 # Usage:  VEXUS_AGENT_MODEL=claude-sonnet-5-5 bash eval/agent/compare.sh
 #   VEXUS_AGENT_CORPUS   repo to test (default: eval/corpora/pyapp)
-#   VEXUS_AGENT_TASKS    file with one question per line
+#   VEXUS_AGENT_TASKS    file of `question | expected, names`, one per line
+#   VEXUS_COMPARE_KEEP_INDEX  set to 1 to reuse the corpus's existing .vexus
 #   VEXUS_BINARY         vexus build to test
 #   VEXUS_COMPARE_STRICT set to 1 to exit non-zero if vexus used more context
 # Output: eval/agent/results/compare/ and a table on stdout. Needs claude + jq.
@@ -40,7 +41,8 @@ mkdir -p "$results"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 cp -R "$corpus" "$workdir/repo"
-rm -rf "$workdir/repo/.vexus" "$workdir/repo/.mcp.json" "$workdir/repo/.claude"
+rm -rf "$workdir/repo/.mcp.json" "$workdir/repo/.claude"
+[ "${VEXUS_COMPARE_KEEP_INDEX:-0}" = 1 ] || rm -rf "$workdir/repo/.vexus"
 "$binary" index "$workdir/repo" >/dev/null 2>&1
 printf '{"mcpServers":{"vexus":{"command":"%s","args":["serve","."]}}}\n' "$binary" > "$workdir/vexus.json"
 
@@ -54,37 +56,43 @@ session() { # question, mcp config, transcript, extra args...
       --output-format stream-json --verbose < /dev/null > "$out" 2>/dev/null)
 }
 
-# Context growth, not total usage: every turn re-reads the prompt, so totals
-# punish extra turns twice, and the two arms start from different tool lists.
-measure() { # transcript -> "calls grew cost seconds"
-  jq -rs '
+# Final context, not growth: tool definitions are paid for on every turn of every
+# session, so a measure that starts after them flatters whichever arm has more.
+# Coverage counts the expected names the answer mentions, so a cheap wrong
+# answer can't pass as a saving.
+measure() { # transcript, comma-separated names -> "calls context cost covered"
+  jq -rs --arg names "$2" '
     [.[] | select(.type == "assistant") | .message] as $turns
     | ($turns | map(.usage | .input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens)) as $context
     | ($turns | map(.content[] | select(.type == "tool_use")) | length) as $calls
     | (.[] | select(.type == "result")) as $result
-    | "\($calls) \($context[-1] - $context[0]) \($result.total_cost_usd) \($result.duration_ms / 1000 | floor)"
+    | ($names | split(",") | map(gsub("^ +| +$"; ""))) as $expected
+    | ($expected | map(select(. as $name | $result.result | ascii_downcase | contains($name | ascii_downcase))) | length) as $hit
+    | "\($calls) \($context[-1]) \($result.total_cost_usd) \($hit)/\($expected | length)"
   ' "$1"
 }
 
-printf '%-52s %17s %17s %15s\n' question 'calls plain/vexus' 'context added' 'cost'
+printf '%-44s %9s %15s %13s %11s\n' question calls 'final context' cost covered
 plain_total=0
 vexus_total=0
 n=0
-while IFS= read -r question; do
+while IFS='|' read -r question names; do
+  question="${question%"${question##*[![:space:]]}"}"
   [ -n "$question" ] || continue
   n=$((n + 1))
   session "$question" '{"mcpServers":{}}' "$results/q$n-plain.jsonl"
   session "$question" "$workdir/vexus.json" "$results/q$n-vexus.jsonl" --allowedTools 'mcp__vexus__*'
-  read -r plain_calls plain_grew plain_cost _ <<< "$(measure "$results/q$n-plain.jsonl")"
-  read -r vexus_calls vexus_grew vexus_cost _ <<< "$(measure "$results/q$n-vexus.jsonl")"
-  plain_total=$((plain_total + plain_grew))
-  vexus_total=$((vexus_total + vexus_grew))
-  printf '%-52.52s %8s/%-8s %8s/%-8s %.3f/%.3f\n' "$question" \
-    "$plain_calls" "$vexus_calls" "$plain_grew" "$vexus_grew" "$plain_cost" "$vexus_cost"
+  read -r plain_calls plain_context plain_cost plain_hit <<< "$(measure "$results/q$n-plain.jsonl" "$names")"
+  read -r vexus_calls vexus_context vexus_cost vexus_hit <<< "$(measure "$results/q$n-vexus.jsonl" "$names")"
+  plain_total=$((plain_total + plain_context))
+  vexus_total=$((vexus_total + vexus_context))
+  printf '%-44.44s %4s/%-4s %7s/%-7s %.3f/%.3f %5s %5s\n' "$question" \
+    "$plain_calls" "$vexus_calls" "$plain_context" "$vexus_context" \
+    "$plain_cost" "$vexus_cost" "$plain_hit" "$vexus_hit"
 done < "$tasks_file"
 
 echo
-echo "context added, all questions: plain=$plain_total vexus=$vexus_total"
+echo "final context, all questions: plain=$plain_total vexus=$vexus_total"
 if [ "${VEXUS_COMPARE_STRICT:-0}" = 1 ] && [ "$vexus_total" -gt "$plain_total" ]; then
   echo "vexus used more context than plain tools" >&2
   exit 1

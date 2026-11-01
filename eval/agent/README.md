@@ -53,9 +53,9 @@ VEXUS_AGENT_MODEL=claude-sonnet-5-5 VEXUS_AGENT_CORPUS=/path/to/express \
   VEXUS_AGENT_TASKS=eval/agent/tasks-express.txt bash eval/agent/compare.sh
 ```
 
-Each row reports tool calls, tokens added to the agent's context, and cost.
-Context added is the headline number, because it isn't inflated by extra turns
-re-reading the prompt or by the two arms starting from different tool lists.
+Each row reports tool calls, final context size, cost, and how many expected
+names the answer mentions. Final context is the headline number: it includes
+tool definitions, which are paid for on every session whether they help or not.
 
 Use a real repo. On the fixture corpora a few greps are enough to find
 anything, and vexus has no room to pay for itself. `VEXUS_COMPARE_STRICT=1`
