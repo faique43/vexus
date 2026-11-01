@@ -150,6 +150,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     // Step 2: one hop of call/import graph expansion from each entry
     // symbol, collecting resolved-only neighbor ids (max 24 total) with
     // their best (max) neighbor score.
+    let wants_tests = vexus_core::priors::query_seeks_tests(question);
     let mut neighbor_scores: HashMap<i64, f64> = HashMap::new();
     let mut neighbor_order: Vec<i64> = Vec::new();
     'entries: for (sid, entry_score) in &entry_symbols {
@@ -168,6 +169,15 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         for nid in candidate_ids {
             if nid == -1 {
                 continue; // unresolved — no real symbol to expand.
+            }
+            // The test penalty only reaches ranked hits, so a test caller
+            // would otherwise walk straight in through the graph.
+            if !wants_tests {
+                if let Ok(Some(info)) = store.symbol_info(nid) {
+                    if vexus_core::priors::is_test_path(&info.path) {
+                        continue;
+                    }
+                }
             }
             neighbor_scores
                 .entry(nid)
@@ -323,6 +333,47 @@ mod tests {
             "bundle must respect the Medium default budget, got ~{tokens} tokens"
         );
         assert!(tokens > 0, "bundle must not be empty on a Medium corpus");
+    }
+
+    /// A test that calls a function is a real caller, so one hop of graph
+    /// expansion used to pull whole spec files into the bundle: on NestJS
+    /// they took 58% of the result for a question about production code.
+    #[test]
+    fn graph_expansion_skips_test_callers_unless_the_question_asks_for_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        write(
+            root,
+            "pkg/job.py",
+            "from pkg.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
+        );
+        write(
+            root,
+            "tests/test_core.py",
+            "from pkg.core import settle\n\n\ndef test_settle():\n    assert settle(1) == 1\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+        assert!(
+            out.contains("def run_job"),
+            "the production caller must stay: {out}"
+        );
+        assert!(
+            !out.contains("def test_settle"),
+            "a test caller must not be expanded into a production question: {out}"
+        );
+
+        let out = explore_text(&state, "reticulates splines tests", None);
+        assert!(
+            out.contains("def test_settle"),
+            "a question about tests must still reach them: {out}"
+        );
     }
 
     /// `alpha_process` calls `unique_marker_beta`. The query text
