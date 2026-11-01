@@ -24,8 +24,8 @@ pub type OmittedItem = (String, f64, u32, u32);
 /// Greedy fill by score desc until budget_tokens exhausted.
 /// Per-item cost = estimate_tokens(content) + 20-token overhead.
 /// Dedupes identical chunk_ids (keeps highest score).
-/// Returns (selected sorted by (path, start_line), omitted sorted by score
-/// desc).
+/// Returns (selected, omitted sorted by score desc). Selected leads with the
+/// file holding the best item, and stays in line order within a file.
 pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec<OmittedItem>) {
     if items.is_empty() {
         return (vec![], vec![]);
@@ -97,13 +97,23 @@ pub fn pack(items: Vec<BundleItem>, budget_tokens: u32) -> (Vec<BundleItem>, Vec
         }
     }
 
-    // Build selected list (sorted by path, then start_line)
     let mut selected_items: Vec<BundleItem> = deduped
         .iter()
         .filter(|&&idx| selected_indices.contains(&idx))
         .map(|&idx| items[idx].clone())
         .collect();
-    selected_items.sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
+    let mut best_by_path: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for item in &selected_items {
+        let best = best_by_path.entry(item.path.clone()).or_insert(item.score);
+        *best = best.max(item.score);
+    }
+    selected_items.sort_by(|a, b| {
+        best_by_path[&b.path]
+            .partial_cmp(&best_by_path[&a.path])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+            .then(a.start_line.cmp(&b.start_line))
+    });
 
     // Build omitted list: items that made it through dedup but weren't selected (budget-exhausted only).
     // Deduplicated losers are omitted entirely and don't appear as "related".
@@ -170,9 +180,9 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(omitted.len(), 1);
 
-        // Selected should be sorted by (path, start_line)
-        assert_eq!(selected[0].path, "b.rs");
-        assert_eq!(selected[1].path, "c.rs");
+        // Selected should lead with the best-scoring file
+        assert_eq!(selected[0].path, "c.rs");
+        assert_eq!(selected[1].path, "b.rs");
 
         // Omitted should have the lower-score item
         assert_eq!(omitted[0].0, "aaa");
@@ -215,6 +225,26 @@ mod tests {
         assert_eq!(selected[0].start_line, 10);
         assert_eq!(selected[1].start_line, 20);
         assert_eq!(selected[2].start_line, 40);
+    }
+
+    /// A path-sorted bundle opened with whatever sat first alphabetically,
+    /// so `examples/` and `integration/` hid the actual answer from a reader
+    /// that reasonably assumes the top of a result matters most.
+    #[test]
+    fn pack_leads_with_the_file_holding_the_best_item() {
+        let items = vec![
+            make_item("a.rs", Some("weak"), 1, 2, "x", 1.0, 1),
+            make_item("z.rs", Some("later"), 20, 21, "x", 3.0, 2),
+            make_item("z.rs", Some("earlier"), 5, 6, "x", 0.5, 3),
+        ];
+
+        let (selected, _) = pack(items, 10000);
+
+        let order: Vec<_> = selected
+            .iter()
+            .map(|i| (i.path.as_str(), i.start_line))
+            .collect();
+        assert_eq!(order, vec![("z.rs", 5), ("z.rs", 20), ("a.rs", 1)]);
     }
 
     #[test]
