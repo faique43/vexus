@@ -22,9 +22,12 @@ use crate::state::AppState;
 pub(crate) const MAX_BUDGET_TOKENS: u32 = 20_000;
 
 /// Resolve the effective token budget: the caller's request (or `default`
-/// if none given), clamped to `MAX_BUDGET_TOKENS`.
+/// if none given), clamped to `MAX_BUDGET_TOKENS`, in `estimate_tokens` units.
+/// Budgets are real tokens, while `estimate_tokens` assumes 4 chars per token
+/// and rendered code runs at about 2.5, measured against Claude Code's usage
+/// figures — so the conversion happens here, for every tool at once.
 pub(crate) fn clamp_budget(requested: Option<u32>, default: u32) -> u32 {
-    requested.unwrap_or(default).min(MAX_BUDGET_TOKENS)
+    requested.unwrap_or(default).min(MAX_BUDGET_TOKENS) * 5 / 8
 }
 
 /// Prepends the `⚠ index ...` freshness header (see
@@ -117,20 +120,18 @@ pub(crate) fn embed_query(state: &AppState, query: &str) -> Option<Vec<f32>> {
 mod tests {
     use super::*;
 
+    /// Budgets are real tokens, and rendered code runs at about 2.5 chars per
+    /// token, so a 1000-token budget is worth 625 `estimate_tokens` units.
     #[test]
-    fn clamp_budget_uses_default_when_none() {
-        assert_eq!(clamp_budget(None, 4000), 4000);
-    }
-
-    #[test]
-    fn clamp_budget_passes_through_requests_under_the_cap() {
-        assert_eq!(clamp_budget(Some(1000), 4000), 1000);
+    fn clamp_budget_converts_real_tokens_to_estimator_units() {
+        assert_eq!(clamp_budget(None, 4000), 2500);
+        assert_eq!(clamp_budget(Some(1000), 4000), 625);
     }
 
     #[test]
     fn clamp_budget_caps_absurd_requests() {
-        assert_eq!(clamp_budget(Some(u32::MAX), 4000), MAX_BUDGET_TOKENS);
-        assert_eq!(clamp_budget(Some(50_000), 4000), MAX_BUDGET_TOKENS);
+        assert_eq!(clamp_budget(Some(u32::MAX), 4000), 12_500);
+        assert_eq!(clamp_budget(Some(50_000), 4000), 12_500);
     }
 
     #[test]
