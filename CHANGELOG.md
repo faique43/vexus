@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased — tested against a real agent
+
+Live Claude Code sessions showed `explore` costing up to 3.6× what plain
+Read/Grep/Glob did on real repos, on the same day the synthetic benchmark said
+37× cheaper. On five questions each, vexus now adds 9–19% more context than
+plain tools, with 33–69% fewer tool calls at about the same cost. It no longer
+loses badly, and it doesn't save tokens either; see the README.
+
+**This release rebuilds your index** (schema 3 → 4).
+
+### Fixed
+
+- **The Claude Code skill now loads.** `vexus init` wrote it to a nested path
+  Claude Code never reads. Re-run `vexus init --agent claude-code`.
+- **`open` accepts `Class.method`.** It needed the full module path before.
+- **Test callers stay out of `explore`.** The test penalty only reached ranked
+  hits, so spec files arrived through the call graph and took 58% of one
+  NestJS result. Asking about tests still reaches them.
+- **`explore` returns whole functions** rather than the one chunk search matched.
+- **Results lead with the best-scoring file,** not the first alphabetically.
+- **`budget_tokens` means real tokens.** Rendered code runs at about 2.5 chars
+  per token, not 4, so an 8,000 budget really cost 12,754.
+
+### Changed
+
+- **Smaller `explore` defaults.** 2,500 tokens, down from 8,000 on real repos,
+  with fewer neighbors on the Medium tier and search hits under a quarter of
+  the best score dropped.
+- **Fewer, larger chunks.** Code outside named symbols no longer splits at every
+  blank line, which halves chunks on real repos (NestJS 29,131 → 14,806, Express
+  3,964 → 754). The preamble penalty moves to 0.5 to match. Index time on large
+  repos barely changes.
+- **Keyword-only search loses a little.** The mock eval's recall@10 falls from
+  0.597 to 0.561 while recall@5 rises from 0.279 to 0.300. The real embedder
+  improves: recall@10 0.964 → 0.982, bundle_clean 0.25 → 0.875.
+
+### Added
+
+- **`eval/agent/compare.sh`** runs each question with and without vexus and
+  reports tool calls, context added and cost.
+
 ## v0.3.0 — retrieval quality, honest edges, half the index
 
 `explore` used to rank a test function above the production symbol it tests

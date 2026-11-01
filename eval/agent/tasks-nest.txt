@@ -1,0 +1,5 @@
+how does the injector resolve a provider's constructor dependencies
+what happens between an incoming HTTP request and a controller method running
+how do guards, interceptors and pipes get applied to a route
+how do lifecycle hooks like onModuleInit get called at startup
+how does a request-scoped provider get a separate instance per request

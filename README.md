@@ -224,27 +224,41 @@ it without a follow-up read.
 
 Full methodology and caveats: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-### Context cost scales with your repo — vexus doesn't
+### Live agent runs
 
-Same question, same repository, three sizes. grep+read searches and reads;
-vexus makes one `explore` call.
+The numbers that count: the same questions in real Claude Code sessions, one
+with vexus and one with only Read, Grep and Glob. Same model, one run per
+question, totals for five questions on each repo. Reproduce it with
+[`eval/agent/compare.sh`](eval/agent/compare.sh).
+
+| Repo | Tool calls | Context added | Cost | |
+| --- | ---: | ---: | ---: | --- |
+| Express (142 files) | 26 plain / **8** vexus | **17,736** / 21,182 | $0.18 / $0.18 | 69% fewer calls, 19% more context |
+| NestJS (2,205 files) | 24 / **16** | **29,956** / 32,697 | $0.25 / $0.25 | 33% fewer calls, 9% more context |
+
+**vexus does not currently save tokens against a capable agent.** A good model
+already greps a name and reads a narrow line range, and that is hard to beat.
+What vexus buys is fewer round trips at about the same cost. Single sessions
+vary a lot: the same question has swung by half between runs, so read the
+totals, not one row.
+
+### Synthetic scaling
+
+Same question, same synthetic repository, three sizes. grep+read follows a fixed
+transcript; vexus makes one `explore` call.
 
 | Repo size | grep + read | vexus | |
 | ---: | ---: | ---: | --- |
-| 50 files | 1,782 tokens | 863 | 2.1× less |
-| 200 files | 7,032 tokens | 609 | 11.5× less |
-| 500 files | 17,598 tokens | **469** | **37.5× less** |
+| 50 files | 1,782 tokens | 641 | 2.8× less |
+| 200 files | 7,032 tokens | 858 | 8.2× less |
+| 500 files | 17,598 tokens | 758 | 23.2× less |
 
-Grep grew 9.9×. Vexus went *down*. That's the whole pitch: a tool call returns
-a top-ranked handful bounded by its budget, while searching costs more the more
-code you have.
-
-> **Straight answer on the small-repo case:** on a few dozen files, grep is
-> cheaper and vexus is not worth installing. The benchmark reports those rows
-> too, including the ones vexus loses. The synthetic corpus above is also
-> grep's worst case (every file matches the term), and the two sides answer at
-> different breadth — grep returns every match, vexus returns the best ones.
-> Both caveats are spelled out in the benchmark doc rather than buried.
+This is the case vexus is built for, not a typical session. The corpus is
+grep's worst case (every file matches the term), the transcript reads more than
+a real agent would, and the two sides answer at different breadth — grep returns
+every match, vexus returns the best ones. On a few dozen files grep is cheaper
+and vexus is not worth installing. All of this is spelled out in the benchmark
+doc rather than buried.
 
 ### Retrieval quality
 
