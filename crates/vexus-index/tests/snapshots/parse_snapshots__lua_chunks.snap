@@ -2,10 +2,9 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "chunk_lines(&parse_fixture(\"lua/sample.lua\"))"
 ---
-- "sym=Some(0) [1-1] tokens~7 :: local json = require(\"json\")⏎"
-- "sym=Some(0) [3-3] tokens~3 :: local M = {}⏎"
+- "sym=Some(0) [1-3] tokens~10 :: local json = require(\"json\")⏎⏎local M = {}⏎"
 - "sym=Some(0) [37-37] tokens~3 :: M.helpers = {⏎"
-- "sym=Some(0) [43-43] tokens~2 :: return M⏎"
+- "sym=Some(0) [41-43] tokens~3 :: }⏎⏎return M⏎"
 - "sym=Some(1) [5-8] tokens~25 :: -- Formats cents as dollars.⏎function M.format_cents(cents)⏎  return \"$\" .. tost"
 - "sym=Some(2) [10-13] tokens~34 :: -- Renders one receipt line using the formatter.⏎function M.receipt_line(label, "
 - "sym=Some(3) [15-17] tokens~16 :: function M:describe()⏎  return M.receipt_line(\"total\", 100)⏎end⏎"

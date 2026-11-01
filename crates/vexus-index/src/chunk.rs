@@ -148,7 +148,9 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
         }
     }
 
-    // 3. Module preamble: one chunk per contiguous run of uncovered, non-blank lines.
+    // 3. Module preamble: contiguous runs of uncovered, non-blank lines, merged
+    //    while only blank lines separate them and the result stays under the cap.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut run_start: Option<usize> = None;
     for i in 0..=lines.len() {
         let uncovered_nonblank = i < lines.len() && !covered[i] && !lines[i].trim().is_empty();
@@ -157,18 +159,28 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                 run_start = Some(i);
             }
         } else if let Some(rs) = run_start.take() {
-            let run_text: String = lines[rs..i].iter().map(|l| format!("{l}\n")).collect();
-            // Punctuation-only runs (a lone `}`, `);`, etc. left over between
-            // symbols) carry no searchable content and just pollute the
-            // index — skip them rather than emitting a chunk for them.
-            if run_text.chars().any(|c| c.is_alphanumeric()) {
-                chunks.push(NewChunk {
-                    symbol: Some(0),
-                    start_line: (rs + 1) as u32,
-                    end_line: i as u32,
-                    content: cap_content(run_text),
-                });
+            let previous = runs.last_mut().filter(|(prev_start, prev_end)| {
+                !covered[*prev_end..rs].contains(&true)
+                    && estimate_tokens(&slice(*prev_start as u32 + 1, i as u32)) <= MAX_TOKENS
+            });
+            match previous {
+                Some(prev) => prev.1 = i,
+                None => runs.push((rs, i)),
             }
+        }
+    }
+    for (rs, re) in runs {
+        let run_text = slice(rs as u32 + 1, re as u32);
+        // Punctuation-only runs (a lone `}`, `);`, etc. left over between
+        // symbols) carry no searchable content and just pollute the
+        // index — skip them rather than emitting a chunk for them.
+        if run_text.chars().any(|c| c.is_alphanumeric()) {
+            chunks.push(NewChunk {
+                symbol: Some(0),
+                start_line: (rs + 1) as u32,
+                end_line: re as u32,
+                content: cap_content(run_text),
+            });
         }
     }
 
@@ -481,6 +493,54 @@ def decorated():
         assert_eq!(pre[0].content, "import a\n");
         assert_eq!((pre[1].start_line, pre[1].end_line), (6, 7));
         assert_eq!(pre[1].content, "CONST = 1\nOTHER = 2\n");
+    }
+
+    fn module_only(end_line: u32) -> FileIndex {
+        FileIndex {
+            symbols: vec![NewSymbol {
+                name: "m".into(),
+                qualname: "m".into(),
+                kind: SymbolKind::Module,
+                sig: None,
+                start_line: 1,
+                end_line,
+                parent: None,
+                arity: None,
+            }],
+            edges: vec![],
+            chunks: vec![],
+        }
+    }
+
+    /// Test bodies and example scripts are mostly code outside any named
+    /// symbol. Splitting at every blank line made 46% of Express's chunks
+    /// three lines or shorter, which is what let a lone `// middleware`
+    /// comment rank as a result.
+    #[test]
+    fn preamble_runs_separated_only_by_blank_lines_merge_into_one_chunk() {
+        let source = "app.get('/a', a);\n\napp.get('/b', b);\n\n\napp.get('/c', c);\n";
+        let mut idx = module_only(6);
+        crate::chunk::build_chunks(&mut idx, source);
+
+        assert_eq!(idx.chunks.len(), 1, "{:?}", idx.chunks);
+        assert_eq!((idx.chunks[0].start_line, idx.chunks[0].end_line), (1, 6));
+        assert_eq!(idx.chunks[0].content, source);
+    }
+
+    #[test]
+    fn merged_preamble_stops_at_the_size_cap_without_losing_text() {
+        let source: String = (0..60)
+            .map(|i| format!("{}\n\n", format!("value_{i:03} = ").repeat(12)))
+            .collect();
+        let mut idx = module_only(120);
+        crate::chunk::build_chunks(&mut idx, &source);
+
+        assert!(idx.chunks.len() > 1, "must split once a chunk is full");
+        for c in &idx.chunks {
+            assert!(vexus_core::model::estimate_tokens(&c.content) <= 512);
+            assert!(!c.content.ends_with("… (truncated)\n"));
+        }
+        assert!(idx.chunks.last().unwrap().content.contains("value_059"));
     }
 
     #[test]

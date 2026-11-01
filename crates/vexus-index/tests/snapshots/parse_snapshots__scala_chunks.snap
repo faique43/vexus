@@ -2,8 +2,7 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "chunk_lines(&parse_fixture(\"scala/sample.scala\"))"
 ---
-- "sym=Some(0) [1-1] tokens~3 :: package shop⏎"
-- "sym=Some(0) [3-3] tokens~5 :: import shop.util.Slug⏎"
+- "sym=Some(0) [1-3] tokens~9 :: package shop⏎⏎import shop.util.Slug⏎"
 - "sym=Some(1) [5-7] tokens~15 :: object Registry {⏎    def lookup(id: String): Int = id.length⏎"
 - "sym=Some(2) [6-6] tokens~10 ::   def lookup(id: String): Int = id.length⏎"
 - "sym=Some(3) [9-13] tokens~36 :: // One shopping cart.⏎class Cart(items: List[Int]) {⏎    def total(tax: Int): In"

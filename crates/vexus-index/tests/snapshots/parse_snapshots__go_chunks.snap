@@ -2,8 +2,7 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "chunk_lines(&parse_fixture(\"go/sample.go\"))"
 ---
-- "sym=Some(0) [1-1] tokens~4 :: package inventory⏎"
-- "sym=Some(0) [3-3] tokens~3 :: import \"fmt\"⏎"
+- "sym=Some(0) [1-3] tokens~8 :: package inventory⏎⏎import \"fmt\"⏎"
 - "sym=Some(1) [5-5] tokens~5 :: const MaxItems = 100⏎"
 - "sym=Some(2) [7-11] tokens~12 :: // Item is one stocked product.⏎type Item struct {⏎"
 - "sym=Some(3) [13-15] tokens~6 :: type Stocker interface {⏎"
