@@ -1,0 +1,5 @@
+how does the view engine render a template
+how does app.use register middleware
+what happens to a request between arriving and reaching a route handler
+how are errors handled when a route throws
+why would a response get sent twice and what stops that

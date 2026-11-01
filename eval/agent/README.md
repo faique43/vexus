@@ -41,6 +41,27 @@ fabricated zero.
 
 Expect a handful of cents per run on the default corpus.
 
+## Comparing live cost
+
+`run.sh` shows whether an agent uses vexus. `compare.sh` shows whether that
+saved anything, by asking each question twice in isolated sessions, with and
+without vexus:
+
+```sh
+cargo build --release -p vexus-cli
+VEXUS_AGENT_MODEL=claude-sonnet-5-5 VEXUS_AGENT_CORPUS=/path/to/express \
+  VEXUS_AGENT_TASKS=eval/agent/tasks-express.txt bash eval/agent/compare.sh
+```
+
+Each row reports tool calls, tokens added to the agent's context, and cost.
+Context added is the headline number, because it isn't inflated by extra turns
+re-reading the prompt or by the two arms starting from different tool lists.
+
+Use a real repo. On the fixture corpora a few greps are enough to find
+anything, and vexus has no room to pay for itself. `VEXUS_COMPARE_STRICT=1`
+exits non-zero when vexus used more context in total, which is how the
+workflow's manual agent job runs it.
+
 ## Reading the result
 
 The number that matters is the **vexus share** — vexus tool calls as a

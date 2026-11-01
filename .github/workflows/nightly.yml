@@ -95,6 +95,20 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: bash eval/agent/run.sh
+      # Advisory for the same reason as the real-model check above. Express is
+      # pinned so a change in the numbers means a change in vexus.
+      - name: Compare live cost with and without vexus
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VEXUS_AGENT_MODEL: claude-sonnet-5-5
+          VEXUS_AGENT_CORPUS: ${{ runner.temp }}/express
+          VEXUS_AGENT_TASKS: eval/agent/tasks-express.txt
+          VEXUS_COMPARE_STRICT: "1"
+        run: |
+          git clone --filter=blob:none https://github.com/expressjs/express.git "$VEXUS_AGENT_CORPUS"
+          git -C "$VEXUS_AGENT_CORPUS" checkout 1c6f1b0
+          bash eval/agent/compare.sh | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: agent-loop
