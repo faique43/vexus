@@ -7,7 +7,7 @@
       "mrr": 0.1786,
       "ndcg@10": 0.166,
       "clean@5": 1.0,
-      "answer_in_bundle": 0.5882,
+      "answer_in_bundle": 0.4706,
       "bundle_clean": 1.0,
       "edge_precision": 0.918,
       "edge_recall": 0.9333
@@ -30,7 +30,7 @@
     "mrr": 0.2202,
     "ndcg@10": 0.2164,
     "clean@5": 1.0,
-    "answer_in_bundle": 0.6897,
+    "answer_in_bundle": 0.6207,
     "bundle_clean": 1.0,
     "edge_precision": 0.9091,
     "edge_recall": 0.9402
