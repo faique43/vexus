@@ -8,6 +8,9 @@
 //!    to the historical constants. A `WeakVectorOnly` outcome (no keyword
 //!    hit, nothing under the KNN floor) renders the entries under a "weak
 //!    match" note and skips steps 2–3 entirely.
+//!    An entry that is a function or method brings its remaining chunks
+//!    along at the same score, so a long body isn't cut off at a chunk
+//!    boundary.
 //! 2. For each entry chunk's `symbol_id` (deduped, first-seen score wins,
 //!    max `max_entry_symbols` distinct — `search_hybrid`'s results are
 //!    already score-descending, so first-N distinct is top-N by score):
@@ -147,10 +150,37 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         }
     }
 
+    let wants_tests = vexus_core::priors::query_seeks_tests(question);
+
+    // Whole bodies: a long function spans several chunks and search matches
+    // only one of them.
+    for (sid, score) in &entry_symbols {
+        let Ok(Some(info)) = store.symbol_info(*sid) else {
+            continue;
+        };
+        let is_body = matches!(info.kind.as_str(), "function" | "method");
+        if !is_body || (!wants_tests && vexus_core::priors::is_test_path(&info.path)) {
+            continue;
+        }
+        let Ok(chunks) = store.symbol_source(*sid) else {
+            continue;
+        };
+        for (chunk_id, start_line, end_line, content) in chunks {
+            items.push(BundleItem {
+                path: info.path.clone(),
+                qualname: Some(info.qualname.clone()),
+                start_line,
+                end_line,
+                content,
+                score: *score,
+                chunk_id,
+            });
+        }
+    }
+
     // Step 2: one hop of call/import graph expansion from each entry
     // symbol, collecting resolved-only neighbor ids (max 24 total) with
     // their best (max) neighbor score.
-    let wants_tests = vexus_core::priors::query_seeks_tests(question);
     let mut neighbor_scores: HashMap<i64, f64> = HashMap::new();
     let mut neighbor_order: Vec<i64> = Vec::new();
     'entries: for (sid, entry_score) in &entry_symbols {
@@ -333,6 +363,33 @@ mod tests {
             "bundle must respect the Medium default budget, got ~{tokens} tokens"
         );
         assert!(tokens > 0, "bundle must not be empty on a Medium corpus");
+    }
+
+    /// Long functions span several chunks and search only matches one of
+    /// them. Returning that fragment alone sent the agent back with `open`
+    /// for the rest: NestJS's `resolveConstructorParams` took 5 follow-ups.
+    #[test]
+    fn a_function_split_across_chunks_comes_back_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let filler: String = (0..120)
+            .map(|i| format!("    total += compute_value_{i:03}(total, offset)\n"))
+            .collect();
+        write(
+            root,
+            "pkg/ledger.py",
+            &format!(
+                "def settle_ledger(total, offset):\n    \"\"\"Reticulates the splines.\"\"\"\n{filler}    return closing_balance_marker(total)\n"
+            ),
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(
+            out.contains("closing_balance_marker"),
+            "the tail of the matched function must be in the bundle: {out}"
+        );
     }
 
     /// A test that calls a function is a real caller, so one hop of graph
