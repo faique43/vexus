@@ -247,11 +247,9 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
     match agent {
         "claude-code" => {
             // `.claude/plugins/vexus` is never scanned by Claude Code — only
-            // `.claude/skills/<name>/` is auto-discovered per session. A
-            // full plugin bundle (`.claude-plugin/plugin.json`, `hooks/`,
-            // `skills/`) dropped there still loads correctly, as a
-            // skills-directory plugin, so the internal layout below is
-            // unchanged — only the root it's written under moves.
+            // `.claude/skills/<name>/SKILL.md` is auto-discovered per session,
+            // so SKILL.md sits at the root of the directory. A nested
+            // `skills/vexus/SKILL.md` is silently never loaded.
             let plugin_root = root.join(".claude/skills/vexus");
 
             let plugin_json_content =
@@ -274,7 +272,7 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
             write_pack_file(&nudge_script, nudge_sh_content, force)?;
             set_executable(&nudge_script)?;
             write_pack_file(
-                &plugin_root.join("skills/vexus/SKILL.md"),
+                &plugin_root.join("SKILL.md"),
                 skill_md_content,
                 force,
             )?;
