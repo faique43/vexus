@@ -15,11 +15,11 @@ One question — "what do the helper functions here do?" — asked of the same s
 
 | Files | grep+read | vexus | Ratio |
 | ---: | ---: | ---: | ---: |
-| 50 | 1782 | 641 | 2.8× |
-| 200 | 7032 | 858 | 8.2× |
-| 500 | 17598 | 758 | 23.2× |
+| 50 | 1782 | 238 | 7.5× |
+| 200 | 7032 | 313 | 22.5× |
+| 500 | 17598 | 345 | 51.0× |
 
-From 50 to 500 files, grep+read grew 9.9× while vexus grew 1.2×.
+From 50 to 500 files, grep+read grew 9.9× while vexus grew 1.4×.
 
 ## Per task, on the retrieval-scoring corpora
 
@@ -27,13 +27,13 @@ These two corpora are hand-authored and small (a few dozen short files) so every
 
 | Task | Corpus | grep+read | vexus | Ratio |
 | --- | --- | ---: | ---: | ---: |
-| How does placing an order flow through the service? | polyglot | 889 | 1397 | 0.6× |
-| Where does the frontend talk to the orders API? | polyglot | 526 | 1522 | 0.3× |
+| How does placing an order flow through the service? | polyglot | 889 | 484 | 1.8× |
+| Where does the frontend talk to the orders API? | polyglot | 526 | 470 | 1.1× |
 | What calls the pricing quote function? | polyglot | 455 | 42 | 10.8× |
-| How does an invoice get created end to end? | pyapp | 2288 | 1284 | 1.8× |
-| Where is the retry/backoff logic and what uses it? | pyapp | 366 | 1496 | 0.2× |
+| How does an invoice get created end to end? | pyapp | 2288 | 325 | 7.0× |
+| Where is the retry/backoff logic and what uses it? | pyapp | 366 | 382 | 1.0× |
 | What would break if charge_card changed? | pyapp | 510 | 82 | 6.2× |
-| How are repeated login attempts throttled? | pyapp | 426 | 1238 | 0.3× |
+| How are repeated login attempts throttled? | pyapp | 426 | 257 | 1.7× |
 | Show me the email validation helper. | pyapp | 230 | 635 | 0.4× |
 
 ## Method

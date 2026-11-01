@@ -5,8 +5,8 @@
 **Stop letting your coding agent grep its way around your codebase.**
 
 Vexus indexes your repo into a semantic + call-graph index and serves it over MCP.
-Your agent asks one question and gets the relevant source back — instead of
-burning ten tool calls narrowing in on it.
+Your agent asks one question and gets a ranked map of the code behind it, then
+reads only what it needs.
 
 Runs entirely on your machine. Indexing and embedding cost zero agent tokens.
 
@@ -40,86 +40,60 @@ is doing full-text search because that is the only tool it has.
 ## The fix
 
 ```text
-explore "how does an invoice get created"   (budget_tokens: 500)
+explore "how does an invoice get created"
 ```
 
-One call. Vexus finds the entry points semantically, walks one hop through the
-call graph to pull in what they depend on, and returns verbatim source grouped
-by file. Below is the complete, unedited response — reproduce it by indexing
-[`eval/corpora/pyapp`](eval/corpora/pyapp) and asking that question with
-`budget_tokens: 500`:
+One call. Vexus finds the entry points semantically, walks the call graph, and
+returns a ranked map: locations, signatures and call links, with no source.
+Below is the complete, unedited response. Reproduce it by indexing
+[`eval/corpora/pyapp`](eval/corpora/pyapp) and asking that question:
 
-````text
+```text
 explore: "how does an invoice get created"
 
-## handlers/invoices.py
-handlers/invoices.py:3-8
-```
-from services.invoice_service import (
-    create_invoice,
-    get_invoice,
-    list_invoices,
-    refund_invoice,
-)
-```
-handlers/invoices.py:14-18
-```
-    def create(self, req):
-        """Handle POST /invoices: create a new invoice for the customer."""
-        return create_invoice(
-            req["customer_id"], req["amount_cents"], req.get("currency", "usd")
-        )
-```
-## services/invoice_service.py
-services/invoice_service.py:3-8
-```
-from models.invoice import Invoice
-from services.billing_service import charge_card
-from services.notification_service import EmailNotifier, notify_invoice_created
-from utils.ids import generate_id
-from utils.pagination import paginate
-from utils.validation import validate_amount
-```
-services/invoice_service.py:13-25
-```
-def create_invoice(customer_id, amount_cents, currency="usd"):
-    """Create and persist a new invoice, then notify the customer it exists."""
-    validate_amount(amount_cents)
-    invoice = Invoice(
-        id=generate_id("inv"),
-        customer_id=customer_id,
-        amount_cents=amount_cents,
-        currency=currency,
-        status="open",
-    )
-    _INVOICES[invoice.id] = invoice
-    notify_invoice_created(invoice, _default_notifier())
-    return invoice
-```
+Best match first. These are locations, not source: `open` "path:start-end" for what you need.
+
 ## services/notification_service.py
-services/notification_service.py:20-28
+20-28 def notify_invoice_created(invoice, notifier):
+  calls: send  called by: create_invoice
+7-9 def send(self, message):
+## services/invoice_service.py
+13-25 def create_invoice(customer_id, amount_cents, currency="usd"):
+  calls: Invoice, _default_notifier, notify_invoice_created, generate_id  called by: create
+28-30 def get_invoice(invoice_id):
+39-47 def refund_invoice(invoice_id, amount_cents=None):
+50-52 def _default_notifier():
+## handlers/invoices.py
+14-18 def create(self, req):
+  calls: get, create_invoice  called by: dispatch_create
+20-22 def get(self, req):
+28-30 def refund(self, req):
+24-26 def list(self, req):
+## jobs/invoice_reminders.py
+7-17 def send_invoice_reminders(customer_ids):
+## models/invoice.py
+7-14 class Invoice:
+## utils/ids.py
+6-8 def generate_id(prefix):
+## utils/validation.py
+20-25 def validate_amount(amount_cents):
+## app.py
+37-46 def dispatch_create(handler, req):
+## config.py
+16-24 def load_config():
+## handlers/reports.py
+10-13 def generate_usage_report(self, req):
+## services/rate_limiter.py
+19-29 def allow(self, key):
+## services/subscription_service.py
+10-22 def renew_subscription(subscription_id):
+25-31 def cancel_subscription(subscription_id):
 ```
-def notify_invoice_created(invoice, notifier):
-    """Notify the customer that `invoice` was created, via whichever `notifier` was configured.
 
-    Note: `notifier` is duck-typed — callers pass an `EmailNotifier`, an
-    `SmsNotifier`, or any future channel exposing `send(self, message)` —
-    so which one actually runs is decided entirely by the caller, not by
-    this function.
-    """
-    return notifier.send(f"Invoice {invoice.id} for {invoice.amount_cents} created")
-```
-Related (not included, raise budget_tokens or use `open`): services.invoice_service.get_invoice:28-30, handlers.invoices.InvoiceHandler.get:20-22, models.invoice.Invoice:6-14, models.invoice:1-1, services.invoice_service.refund_invoice:39-47, handlers.invoices:1-1, handlers.webhooks:3-4, services.notification_service.EmailNotifier.send:7-9, handlers.webhooks:1-1, jobs.invoice_reminders:1-1, jobs.invoice_reminders:3-4, services.invoice_service:1-1, services.invoice_service:10-10, services.subscription_service:1-1, services.subscription_service:3-5
-````
-
-Note the third file. Nothing in the question mentions notifications — vexus
-pulled it in because `create_invoice` calls it. That hop is the difference
-between "here are some matches" and "here is the flow."
-
-The budget is what keeps that tight. `budget_tokens` defaults to 8000, and at
-that setting this same query returns considerably more of the repo — the
-ranking is the same, the cutoff is just further down. Agents should pass a
-budget that matches how much context the answer is worth.
+The model reads the map, decides what matters, and calls `open` on exactly those
+ranges. That's the design: an agent pays a few tokens per guess and judges it
+before paying for source. Returning source up front looks cheaper and isn't,
+because every wrong guess costs a whole function.
 
 ## Install
 
@@ -210,15 +184,13 @@ edit — no re-indexing by hand.
 
 | Tool | Use it for |
 | --- | --- |
-| **`explore`** | "How does X work?", "what happens when Y?" — one call, verbatim source, budgeted |
-| **`search`** | Find a symbol by meaning, not just by name |
-| **`open`** | Fetch a known symbol or an exact file range |
-| **`callers`** / **`callees`** | Trace who calls what |
-| **`impact`** | Everything a change here could reach, plus import dependents |
+| **`explore`** | "How does X work?", "what happens when Y?" — a ranked map of locations, signatures and call links |
+| **`open`** | Fetch a symbol or an exact file range |
+| **`trace`** | Follow a symbol's callers, callees, or everything a change could reach |
 | **`status`** | Index freshness, coverage, health |
 
-Every response is real source with `path:line` headers — the agent can act on
-it without a follow-up read.
+Four tools on purpose: definitions are billed on every session, whether a tool
+gets used or not.
 
 ## Benchmarks
 
@@ -227,38 +199,24 @@ Full methodology and caveats: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 ### Live agent runs
 
 The numbers that count: the same questions in real Claude Code sessions, one
-with vexus and one with only Read, Grep and Glob. Same model, one run per
-question, totals for five questions on each repo. Reproduce it with
+with vexus and one with only Read, Grep and Glob. Same model, three rounds of
+five questions per repo, 60 sessions in all. Final context includes vexus's
+tool definitions. Reproduce it with
 [`eval/agent/compare.sh`](eval/agent/compare.sh).
 
-| Repo | Tool calls | Context added | Cost | |
-| --- | ---: | ---: | ---: | --- |
-| Express (142 files) | 26 plain / **8** vexus | **17,736** / 21,182 | $0.18 / $0.18 | 69% fewer calls, 19% more context |
-| NestJS (2,205 files) | 24 / **16** | **29,956** / 32,697 | $0.25 / $0.25 | 33% fewer calls, 9% more context |
+| Repo | Cost | Tool calls | Final context | Expected names in the answer |
+| --- | ---: | ---: | ---: | ---: |
+| NestJS (2,205 files) | **29% less** ($0.72 → $0.51) | 26% fewer | 12% less | 41 → 39 of 51 |
+| Express (142 files) | **17% less** ($0.56 → $0.46) | 24% fewer | same | 42 → 42 of 42 |
 
-**vexus does not currently save tokens against a capable agent.** A good model
-already greps a name and reads a narrow line range, and that is hard to beat.
-What vexus buys is fewer round trips at about the same cost. Single sessions
-vary a lot: the same question has swung by half between runs, so read the
-totals, not one row.
+Vexus was cheaper in all six rounds. The savings grow with the repo, and it
+still loses on a question that names exactly what to find: "how does app.use
+register middleware" cost plain tools half as much every time. On a few dozen
+files grep is cheaper, and vexus is not worth installing.
 
-### Synthetic scaling
-
-Same question, same synthetic repository, three sizes. grep+read follows a fixed
-transcript; vexus makes one `explore` call.
-
-| Repo size | grep + read | vexus | |
-| ---: | ---: | ---: | --- |
-| 50 files | 1,782 tokens | 641 | 2.8× less |
-| 200 files | 7,032 tokens | 858 | 8.2× less |
-| 500 files | 17,598 tokens | 758 | 23.2× less |
-
-This is the case vexus is built for, not a typical session. The corpus is
-grep's worst case (every file matches the term), the transcript reads more than
-a real agent would, and the two sides answer at different breadth — grep returns
-every match, vexus returns the best ones. On a few dozen files grep is cheaper
-and vexus is not worth installing. All of this is spelled out in the benchmark
-doc rather than buried.
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has a synthetic table too, but it
+counts only the `explore` call and not the reads that follow, so use it for
+regressions, not for comparing against grep.
 
 ### Retrieval quality
 
@@ -308,7 +266,7 @@ vexus serve    MCP over stdio + debounced file watcher + startup reconcile
 - **Hybrid retrieval.** Vector KNN and BM25 keyword results fused with
   reciprocal rank fusion — semantic recall without losing exact-name precision.
 - **Graph expansion.** `explore` doesn't just return matches; it walks one hop
-  through callers, callees, and imports, then packs the result to a budget.
+  through callees and callers, plus what the top match's callers also call.
 - **Honest freshness.** When the index is reconciling or degraded, every tool
   response says so on its first line. Nothing silently serves stale code.
 - **Concurrency.** Multiple `vexus serve` processes coordinate with an advisory
@@ -349,7 +307,7 @@ The things worth knowing before you rely on it:
   agent-in-the-loop run (`eval/agent/`, 2026-08-09, `claude-sonnet-4-5`), an
   agent with both vexus and Grep/Glob/Read available chose vexus for **5 of 5**
   code-navigation calls across the four tasks — a 100% vexus share, answering
-  each in a single `explore`/`impact` call. That is four questions on a
+  each in a single `explore` or `trace` call. That is four questions on a
   30-file fixture, not a broad result: read it as "the steering works on the
   cases it was designed for", and re-run it (pointing `VEXUS_AGENT_CORPUS` at
   a real checkout) after any change to the tool descriptions.
