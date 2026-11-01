@@ -82,9 +82,9 @@ struct ExploreParams {
     /// A natural-language question or a bag of symbol names.
     #[serde(alias = "query", alias = "q")]
     question: String,
-    /// Token budget for the rendered bundle (default 8000, capped at 20000).
+    /// Token budget for the rendered bundle (default 2500, capped at 20000).
     #[schemars(
-        description = "Token budget for the rendered bundle (default 8000, capped at 20000)."
+        description = "Token budget for the rendered bundle (default 2500, capped at 20000)."
     )]
     #[serde(alias = "budget")]
     budget_tokens: Option<u32>,

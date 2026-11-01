@@ -4,8 +4,7 @@
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
 //!    → entry chunks, rendered as `BundleItem`s carrying their RRF score.
 //!    `entry_limit` (and every other limit below) scales with the corpus
-//!    tier — see `params_for`; the Medium tier is 12/8/24/8000, identical
-//!    to the historical constants. A `WeakVectorOnly` outcome (no keyword
+//!    tier — see `params_for`. A `WeakVectorOnly` outcome (no keyword
 //!    hit, nothing under the KNN floor) renders the entries under a "weak
 //!    match" note and skips steps 2–3 entirely.
 //!    An entry that is a function or method brings its remaining chunks
@@ -41,12 +40,27 @@ const NEIGHBOR_DEPTH: u32 = 1;
 const NEIGHBOR_LIMIT: u32 = 10;
 const NEIGHBOR_SCORE_FACTOR: f64 = 0.5;
 
+/// Search hits scoring under this fraction of the best hit are dropped, so a
+/// bundle ends where relevance does rather than where the budget does. A hit
+/// in one search list scores about half a hit in both, so a one-list hit
+/// survives and one carrying the 0.4 test penalty, at 0.2, doesn't. Graph
+/// neighbors are exempt: their scores only reflect their parent, and a
+/// low-ranked hit can still lead to the callee a question needs.
+const RELEVANCE_FLOOR: f64 = 0.25;
+
+fn drop_weak_items(items: Vec<BundleItem>) -> Vec<BundleItem> {
+    let best = items.iter().map(|i| i.score).fold(f64::MIN, f64::max);
+    items
+        .into_iter()
+        .filter(|i| i.score >= best * RELEVANCE_FLOOR)
+        .collect()
+}
+
 /// Per-tier limits: entry hits, distinct entry symbols to expand, distinct
 /// neighbor ids, and the default token budget (still overridable per call).
-/// `Medium` is byte-identical to the historical constants (12/8/24/8000);
-/// smaller tiers shrink everything so a question against a 30-file repo
-/// returns hundreds of tokens, not the whole repo — the token benchmark
-/// measured the old defaults at 0.2×–0.4× grep's cost on such corpora.
+/// Real Claude Code runs set these: an agent finds code with grep and a
+/// narrow read for about 6,000 tokens, so a bundle has to land well under
+/// that to pay for itself, and the old 8,000-token default never did.
 struct ExploreParams {
     entry_limit: u32,
     max_entry_symbols: usize,
@@ -61,19 +75,19 @@ fn params_for(tier: vexus_core::model::CorpusTier) -> ExploreParams {
             entry_limit: 8,
             max_entry_symbols: 6,
             max_neighbor_ids: 12,
-            default_budget: 4000,
+            default_budget: 2500,
         },
         CorpusTier::Small => ExploreParams {
             entry_limit: 8,
             max_entry_symbols: 6,
             max_neighbor_ids: 16,
-            default_budget: 4000,
+            default_budget: 2500,
         },
         CorpusTier::Medium => ExploreParams {
-            entry_limit: 12,
-            max_entry_symbols: 8,
-            max_neighbor_ids: 24,
-            default_budget: 8000,
+            entry_limit: 8,
+            max_entry_symbols: 5,
+            max_neighbor_ids: 8,
+            default_budget: 2500,
         },
     }
 }
@@ -121,7 +135,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     // score) list step 2 expands from. `hits` is already score-descending
     // (search_hybrid's RRF ranking), so the first occurrence of a symbol_id
     // is that symbol's best score among the entries, and capping at the
-    // first 8 distinct ids keeps the top 8 by score.
+    // first N distinct ids keeps the top N by score.
     let mut items: Vec<BundleItem> = Vec::with_capacity(hits.len());
     let mut entry_symbols: Vec<(i64, f64)> = Vec::with_capacity(params.max_entry_symbols);
     for hit in &hits {
@@ -150,6 +164,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         }
     }
 
+    let mut items = drop_weak_items(items);
     let wants_tests = vexus_core::priors::query_seeks_tests(question);
 
     // Whole bodies: a long function spans several chunks and search matches
@@ -179,7 +194,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     }
 
     // Step 2: one hop of call/import graph expansion from each entry
-    // symbol, collecting resolved-only neighbor ids (max 24 total) with
+    // symbol, collecting resolved-only neighbor ids with
     // their best (max) neighbor score.
     let mut neighbor_scores: HashMap<i64, f64> = HashMap::new();
     let mut neighbor_order: Vec<i64> = Vec::new();
@@ -301,9 +316,8 @@ mod tests {
     }
 
     /// Every eval corpus is 30-40 files, i.e. Tiny or Small — the Medium
-    /// tier's parameters (`entry_limit: 12`, `max_entry_symbols: 8`,
-    /// `max_neighbor_ids: 24`, `default_budget: 8000`), which is what any
-    /// real repository actually hits, are never exercised by a graded
+    /// tier's parameters, which is what any real repository actually hits,
+    /// are never exercised by a graded
     /// query. This generates a deterministic corpus past the 2000-chunk
     /// boundary and pins the behaviour there: the tier resolves to Medium,
     /// explore answers within the larger default budget, and a production
@@ -355,14 +369,40 @@ mod tests {
                 "production must be ranked above its identical test-path copy: {out}"
             );
         }
-        // Medium's default budget is 8000 tokens; the rendered bundle must
-        // stay under it rather than falling back to a smaller tier's cap.
-        let tokens = vexus_core::model::estimate_tokens(&out);
         assert!(
-            tokens <= 8000,
-            "bundle must respect the Medium default budget, got ~{tokens} tokens"
+            vexus_core::model::estimate_tokens(&out) > 0,
+            "bundle must not be empty on a Medium corpus"
         );
-        assert!(tokens > 0, "bundle must not be empty on a Medium corpus");
+
+        // A broad question matches everything, so this is the case that
+        // fills the budget. Rendered code runs at ~2.5 chars per token.
+        let broad = explore_text(&state, "helper caller", None);
+        let real_tokens = broad.chars().count() * 2 / 5;
+        assert!(
+            real_tokens <= 3000,
+            "a default bundle must stay near 2500 real tokens, got ~{real_tokens}"
+        );
+    }
+
+    fn scored(chunk_id: i64, score: f64) -> BundleItem {
+        BundleItem {
+            path: "a.py".to_string(),
+            qualname: None,
+            start_line: 1,
+            end_line: 1,
+            content: "x".to_string(),
+            score,
+            chunk_id,
+        }
+    }
+
+    #[test]
+    fn items_far_below_the_best_score_are_dropped() {
+        let items = vec![scored(1, 1.0), scored(2, 0.5), scored(3, 0.2)];
+
+        let kept: Vec<i64> = drop_weak_items(items).iter().map(|i| i.chunk_id).collect();
+
+        assert_eq!(kept, vec![1, 2]);
     }
 
     /// Long functions span several chunks and search only matches one of
