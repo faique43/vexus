@@ -22,6 +22,12 @@
 //! - `preamble`: disabling it (1.0) costs `answer_in_bundle`
 //!   (1.0000 -> 0.9655) — the penalty earns its keep. 0.6 edges out 0.7 on
 //!   the real embedder, but see below.
+//!   Once blank-separated preamble runs merged into one chunk (schema 4)
+//!   they stopped being tiny, so the 0.7 x 0.7 they used to earn fell to
+//!   0.7 and they outranked real code. A later sweep moved `preamble` to
+//!   0.5, about what the two penalties came to. On the mock gate 0.5 scores
+//!   the same as anything lower. It has to stay above `test`: at 0.35 test
+//!   code passes preambles and the real embedder's clean@5 falls to 0.8333.
 //! - `tiny`: 1.0 scores highest on search alone while also costing
 //!   `answer_in_bundle`, so the penalty earns its keep too; 0.8 is the best
 //!   value that holds `answer_in_bundle` at 1.0000.
@@ -54,7 +60,7 @@ impl Default for Priors {
     fn default() -> Self {
         Self {
             test: 0.4,
-            preamble: 0.7,
+            preamble: 0.5,
             tiny: 0.7,
             tiny_floor: 32,
         }
