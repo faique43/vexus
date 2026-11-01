@@ -271,11 +271,7 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
             let nudge_script = plugin_root.join("hooks/nudge-grep.sh");
             write_pack_file(&nudge_script, nudge_sh_content, force)?;
             set_executable(&nudge_script)?;
-            write_pack_file(
-                &plugin_root.join("SKILL.md"),
-                skill_md_content,
-                force,
-            )?;
+            write_pack_file(&plugin_root.join("SKILL.md"), skill_md_content, force)?;
 
             register_mcp_server(root, force)?;
 
