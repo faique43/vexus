@@ -227,6 +227,23 @@ impl Store {
         Ok(())
     }
 
+    /// Whether a symbol is test code: by path convention, or by the Rust
+    /// content sniff `apply_ranking_priors` uses, since inline tests live on
+    /// production paths.
+    pub fn is_test_symbol(&self, symbol_id: i64, path: &str) -> Result<bool> {
+        if crate::priors::is_test_path(path) {
+            return Ok(true);
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT EXISTS(
+                 SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id
+                 WHERE c.symbol_id = ?1 AND f.lang = 'rust'
+                   AND (instr(c.content, '#[cfg(test)]') > 0
+                        OR instr(c.content, '#[test]') > 0))",
+        )?;
+        Ok(stmt.query_row([symbol_id], |r| r.get(0))?)
+    }
+
     fn hydrate_hits(&self, ranked: &[(i64, f64)]) -> Result<Vec<SearchHit>> {
         let mut out = Vec::with_capacity(ranked.len());
         let mut stmt = self.conn.prepare_cached(

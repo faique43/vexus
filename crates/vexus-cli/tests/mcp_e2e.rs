@@ -170,7 +170,7 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
     );
     assert_eq!(peer_info.server_info.name, "vexus");
 
-    // Exactly the 7 spec'd tools, each with a non-empty description.
+    // Exactly the documented tools, each with a non-empty description.
     let tools = client
         .list_all_tools()
         .await
@@ -179,8 +179,15 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
     names.sort_unstable();
     assert_eq!(
         names,
-        vec!["callees", "callers", "explore", "impact", "open", "search", "status",],
-        "expected exactly the 7 documented tools, got: {names:?}"
+        vec!["explore", "open", "status", "trace"],
+        "expected exactly the documented tools, got: {names:?}"
+    );
+    // Definitions are billed on every session whether a tool gets used or
+    // not. At 2,200 tokens they cost more than the map saved.
+    let definitions = serde_json::to_string(&tools).unwrap().len();
+    assert!(
+        definitions <= 1800,
+        "tool definitions must stay small, got {definitions} chars"
     );
     for tool in &tools {
         assert!(
@@ -197,21 +204,21 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
         "expected an index-counts line: {status:?}"
     );
 
-    // search: ranked result line. `contains` (not `starts_with`) tolerates
-    // the `⚠ index reconciling ...` freshness header `apply_header` prepends
-    // if this call happens to land while the startup reconcile pass (which
-    // runs on every `serve`, writer or not) is still in flight — a real,
-    // valid state (see the watcher e2e test below, which documents the same
-    // tolerance), not a race worth papering over by making `serve` block
-    // tool calls until reconcile finishes.
-    let mut search_args = serde_json::Map::new();
-    search_args.insert("query".to_string(), json!("alpha_process"));
-    let search = call_tool(&client, "search", Some(search_args)).await;
-    assert!(
-        search.contains("1. app.alpha_process"),
-        "expected a ranked line: {search:?}"
-    );
-    assert!(search.contains("app.py"), "got: {search:?}");
+    // trace: one tool, three directions. `contains` (not `starts_with`)
+    // tolerates the `⚠ index reconciling ...` freshness header `apply_header`
+    // prepends if this call lands during the startup reconcile pass, a real,
+    // valid state (see the watcher e2e test below).
+    for (symbol, direction, expected) in [
+        ("app.alpha_process", "callees", "unique_marker_beta"),
+        ("app.unique_marker_beta", "callers", "alpha_process"),
+        ("app.unique_marker_beta", "impact", "alpha_process"),
+    ] {
+        let mut args = serde_json::Map::new();
+        args.insert("symbol".to_string(), json!(symbol));
+        args.insert("direction".to_string(), json!(direction));
+        let trace = call_tool(&client, "trace", Some(args)).await;
+        assert!(trace.contains(expected), "{direction}: {trace:?}");
+    }
 
     // open: fenced verbatim source.
     let mut open_args = serde_json::Map::new();
@@ -220,8 +227,7 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
     assert!(open.contains("```"), "expected fenced source: {open:?}");
     assert!(open.contains("def alpha_process"), "got: {open:?}");
 
-    // explore: `## <path>` file group header plus fenced source, and the
-    // one-hop callee expansion pulling in unique_marker_beta's own body.
+    // explore: a `## <path>` map with the one-hop callee listed, and no source.
     let mut explore_args = serde_json::Map::new();
     explore_args.insert("question".to_string(), json!("alpha_process"));
     let explore = call_tool(&client, "explore", Some(explore_args)).await;
@@ -230,12 +236,12 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
         "expected a `## <path>` file group header: {explore:?}"
     );
     assert!(
-        explore.contains("```"),
-        "expected fenced source: {explore:?}"
+        !explore.contains("```"),
+        "a map carries no fenced source: {explore:?}"
     );
     assert!(
         explore.contains("unique_marker_beta"),
-        "expected the one-hop callee to be pulled in: {explore:?}"
+        "expected the one-hop callee to be listed: {explore:?}"
     );
 
     client
@@ -292,13 +298,13 @@ async fn common_wrong_param_names_are_accepted_as_aliases() {
         "explore via `query` alias should answer normally: {explore:?}"
     );
 
-    // search with `question` (canonical: `query`) — the symmetric mixup.
+    // explore still accepts `search`'s old param shape.
     let mut args = serde_json::Map::new();
-    args.insert("question".into(), json!("unique_marker_beta"));
-    let search = call_tool(&client, "search", Some(args)).await;
+    args.insert("q".into(), json!("unique_marker_beta"));
+    let map = call_tool(&client, "explore", Some(args)).await;
     assert!(
-        search.contains("unique_marker_beta"),
-        "search via `question` alias should answer normally: {search:?}"
+        map.contains("unique_marker_beta"),
+        "explore via `q` alias should answer normally: {map:?}"
     );
 
     // explore with `q` — the terse spelling.
@@ -332,9 +338,9 @@ async fn watcher_e2e_search_miss_write_file_status_heals_then_search_hit() {
     // a real, valid state (not a race to paper over), and irrelevant to what
     // this assertion actually checks: that the not-yet-existing symbol isn't
     // findable yet.
-    let miss = call_tool(&client, "search", Some(search_args.clone())).await;
+    let miss = call_tool(&client, "explore", Some(search_args.clone())).await;
     assert!(
-        miss.contains("no matches"),
+        !miss.contains("watcher_new_file.py"),
         "expected no match before the file defining it exists: {miss:?}"
     );
 
@@ -381,11 +387,7 @@ async fn watcher_e2e_search_miss_write_file_status_heals_then_search_hit() {
          {last_status:?}"
     );
 
-    let hit = call_tool(&client, "search", Some(search_args)).await;
-    assert!(
-        hit.starts_with("1. "),
-        "expected a ranked hit once the watcher caught up: {hit:?}"
-    );
+    let hit = call_tool(&client, "explore", Some(search_args)).await;
     assert!(hit.contains("watcher_new_file.py"), "got: {hit:?}");
 
     client
@@ -510,15 +512,11 @@ async fn dogfood_explore_how_edges_resolve_to_symbols() {
 
     assert!(
         explore.contains("resolve.rs"),
-        "expected resolve.rs to be pulled into the bundle: {explore:?}"
+        "expected resolve.rs to be in the map: {explore:?}"
     );
     assert!(
         explore.contains("## "),
         "expected file group headers: {explore:?}"
-    );
-    assert!(
-        explore.contains("```"),
-        "expected fenced source: {explore:?}"
     );
 
     client

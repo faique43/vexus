@@ -1,72 +1,71 @@
-//! `explore` tool (the flagship): answer a question about the codebase in
-//! one call. Pipeline (binding):
+//! `explore` tool (the flagship): a ranked map of the code behind a question.
+//!
+//! An agent that greps pays a little for pointers, judges them, then reads
+//! narrow ranges. Returning source here would charge full price for every
+//! guess before the model could reject one, so `explore` stays on the pointer
+//! side of that split: one line per symbol, and the model calls `open` for
+//! what it wants. Pipeline:
 //!
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
-//!    → entry chunks, rendered as `BundleItem`s carrying their RRF score.
-//!    `entry_limit` (and every other limit below) scales with the corpus
-//!    tier — see `params_for`. A `WeakVectorOnly` outcome (no keyword
-//!    hit, nothing under the KNN floor) renders the entries under a "weak
-//!    match" note and skips steps 2–3 entirely.
-//!    An entry that is a function or method brings its remaining chunks
-//!    along at the same score, so a long body isn't cut off at a chunk
-//!    boundary.
-//! 2. For each entry chunk's `symbol_id` (deduped, first-seen score wins,
-//!    max `max_entry_symbols` distinct — `search_hybrid`'s results are
-//!    already score-descending, so first-N distinct is top-N by score):
-//!    walk `callers_of(id, 1, 10)`, `callees_of(id, 1, 10)`, and
-//!    `imports_of(id)` for neighbor symbol ids. Only resolved neighbors
-//!    (id != -1) count; collection stops at `max_neighbor_ids` distinct.
-//! 3. Each neighbor's `symbol_source` chunks become `BundleItem`s too, with
-//!    score = the parent entry's score × 0.5 (a neighbor reached from
-//!    multiple entries keeps the max of those).
-//! 4. `pack(entries ++ neighbors, budget)` → `render_bundle`. Entry and
-//!    neighbor items can name the very same chunk (an entry symbol can be
-//!    another entry's neighbor) — `pack`'s chunk_id dedupe (keep highest
-//!    score) resolves that, which is why both entry and neighbor items
-//!    carry their real `chunk_id` rather than the `-1` non-chunk sentinel.
-//! 5. Prefix the rendered bundle with an `explore: "{question}"` header.
+//!    → entry chunks, trimmed by `RELEVANCE_FLOOR`. `entry_limit` and the
+//!    limits below scale with the corpus tier — see `params_for`. A
+//!    `WeakVectorOnly` outcome (no keyword hit, nothing under the KNN floor)
+//!    renders under a "weak match" note and skips step 2.
+//! 2. One hop of callees and callers from the first `max_entry_symbols`
+//!    distinct entry symbols adds neighbors, up to `max_neighbor_ids`, along
+//!    with what the top hit's callers also call. Test code is skipped unless
+//!    the question asks about tests.
+//! 3. Rows render best first, grouped by file, until the budget runs out. The
+//!    top `LINKED_ROWS` rows also show their call links, which is what the
+//!    index knows that grep doesn't.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[cfg(test)]
 use vexus_watch::pipeline;
 
-use crate::bundle::{pack, BundleItem};
-use crate::format::render_bundle;
+use vexus_core::model::estimate_tokens;
+use vexus_core::priors::query_seeks_tests;
+use vexus_core::query::SymbolInfo;
+use vexus_core::Store;
+
 use crate::state::{freshness_header, AppState};
 use crate::tools::{apply_header, clamp_budget, embed_query};
 
 const NEIGHBOR_DEPTH: u32 = 1;
 const NEIGHBOR_LIMIT: u32 = 10;
-const NEIGHBOR_SCORE_FACTOR: f64 = 0.5;
+
+/// Rows that get a `calls:` / `called by:` line.
+const LINKED_ROWS: usize = 3;
+const MAX_LINKS: usize = 4;
+/// Callers of the top hit whose other callees join the map.
+const SIBLING_CALLERS: usize = 2;
+const MAX_LABEL_CHARS: usize = 100;
 
 /// Search hits scoring under this fraction of the best hit are dropped, so a
-/// bundle ends where relevance does rather than where the budget does. A hit
-/// in one search list scores about half a hit in both, so a one-list hit
-/// survives and one carrying the 0.4 test penalty, at 0.2, doesn't. Graph
-/// neighbors are exempt: their scores only reflect their parent, and a
-/// low-ranked hit can still lead to the callee a question needs.
+/// map ends where relevance does. A hit in one search list scores about half
+/// a hit in both, so a one-list hit survives and one carrying the 0.4 test
+/// penalty, at 0.2, doesn't.
 const RELEVANCE_FLOOR: f64 = 0.25;
 
-fn drop_weak_items(items: Vec<BundleItem>) -> Vec<BundleItem> {
-    let best = items.iter().map(|i| i.score).fold(f64::MIN, f64::max);
+fn keep_strong<T>(items: Vec<T>, score: impl Fn(&T) -> f64) -> Vec<T> {
+    let best = items.iter().map(&score).fold(f64::MIN, f64::max);
     items
         .into_iter()
-        .filter(|i| i.score >= best * RELEVANCE_FLOOR)
+        .filter(|i| score(i) >= best * RELEVANCE_FLOOR)
         .collect()
 }
 
 /// Per-tier limits: entry hits, distinct entry symbols to expand, distinct
-/// neighbor ids, and the default token budget (still overridable per call).
-/// Real Claude Code runs set these: an agent finds code with grep and a
-/// narrow read for about 6,000 tokens, so a bundle has to land well under
-/// that to pay for itself, and the old 8,000-token default never did.
+/// neighbor ids. Every map shares one budget, because a row costs about the
+/// same however large the repo is.
 struct ExploreParams {
     entry_limit: u32,
     max_entry_symbols: usize,
     max_neighbor_ids: usize,
-    default_budget: u32,
 }
+
+const DEFAULT_BUDGET_TOKENS: u32 = 800;
 
 fn params_for(tier: vexus_core::model::CorpusTier) -> ExploreParams {
     use vexus_core::model::CorpusTier;
@@ -75,26 +74,138 @@ fn params_for(tier: vexus_core::model::CorpusTier) -> ExploreParams {
             entry_limit: 8,
             max_entry_symbols: 6,
             max_neighbor_ids: 12,
-            default_budget: 2500,
         },
         CorpusTier::Small => ExploreParams {
             entry_limit: 8,
             max_entry_symbols: 6,
             max_neighbor_ids: 16,
-            default_budget: 2500,
         },
         CorpusTier::Medium => ExploreParams {
-            entry_limit: 8,
+            entry_limit: 10,
             max_entry_symbols: 5,
-            max_neighbor_ids: 8,
-            default_budget: 2500,
+            max_neighbor_ids: 10,
         },
     }
 }
 
-const NO_MATCH_TEXT: &str = "nothing indexed matches that question — try 'search' with distinctive words from the code, or 'status' to check index coverage.";
+const NO_MATCH_TEXT: &str = "nothing indexed matches that question — try distinctive words from the code, or 'status' to check index coverage.";
 
-const WEAK_MATCH_TEXT: &str = "weak match — nothing indexed clearly matches this question; the snippets below are only the nearest neighbors. For exact strings or comments, grep is the better tool here.";
+const WEAK_MATCH_TEXT: &str = "weak match — nothing indexed clearly matches this question; the rows below are only the nearest neighbors. For exact strings or comments, grep is the better tool here.";
+
+const MAP_NOTE: &str = "Best match first. These are locations, not source: `open` \"path:start-end\" for what you need.";
+
+/// One map line: a location, and a label to judge it by.
+struct Row {
+    path: String,
+    start_line: u32,
+    end_line: u32,
+    label: String,
+    symbol_id: Option<i64>,
+}
+
+fn truncated(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= MAX_LABEL_CHARS {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(MAX_LABEL_CHARS).collect();
+    format!("{cut}…")
+}
+
+fn symbol_row(info: &SymbolInfo) -> Row {
+    Row {
+        path: info.path.clone(),
+        start_line: info.start_line,
+        end_line: info.end_line,
+        label: truncated(info.sig.as_deref().unwrap_or(&info.qualname)),
+        symbol_id: Some(info.id),
+    }
+}
+
+fn is_test_code(store: &Store, info: &SymbolInfo) -> bool {
+    store.is_test_symbol(info.id, &info.path).unwrap_or(false)
+}
+
+/// `calls: a, b  called by: c` for a symbol, or `None` if it has no links.
+fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String> {
+    let names = |edges: Vec<vexus_core::query::EdgeHit>| -> Vec<String> {
+        let mut seen = HashSet::new();
+        edges
+            .into_iter()
+            .filter(|e| e.symbol.id != -1)
+            .filter(|e| wants_tests || !is_test_code(store, &e.symbol))
+            .map(|e| e.symbol.name)
+            .filter(|name| seen.insert(name.clone()))
+            .take(MAX_LINKS)
+            .collect()
+    };
+    let callees = names(
+        store
+            .callees_of(symbol_id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
+            .unwrap_or_default(),
+    );
+    let callers = names(
+        store
+            .callers_of(symbol_id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
+            .unwrap_or_default(),
+    );
+    let mut parts = Vec::new();
+    if !callees.is_empty() {
+        parts.push(format!("calls: {}", callees.join(", ")));
+    }
+    if !callers.is_empty() {
+        parts.push(format!("called by: {}", callers.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join("  "))
+}
+
+/// Groups rows by file, best file first, spending at most `budget_tokens`.
+fn render_map(store: &Store, rows: &[Row], wants_tests: bool, budget_tokens: u32) -> String {
+    let mut paths: Vec<&str> = Vec::new();
+    for row in rows {
+        if !paths.contains(&row.path.as_str()) {
+            paths.push(&row.path);
+        }
+    }
+
+    let linked: Vec<i64> = rows
+        .iter()
+        .filter_map(|r| r.symbol_id)
+        .take(LINKED_ROWS)
+        .collect();
+    let mut output = String::new();
+    let mut used = 0;
+    let mut omitted = 0;
+    for path in paths {
+        let mut group = format!("## {path}\n");
+        let mut listed = false;
+        for row in rows.iter().filter(|r| r.path == path) {
+            let mut line = format!("{}-{} {}\n", row.start_line, row.end_line, row.label);
+            if let Some(links) = row
+                .symbol_id
+                .filter(|id| linked.contains(id))
+                .and_then(|id| link_line(store, id, wants_tests))
+            {
+                line.push_str(&format!("  {links}\n"));
+            }
+            let cost = estimate_tokens(&line) + if listed { 0 } else { estimate_tokens(&group) };
+            if used + cost > budget_tokens {
+                omitted += 1;
+                continue;
+            }
+            used += cost;
+            group.push_str(&line);
+            listed = true;
+        }
+        if listed {
+            output.push_str(&group);
+        }
+    }
+    if omitted > 0 {
+        output.push_str(&format!("{omitted} more not shown.\n"));
+    }
+    output
+}
 
 /// Pure inner implementation of the `explore` tool.
 pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>) -> String {
@@ -115,7 +226,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .corpus_tier()
             .unwrap_or(vexus_core::model::CorpusTier::Medium),
     );
-    let budget_tokens = clamp_budget(budget_tokens, params.default_budget);
+    let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
     let (hits, outcome) = match store.search_hybrid_scored(
         question,
         query_vec.as_deref(),
@@ -130,154 +241,92 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
     let weak = outcome == vexus_core::search::SearchOutcome::WeakVectorOnly;
+    let wants_tests = query_seeks_tests(question);
 
-    // Step 1: entry chunks as BundleItems, plus the deduped (symbol_id,
-    // score) list step 2 expands from. `hits` is already score-descending
-    // (search_hybrid's RRF ranking), so the first occurrence of a symbol_id
-    // is that symbol's best score among the entries, and capping at the
-    // first N distinct ids keeps the top N by score.
-    let mut items: Vec<BundleItem> = Vec::with_capacity(hits.len());
-    let mut entry_symbols: Vec<(i64, f64)> = Vec::with_capacity(params.max_entry_symbols);
-    for hit in &hits {
-        items.push(BundleItem {
-            path: hit.path.clone(),
-            qualname: hit.qualname.clone(),
-            start_line: hit.start_line,
-            end_line: hit.end_line,
-            content: hit.content.clone(),
-            score: hit.score,
-            chunk_id: hit.chunk_id,
-        });
-        // A weak match skips graph expansion entirely: fanning out through
-        // callers/callees of a nearest-neighbor guess is where the
-        // small-repo token bloat came from, and the neighbors of a wrong
-        // entry are just more wrongness.
-        if weak {
-            continue;
-        }
-        if let Some(sid) = hit.symbol_id {
-            if entry_symbols.len() < params.max_entry_symbols
-                && !entry_symbols.iter().any(|(id, _)| *id == sid)
-            {
-                entry_symbols.push((sid, hit.score));
-            }
-        }
-    }
-
-    let mut items = drop_weak_items(items);
-    let wants_tests = vexus_core::priors::query_seeks_tests(question);
-
-    // Whole bodies: a long function spans several chunks and search matches
-    // only one of them.
-    for (sid, score) in &entry_symbols {
-        let Ok(Some(info)) = store.symbol_info(*sid) else {
-            continue;
-        };
-        let is_body = matches!(info.kind.as_str(), "function" | "method");
-        if !is_body || (!wants_tests && vexus_core::priors::is_test_path(&info.path)) {
-            continue;
-        }
-        let Ok(chunks) = store.symbol_source(*sid) else {
-            continue;
-        };
-        for (chunk_id, start_line, end_line, content) in chunks {
-            items.push(BundleItem {
-                path: info.path.clone(),
-                qualname: Some(info.qualname.clone()),
-                start_line,
-                end_line,
-                content,
-                score: *score,
-                chunk_id,
-            });
-        }
-    }
-
-    // Step 2: one hop of call/import graph expansion from each entry
-    // symbol, collecting resolved-only neighbor ids with
-    // their best (max) neighbor score.
-    let mut neighbor_scores: HashMap<i64, f64> = HashMap::new();
-    let mut neighbor_order: Vec<i64> = Vec::new();
-    'entries: for (sid, entry_score) in &entry_symbols {
-        let neighbor_score = entry_score * NEIGHBOR_SCORE_FACTOR;
-        let mut candidate_ids: Vec<i64> = Vec::new();
-        if let Ok(callers) = store.callers_of(*sid, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT) {
-            candidate_ids.extend(callers.iter().map(|e| e.symbol.id));
-        }
-        if let Ok(callees) = store.callees_of(*sid, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT) {
-            candidate_ids.extend(callees.iter().map(|e| e.symbol.id));
-        }
-        if let Ok((outgoing, incoming)) = store.imports_of(*sid) {
-            candidate_ids.extend(outgoing.iter().map(|e| e.symbol.id));
-            candidate_ids.extend(incoming.iter().map(|e| e.symbol.id));
-        }
-        for nid in candidate_ids {
-            if nid == -1 {
-                continue; // unresolved — no real symbol to expand.
-            }
-            // The test penalty only reaches ranked hits, so a test caller
-            // would otherwise walk straight in through the graph.
-            if !wants_tests {
-                if let Ok(Some(info)) = store.symbol_info(nid) {
-                    if vexus_core::priors::is_test_path(&info.path) {
-                        continue;
-                    }
+    let mut rows: Vec<Row> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut entry_symbols: Vec<i64> = Vec::new();
+    for hit in keep_strong(hits, |h| h.score) {
+        let info = hit
+            .symbol_id
+            .and_then(|id| store.symbol_info(id).ok().flatten())
+            .filter(|info| info.kind != "module");
+        match info {
+            Some(info) => {
+                if seen.insert(info.id) {
+                    entry_symbols.push(info.id);
+                    rows.push(symbol_row(&info));
                 }
             }
-            neighbor_scores
-                .entry(nid)
-                .and_modify(|s| {
-                    if neighbor_score > *s {
-                        *s = neighbor_score;
-                    }
-                })
-                .or_insert(neighbor_score);
-            if !neighbor_order.contains(&nid) {
-                neighbor_order.push(nid);
-                if neighbor_order.len() >= params.max_neighbor_ids {
-                    break 'entries;
-                }
-            }
+            None => rows.push(Row {
+                path: hit.path.clone(),
+                start_line: hit.start_line,
+                end_line: hit.end_line,
+                label: truncated(hit.content.lines().next().unwrap_or("")),
+                symbol_id: None,
+            }),
         }
     }
 
-    // Step 3: each neighbor's full symbol source becomes BundleItems too.
-    for nid in &neighbor_order {
-        let Ok(Some(info)) = store.symbol_info(*nid) else {
-            continue;
-        };
-        let Ok(chunks) = store.symbol_source(*nid) else {
-            continue;
-        };
-        let score = neighbor_scores[nid];
-        for (chunk_id, start_line, end_line, content) in chunks {
-            items.push(BundleItem {
-                path: info.path.clone(),
-                qualname: Some(info.qualname.clone()),
-                start_line,
-                end_line,
-                content,
-                score,
-                chunk_id,
-            });
+    if !weak {
+        let mut neighbors: Vec<SymbolInfo> = Vec::new();
+        for (rank, id) in entry_symbols
+            .iter()
+            .take(params.max_entry_symbols)
+            .enumerate()
+        {
+            let callers = store
+                .callers_of(*id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
+                .unwrap_or_default();
+            let callees = store
+                .callees_of(*id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
+                .unwrap_or_default();
+            // Siblings of the best match: the other steps its callers take
+            // are usually the rest of the flow being asked about.
+            let siblings = if rank == 0 {
+                callers
+                    .iter()
+                    .filter(|e| e.symbol.id != -1)
+                    .take(SIBLING_CALLERS)
+                    .flat_map(|e| {
+                        store
+                            .callees_of(e.symbol.id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Callees first: a question about how something works is
+            // answered by what it does, more than by who reaches it.
+            neighbors.extend(
+                callees
+                    .into_iter()
+                    .chain(callers)
+                    .chain(siblings)
+                    .map(|e| e.symbol),
+            );
+        }
+        let mut added = 0;
+        for symbol in neighbors {
+            if added >= params.max_neighbor_ids {
+                break;
+            }
+            if symbol.id == -1 || !seen.insert(symbol.id) {
+                continue;
+            }
+            if !wants_tests && is_test_code(&store, &symbol) {
+                continue;
+            }
+            rows.push(symbol_row(&symbol));
+            added += 1;
         }
     }
+
+    let note = if weak { WEAK_MATCH_TEXT } else { MAP_NOTE };
+    let map = render_map(&store, &rows, wants_tests, budget_tokens);
     drop(store);
-
-    // Step 4: pack + render.
-    let (selected, omitted) = pack(items, budget_tokens);
-    let weak_note = if weak {
-        format!("{WEAK_MATCH_TEXT}\n\n")
-    } else {
-        String::new()
-    };
-    apply_header(
-        fresh_header,
-        format!(
-            "{question_header}{weak_note}{}",
-            render_bundle(&selected, &omitted)
-        ),
-    )
+    apply_header(fresh_header, format!("{question_header}{note}\n\n{map}"))
 }
 
 #[cfg(test)]
@@ -359,7 +408,7 @@ mod tests {
         let out = explore_text(&state, "reticulate splines", None);
         assert!(
             out.contains("pkg/splines.py"),
-            "the production definition must be in the bundle: {out}"
+            "the production definition must be in the map: {out}"
         );
         let prod_at = out.find("pkg/splines.py");
         let test_at = out.find("tests/test_splines.py");
@@ -375,61 +424,111 @@ mod tests {
         );
 
         // A broad question matches everything, so this is the case that
-        // fills the budget. Rendered code runs at ~2.5 chars per token.
+        // fills the budget. Rendered text runs at ~2.5 chars per token.
         let broad = explore_text(&state, "helper caller", None);
         let real_tokens = broad.chars().count() * 2 / 5;
         assert!(
-            real_tokens <= 3000,
-            "a default bundle must stay near 2500 real tokens, got ~{real_tokens}"
+            real_tokens <= 1000,
+            "a default map must stay near 800 real tokens, got ~{real_tokens}"
         );
-    }
-
-    fn scored(chunk_id: i64, score: f64) -> BundleItem {
-        BundleItem {
-            path: "a.py".to_string(),
-            qualname: None,
-            start_line: 1,
-            end_line: 1,
-            content: "x".to_string(),
-            score,
-            chunk_id,
-        }
     }
 
     #[test]
     fn items_far_below_the_best_score_are_dropped() {
-        let items = vec![scored(1, 1.0), scored(2, 0.5), scored(3, 0.2)];
+        let kept = keep_strong(vec![1.0, 0.3, 0.2], |score| *score);
 
-        let kept: Vec<i64> = drop_weak_items(items).iter().map(|i| i.chunk_id).collect();
-
-        assert_eq!(kept, vec![1, 2]);
+        assert_eq!(kept, vec![1.0, 0.3]);
     }
 
-    /// Long functions span several chunks and search only matches one of
-    /// them. Returning that fragment alone sent the agent back with `open`
-    /// for the rest: NestJS's `resolveConstructorParams` took 5 follow-ups.
+    /// Returning source for every guess makes the agent pay before it can
+    /// judge: a NestJS answer cited 2 of the 9 files `explore` sent, at about
+    /// 5,300 tokens. A map costs a few tokens per guess and lets the model
+    /// open only what it wants.
     #[test]
-    fn a_function_split_across_chunks_comes_back_whole() {
+    fn explore_returns_a_map_of_locations_rather_than_source() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let filler: String = (0..120)
-            .map(|i| format!("    total += compute_value_{i:03}(total, offset)\n"))
-            .collect();
         write(
             root,
-            "pkg/ledger.py",
-            &format!(
-                "def settle_ledger(total, offset):\n    \"\"\"Reticulates the splines.\"\"\"\n{filler}    return closing_balance_marker(total)\n"
-            ),
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    secret_body_marker = helper(x)\n    return secret_body_marker\n\n\ndef helper(x):\n    return x\n",
+        );
+        write(
+            root,
+            "pkg/job.py",
+            "from pkg.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
         );
         let state = keyword_only_state(root);
 
         let out = explore_text(&state, "reticulates splines", None);
 
+        assert!(out.contains("pkg/core.py"), "{out}");
+        assert!(out.contains("1-4"), "the symbol's line range: {out}");
+        assert!(out.contains("settle"), "{out}");
         assert!(
-            out.contains("closing_balance_marker"),
-            "the tail of the matched function must be in the bundle: {out}"
+            !out.contains("secret_body_marker"),
+            "a map must not carry function bodies: {out}"
         );
+        assert!(!out.contains("```"), "a map has no source fences: {out}");
+    }
+
+    #[test]
+    fn explore_map_shows_call_links_for_the_top_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return helper(x)\n\n\ndef helper(x):\n    return x\n",
+        );
+        write(
+            root,
+            "pkg/job.py",
+            "from pkg.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("calls: helper"), "{out}");
+        assert!(out.contains("called by: run_job"), "{out}");
+    }
+
+    /// A step in a flow is often a sibling of the match, not a neighbor:
+    /// `place_order` doesn't call `quote_total`, the handler calling it does.
+    #[test]
+    fn explore_lists_what_the_top_hits_callers_also_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/orders.py",
+            "def place_order(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n\n\ndef quote_total(x):\n    return x\n\n\ndef handler(x):\n    total = quote_total(x)\n    return place_order(total)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("def quote_total"), "{out}");
+    }
+
+    /// Rust keeps tests in the file they test, so the path says nothing.
+    /// These used to fill neighbor slots and push real callees off the map.
+    #[test]
+    fn graph_expansion_skips_inline_rust_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/lib.rs",
+            "/// Reticulates the splines.\npub fn settle(x: u32) -> u32 {\n    x\n}\n\npub fn run_job() -> u32 {\n    settle(1)\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn settle_keeps_the_value() {\n        let got = settle(1);\n        assert!(got == 1);\n    }\n}\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("run_job"), "{out}");
+        assert!(!out.contains("settle_keeps_the_value"), "{out}");
     }
 
     /// A test that calls a function is a real caller, so one hop of graph
@@ -488,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn explore_expands_one_hop_to_include_the_callee_body() {
+    fn explore_expands_one_hop_to_list_the_callee() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         chain_repo(root);
@@ -501,44 +600,40 @@ mod tests {
             "got: {out:?}"
         );
         assert!(
-            out.contains("def alpha_process():"),
-            "entry symbol's own body must be present: {out:?}"
+            out.contains("1-2 def alpha_process():"),
+            "the entry symbol must be listed: {out:?}"
         );
         assert!(
-            out.contains("def unique_marker_beta():") && out.contains("pass"),
-            "callee's body must be present via one-hop expansion even though \
-             only alpha matched the question text: {out:?}"
+            out.contains("5-6 def unique_marker_beta():"),
+            "the callee must be listed via one-hop expansion even though only \
+             alpha matched the question text: {out:?}"
         );
         assert!(
-            !out.contains("Related (not included"),
-            "both bodies comfortably fit the default budget, nothing should be omitted: {out:?}"
+            !out.contains("more not shown"),
+            "both rows fit the default budget: {out:?}"
         );
     }
 
     #[test]
-    fn explore_small_budget_drops_the_expanded_neighbor_into_related() {
+    fn explore_small_budget_keeps_the_best_row_and_counts_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         chain_repo(root);
         let state = keyword_only_state(root);
 
-        // Big enough for alpha's own (higher-scored) entry chunk alone
-        // (~31 tokens incl. per-item overhead), too small to also fit
-        // beta's (half-scored) neighbor chunk (~28 more).
-        let out = explore_text(&state, "alpha_process", Some(40));
+        let out = explore_text(&state, "alpha_process", Some(30));
 
         assert!(
             out.contains("def alpha_process():"),
-            "higher-scored entry must still be kept: {out:?}"
+            "the best row must be kept: {out:?}"
         );
         assert!(
-            !out.contains("def unique_marker_beta():"),
-            "neighbor's body must be dropped, not rendered, under a tight budget: {out:?}"
+            !out.contains("5-6 def unique_marker_beta():"),
+            "a row past the budget must not render: {out:?}"
         );
         assert!(
-            out.contains("Related (not included, raise budget_tokens or use `open`):")
-                && out.contains("unique_marker_beta"),
-            "dropped neighbor must be named in the related/omitted footer: {out:?}"
+            out.contains("1 more not shown."),
+            "dropped rows must be counted: {out:?}"
         );
     }
 
@@ -554,8 +649,8 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "explore: \"\"\n\nnothing indexed matches that question — try 'search' with \
-                 distinctive words from the code, or 'status' to check index coverage."
+                "explore: \"\"\n\nnothing indexed matches that question — try distinctive \
+                 words from the code, or 'status' to check index coverage."
             )
         );
     }
