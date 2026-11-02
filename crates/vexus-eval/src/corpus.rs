@@ -94,6 +94,19 @@ impl CorpusAccum {
         }
     }
 
+    /// The figures that mean something for pending rows, which never feed
+    /// edges, `clean@5` or the other metrics of a [`metrics::MetricSet`].
+    pub fn pending(&self) -> metrics::PendingSet {
+        metrics::PendingSet {
+            search_queries: self.recall_at_5.count,
+            recall_at_5: metrics::round4(self.recall_at_5.mean()),
+            recall_at_10: metrics::round4(self.recall_at_10.mean()),
+            mrr: metrics::round4(self.mrr.mean()),
+            explore_queries: self.answer_in_bundle.count,
+            answer_in_bundle: metrics::round4(self.answer_in_bundle.mean()),
+        }
+    }
+
     /// The final, rounded [`metrics::MetricSet`] — the JSON/table shape.
     pub fn metrics(&self) -> metrics::MetricSet {
         metrics::MetricSet {
@@ -111,6 +124,14 @@ impl CorpusAccum {
     }
 }
 
+/// One corpus's scores, kept apart by whether the gate reads them. `pending`
+/// holds rows marked `pending: true` (see [`queries::Query::pending`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CorpusScores {
+    pub gated: CorpusAccum,
+    pub pending: CorpusAccum,
+}
+
 /// Indexes `eval_root/corpora/{name}` into a fresh `tempfile::tempdir()`
 /// database (never in-place under `eval/` — no `.vexus` artifact is ever
 /// created there), embeds it with `embedder` if there is one, then scores
@@ -119,7 +140,7 @@ pub fn eval_corpus(
     eval_root: &Path,
     name: &str,
     embedder: Option<&Arc<dyn Embedder>>,
-) -> Result<CorpusAccum> {
+) -> Result<CorpusScores> {
     let corpus_root = eval_root.join("corpora").join(name);
     ensure!(
         corpus_root.is_dir(),
@@ -164,7 +185,7 @@ pub fn eval_corpus_at_medium(
     eval_root: &Path,
     name: &str,
     embedder: Option<&Arc<dyn Embedder>>,
-) -> Result<CorpusAccum> {
+) -> Result<CorpusScores> {
     let (state, _repo, _db_dir) = medium_state(eval_root, name, embedder)?;
     let tier = state
         .lock_store_fresh()
@@ -199,19 +220,25 @@ fn score_corpus(
     name: &str,
     state: &AppState,
     embedder: Option<&Arc<dyn Embedder>>,
-) -> Result<CorpusAccum> {
+) -> Result<CorpusScores> {
     let queries_path = eval_root.join("queries").join(format!("{name}.yaml"));
     let queries = queries::load_queries(&queries_path)?;
     let edges_path = eval_root.join("edges").join(format!("{name}.yaml"));
     let edges = queries::load_edges(&edges_path)?;
 
-    let mut accum = CorpusAccum::default();
+    let mut scores = CorpusScores::default();
 
-    for query in queries.iter().filter(|q| q.tool == "search") {
-        score_search_query(state, embedder, query, &mut accum)?;
-    }
-    for query in queries.iter().filter(|q| q.tool == "explore") {
-        score_explore_query(state, query, &mut accum);
+    for query in &queries {
+        let accum = if query.pending {
+            &mut scores.pending
+        } else {
+            &mut scores.gated
+        };
+        match query.tool.as_str() {
+            "search" => score_search_query(state, embedder, query, accum)?,
+            "explore" => score_explore_query(state, query, accum),
+            _ => {}
+        }
     }
 
     let labeled: Vec<LabeledEdge> = edges
@@ -221,9 +248,10 @@ fn score_corpus(
             callee: e.callee,
         })
         .collect();
-    accum.edges = metrics::edge_counts(&labeled, |caller| depth1_resolved_callees(state, caller));
+    scores.gated.edges =
+        metrics::edge_counts(&labeled, |caller| depth1_resolved_callees(state, caller));
 
-    Ok(accum)
+    Ok(scores)
 }
 
 /// Builds a fresh, fully indexed `AppState` over `corpus_root`, backed by a
@@ -476,7 +504,7 @@ mod tests {
 
     #[test]
     fn eval_corpus_pyapp_produces_sane_nonzero_metrics_keyword_only() {
-        let accum = eval_corpus(&eval_root(), "pyapp", None).unwrap();
+        let accum = eval_corpus(&eval_root(), "pyapp", None).unwrap().gated;
         let m = accum.metrics();
 
         for (name, value) in [
@@ -529,11 +557,48 @@ mod tests {
             );
         }
 
-        let padded = score_corpus(&root, MEDIUM_CORPUS, &state, None).unwrap();
-        let plain = eval_corpus(&root, MEDIUM_CORPUS, None).unwrap();
+        let padded = score_corpus(&root, MEDIUM_CORPUS, &state, None)
+            .unwrap()
+            .gated;
+        let plain = eval_corpus(&root, MEDIUM_CORPUS, None).unwrap().gated;
         assert_eq!(padded.recall_at_5.count, plain.recall_at_5.count);
         assert_eq!(padded.answer_in_bundle.count, plain.answer_in_bundle.count);
         assert_eq!(padded.edges.labeled, plain.edges.labeled);
+    }
+
+    /// A throwaway eval root with one corpus, so a test can pick the rows.
+    fn mini_eval_root(queries_yaml: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for sub in ["corpora/mini", "queries", "edges"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(
+            root.join("corpora/mini/lookup.py"),
+            "def find_widget():\n    \"\"\"Find a widget by name.\"\"\"\n    return 1\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("queries/mini.yaml"), queries_yaml).unwrap();
+        std::fs::write(root.join("edges/mini.yaml"), "[]\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn pending_rows_are_scored_apart_from_the_gated_metrics() {
+        let gated = "- q: widget\n  expect: [lookup.find_widget]\n";
+        let pending = "- q: nothing here matches\n  pending: true\n  expect: [lookup.find_widget]\n\
+                       - q: widget\n  tool: explore\n  pending: true\n  expect: [lookup.find_widget]\n";
+
+        let alone = eval_corpus(mini_eval_root(gated).path(), "mini", None).unwrap();
+        let root = mini_eval_root(&format!("{gated}{pending}"));
+        let both = eval_corpus(root.path(), "mini", None).unwrap();
+
+        assert_eq!(both.gated.metrics(), alone.gated.metrics());
+        assert_eq!(both.gated.recall_at_5.count, 1);
+        assert_eq!(both.pending.recall_at_5.count, 1);
+        assert_eq!(both.pending.recall_at_5.mean(), 0.0);
+        assert_eq!(both.pending.answer_in_bundle.count, 1);
+        assert_eq!(both.pending.answer_in_bundle.mean(), 1.0);
     }
 
     #[test]

@@ -310,3 +310,63 @@
 - q: "tests covering login throttling"
   expect:
     - tests.test_auth.test_authenticate_throttles_repeated_login_attempts
+
+# --- pending: struct fields, enum variants, interface members -----------
+#
+# A container's chunk holds its signature and its children's signatures, not
+# its body, so nothing can find a field or a variant by name. These rows record
+# that miss. `expect` is the container because that's what a field resolves to
+# once its text is searchable. Words from the container's name or doc comment
+# are kept out of the questions: they'd find it without ever reading a member.
+#
+# `pending: true` keeps a row out of every gated metric (see eval/README.md).
+# Once the indexer change lands, delete the flag and bless.
+
+# struct fields
+- q: "max_login_attempts"
+  pending: true
+  expect:
+    - config.Config
+
+- q: "where is stripe_api_key declared"
+  pending: true
+  expect:
+    - config.Config
+
+- q: "renewed_at timestamp field"
+  pending: true
+  expect:
+    - models.subscription.Subscription
+
+- q: "display_name and bio profile fields"
+  pending: true
+  expect:
+    - models.user.User
+
+- q: "invoice_count and generated_at fields"
+  pending: true
+  expect:
+    - models.report.UsageReport
+
+- q: "renewed_at"
+  tool: explore
+  pending: true
+  expect:
+    - models.subscription.Subscription
+
+# enum variants
+- q: "WRITTEN_OFF"
+  pending: true
+  expect:
+    - models.dunning_stage.DunningStage
+
+- q: "which variant comes after COURTESY_NUDGE"
+  pending: true
+  expect:
+    - models.dunning_stage.DunningStage
+
+- q: "COLLECTIONS_HANDOFF"
+  tool: explore
+  pending: true
+  expect:
+    - models.dunning_stage.DunningStage

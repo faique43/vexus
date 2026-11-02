@@ -368,6 +368,20 @@ pub struct MetricSet {
     pub edge_recall: f64,
 }
 
+/// How `pending: true` queries score. They're never compared with a baseline:
+/// these numbers are what tells someone a fix landed and the rows can graduate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PendingSet {
+    pub search_queries: u64,
+    #[serde(rename = "recall@5")]
+    pub recall_at_5: f64,
+    #[serde(rename = "recall@10")]
+    pub recall_at_10: f64,
+    pub mrr: f64,
+    pub explore_queries: u64,
+    pub answer_in_bundle: f64,
+}
+
 /// Rounds to 4 decimal places (half away from zero) — the "all floats
 /// 0..1, 4 decimal places in JSON" rule. Applied to
 /// every metric value right before it's placed in the JSON-serializable

@@ -114,6 +114,21 @@ It's reported as its own scope and stays out of "overall", which already counts
 these queries once. Neither baseline records it yet, so `check` prints it as
 scored but not gated until the next deliberate `bless`.
 
+### Pending queries
+
+A row with `pending: true` records a miss the code can't pass yet. It's scored
+through the same code as any other row and printed by `run` and `check`, but it
+stays out of every gated metric and out of `diff_reports`, so it can't fail the
+gate and doesn't dilute the numbers around it. To graduate a row, delete the
+flag and `bless`.
+
+The rows at the bottom of `queries/{pyapp,polyglot}.yaml` are the current set:
+struct fields, enum variants and interface members, which no chunk holds today
+because a container's chunk is its signature and its children's signatures. All
+24 score 0 keyword-only, which is the state they exist to record. `expect` names
+the container, the symbol a member's text would land on. On the real model a few
+pass on the container's name and doc comment alone, so read the keyword numbers.
+
 ### Pre-release: `--real --check`
 
 The keyword-only gate never touches a downloaded model and never runs against

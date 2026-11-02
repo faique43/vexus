@@ -107,6 +107,10 @@ struct Report {
     mode: String,
     per_corpus: BTreeMap<String, metrics::MetricSet>,
     overall: metrics::MetricSet,
+    /// `pending: true` queries per corpus, plus "overall". `diff_reports`
+    /// never reads this, which is what keeps them from failing the gate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pending: BTreeMap<String, metrics::PendingSet>,
 }
 
 /// `crates/vexus-eval` -> repo root's `eval/` — resolved from the crate's
@@ -147,27 +151,38 @@ fn compute_report(
         "keyword"
     };
 
-    let mut per_corpus_accum: BTreeMap<String, corpus::CorpusAccum> = BTreeMap::new();
+    let mut per_corpus_scores: BTreeMap<String, corpus::CorpusScores> = BTreeMap::new();
     for name in names {
         eprintln!("vexus-eval: indexing + scoring corpus {name}...");
-        let accum = corpus::eval_corpus(root, name, embedder)?;
-        per_corpus_accum.insert(name.clone(), accum);
+        let scores = corpus::eval_corpus(root, name, embedder)?;
+        per_corpus_scores.insert(name.clone(), scores);
     }
 
-    let overall_accum = per_corpus_accum
-        .values()
-        .copied()
-        .fold(corpus::CorpusAccum::default(), corpus::CorpusAccum::combine);
+    let pool = |part: fn(&corpus::CorpusScores) -> corpus::CorpusAccum| {
+        per_corpus_scores
+            .values()
+            .map(part)
+            .fold(corpus::CorpusAccum::default(), corpus::CorpusAccum::combine)
+    };
+    let overall_accum = pool(|s| s.gated);
 
-    let per_corpus = per_corpus_accum
+    let per_corpus = per_corpus_scores
         .iter()
-        .map(|(name, accum)| (name.clone(), accum.metrics()))
+        .map(|(name, scores)| (name.clone(), scores.gated.metrics()))
         .collect();
+
+    let mut pending: BTreeMap<String, metrics::PendingSet> = per_corpus_scores
+        .iter()
+        .map(|(name, scores)| (name.clone(), scores.pending.pending()))
+        .collect();
+    pending.insert("overall".to_string(), pool(|s| s.pending).pending());
+    pending.retain(|_, set| set.search_queries + set.explore_queries > 0);
 
     Ok(Report {
         mode: mode.to_string(),
         per_corpus,
         overall: overall_accum.metrics(),
+        pending,
     })
 }
 
@@ -183,8 +198,8 @@ fn full_report(
     if names.iter().any(|name| name == corpus::MEDIUM_CORPUS) {
         let scope = format!("{}@medium", corpus::MEDIUM_CORPUS);
         eprintln!("vexus-eval: indexing + scoring {scope}...");
-        let accum = corpus::eval_corpus_at_medium(root, corpus::MEDIUM_CORPUS, embedder)?;
-        report.per_corpus.insert(scope, accum.metrics());
+        let scores = corpus::eval_corpus_at_medium(root, corpus::MEDIUM_CORPUS, embedder)?;
+        report.per_corpus.insert(scope, scores.gated.metrics());
     }
     Ok(report)
 }
@@ -196,6 +211,29 @@ fn print_table(report: &Report) {
         println!();
     }
     print_metric_set("overall", &report.overall);
+    println!();
+    print_pending(report);
+}
+
+/// Queries waiting on a known fix. Low numbers here are the expected state.
+fn print_pending(report: &Report) {
+    if report.pending.is_empty() {
+        return;
+    }
+    println!("pending, scored but never gated:");
+    for (scope, p) in &report.pending {
+        println!(
+            "  {scope:<10} search {:>2}  recall@5 {:.4}  recall@10 {:.4}  mrr {:.4}  \
+             explore {:>2}  answer_in_bundle {:.4}",
+            p.search_queries,
+            p.recall_at_5,
+            p.recall_at_10,
+            p.mrr,
+            p.explore_queries,
+            p.answer_in_bundle
+        );
+    }
+    println!();
 }
 
 fn print_metric_set(label: &str, m: &metrics::MetricSet) {
@@ -425,6 +463,8 @@ fn check(real: bool) -> Result<()> {
         println!();
     }
 
+    print_pending(&current);
+
     if regressions.is_empty() {
         println!(
             "eval-gate: PASS — no metric dropped more than {REGRESSION_THRESHOLD:.2} absolute against {}",
@@ -588,6 +628,7 @@ mod tests {
                 .map(|(n, m)| (n.to_string(), *m))
                 .collect(),
             overall,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -697,6 +738,35 @@ mod tests {
         let (regressions, improvements) = diff_reports(&baseline, &current);
         assert!(regressions.is_empty(), "{regressions:?}");
         assert!(improvements.is_empty(), "{improvements:?}");
+    }
+
+    #[test]
+    fn a_pending_collapse_is_not_a_regression() {
+        let pending = |recall_at_5| metrics::PendingSet {
+            search_queries: 4,
+            recall_at_5,
+            recall_at_10: recall_at_5,
+            mrr: recall_at_5,
+            explore_queries: 1,
+            answer_in_bundle: recall_at_5,
+        };
+        let mut baseline = report_with(&[("pyapp", metric_set(0.5))], metric_set(0.5));
+        baseline.pending.insert("pyapp".to_string(), pending(1.0));
+        let mut current = report_with(&[("pyapp", metric_set(0.5))], metric_set(0.5));
+        current.pending.insert("pyapp".to_string(), pending(0.0));
+
+        let (regressions, improvements) = diff_reports(&baseline, &current);
+        assert!(regressions.is_empty(), "{regressions:?}");
+        assert!(improvements.is_empty(), "{improvements:?}");
+    }
+
+    #[test]
+    fn a_baseline_written_without_pending_rows_still_parses() {
+        let report = report_with(&[("pyapp", metric_set(0.3))], metric_set(0.3));
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("pending"), "{json}");
+        let loaded: Report = serde_json::from_str(&json).unwrap();
+        assert!(loaded.pending.is_empty());
     }
 
     #[test]
