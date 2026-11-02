@@ -648,10 +648,8 @@ mod tests {
 
         assert_eq!(
             out,
-            format!(
-                "explore: \"\"\n\nnothing indexed matches that question — try distinctive \
-                 words from the code, or 'status' to check index coverage."
-            )
+            "explore: \"\"\n\nnothing indexed matches that question — try distinctive words \
+             from the code, or 'status' to check index coverage."
         );
     }
 
