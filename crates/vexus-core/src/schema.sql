@@ -60,7 +60,7 @@ CREATE TABLE chunks (
 CREATE INDEX idx_chunks_embedded ON chunks(embedded) WHERE embedded = 0;
 
 CREATE VIRTUAL TABLE fts_chunks USING fts5(
-  content, content='chunks', content_rowid='id'
+  content, content='chunks', content_rowid='id', tokenize='porter unicode61'
 );
 
 CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN

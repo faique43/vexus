@@ -553,6 +553,25 @@ mod tests {
     }
 
     #[test]
+    fn keyword_search_matches_other_forms_of_a_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.py",
+                "python",
+                &[1u8; 32],
+                &one_fn_file("a.work", "validates retries"),
+            )
+            .unwrap();
+
+        for query in ["validating", "validation", "retry"] {
+            let hits = store.search_keyword(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
     fn keyword_search_ranks_and_survives_weird_queries() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
