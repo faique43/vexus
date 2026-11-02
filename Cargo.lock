@@ -2468,6 +2468,7 @@ name = "vexus-mcp"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "blake3",
  "rmcp",
  "schemars",
  "serde",

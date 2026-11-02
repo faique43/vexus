@@ -5,10 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use vexus_core::model::estimate_tokens;
+use vexus_core::query::SymbolInfo;
 #[cfg(test)]
 use vexus_watch::pipeline;
 
-use crate::bundle::{pack, BundleItem};
+use crate::bundle::BundleItem;
 use crate::format::render_bundle;
 use crate::state::{freshness_header, AppState};
 use crate::tools::{apply_header, clamp_budget, resolve_or_text};
@@ -41,48 +42,50 @@ pub fn open_text(state: &AppState, target: &str, budget_tokens: Option<u32>) -> 
         Err(text) => return apply_header(fresh_header, text),
     };
 
-    let chunks = match store.symbol_source(info.id) {
-        Ok(c) => c,
+    // A symbol's chunks start at its doc comment, which `info` doesn't.
+    let start_line = match store.symbol_source(info.id) {
+        Ok(chunks) => chunks
+            .first()
+            .map_or(info.start_line, |chunk| chunk.1.min(info.start_line)),
         Err(e) => return apply_header(fresh_header, format!("open error: {e:#}")),
     };
+    let indexed_hash = store.file_hash(&info.path).ok().flatten();
     drop(store);
-    if chunks.is_empty() {
-        return apply_header(
-            fresh_header,
-            format!(
-                "{} ({}:{}-{}) has no source chunks (likely a module or an empty body).",
-                info.qualname, info.path, info.start_line, info.end_line
-            ),
-        );
-    }
-    let total_chunks = chunks.len();
-    let items: Vec<BundleItem> = chunks
-        .into_iter()
-        .map(|(chunk_id, start_line, end_line, content)| BundleItem {
-            path: info.path.clone(),
-            qualname: Some(info.qualname.clone()),
-            start_line,
-            end_line,
-            content,
-            score: 1.0,
-            chunk_id,
-        })
-        .collect();
-    let (selected, omitted) = pack(items, budget_tokens);
-    let mut out = render_bundle(&selected, &omitted);
-    if selected.len() < total_chunks {
-        let ranges = selected
-            .iter()
-            .map(|item| format!("{}-{}", item.start_line, item.end_line))
-            .collect::<Vec<_>>()
-            .join(", ");
+    apply_header(
+        fresh_header,
+        open_symbol(&state.root, &info, start_line, indexed_hash, budget_tokens),
+    )
+}
+
+/// Chunks are for retrieval, and a container's is a skeleton, so a symbol's
+/// source comes from the file. The index only knows where to look, which
+/// goes wrong once the file has moved on, so that's noted.
+fn open_symbol(
+    root: &Path,
+    info: &SymbolInfo,
+    start_line: u32,
+    indexed_hash: Option<[u8; 32]>,
+    budget_tokens: u32,
+) -> String {
+    let bytes = match read_source(root, &info.path) {
+        Ok(bytes) => bytes,
+        Err(msg) => return msg,
+    };
+    let content = String::from_utf8_lossy(&bytes);
+    let mut out = render_slice(
+        &info.path,
+        &content,
+        start_line,
+        info.end_line,
+        budget_tokens,
+    );
+    if indexed_hash != Some(*blake3::hash(&bytes).as_bytes()) {
         out.push_str(&format!(
-            "symbol truncated: {} of {} chunks shown (lines {ranges}); raise budget_tokens\n",
-            selected.len(),
-            total_chunks
+            "{} changed since it was indexed, so these lines may no longer be {}\n",
+            info.path, info.qualname
         ));
     }
-    apply_header(fresh_header, out)
+    out
 }
 
 /// Recognizes the `path:start-end` form (equivalent to the regex
@@ -135,18 +138,31 @@ fn open_path_slice(
     end: u32,
     budget_tokens: u32,
 ) -> String {
-    if escapes_root(root, rel_path) {
-        return format!("\"{rel_path}\" escapes the repository root — refusing to read it.");
+    match read_source(root, rel_path) {
+        Ok(bytes) => render_slice(
+            rel_path,
+            &String::from_utf8_lossy(&bytes),
+            start,
+            end,
+            budget_tokens,
+        ),
+        Err(msg) => msg,
     }
+}
 
+fn read_source(root: &Path, rel_path: &str) -> Result<Vec<u8>, String> {
+    if escapes_root(root, rel_path) {
+        return Err(format!(
+            "\"{rel_path}\" escapes the repository root — refusing to read it."
+        ));
+    }
     let candidate: PathBuf = root.join(rel_path);
-    let content = match std::fs::read_to_string(&candidate) {
-        Ok(c) => c,
-        Err(_) => {
-            return format!("file not found: {rel_path} — try `explore` to locate the right path.")
-        }
-    };
+    std::fs::read(&candidate).map_err(|_| {
+        format!("file not found: {rel_path} — try `explore` to locate the right path.")
+    })
+}
 
+fn render_slice(rel_path: &str, content: &str, start: u32, end: u32, budget_tokens: u32) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len() as u32;
     if total == 0 {
@@ -161,7 +177,7 @@ fn open_path_slice(
     let requested = &lines[(start - 1) as usize..end as usize];
     let requested_count = requested.len();
     let (slice, kept) = truncate_to_budget(requested, budget_tokens);
-    let truncated = kept < requested_count;
+    let line_cut = estimate_tokens(requested[0]) > budget_tokens;
     let rendered_end = start + kept as u32 - 1;
 
     let item = BundleItem {
@@ -174,10 +190,15 @@ fn open_path_slice(
         chunk_id: -1,
     };
     let mut out = render_bundle(&[item], &[]);
-    if truncated {
+    if kept < requested_count {
         out.push_str(&format!(
             "range truncated to {kept} of {requested_count} lines to fit budget_tokens; \
              request a narrower range or raise budget_tokens\n"
+        ));
+    }
+    if line_cut {
+        out.push_str(&format!(
+            "line {start} cut to fit budget_tokens; raise budget_tokens to see all of it\n"
         ));
     }
     out
@@ -186,20 +207,21 @@ fn open_path_slice(
 /// Fits `lines` under `budget_tokens` by keeping the longest whole-line
 /// prefix whose `estimate_tokens` cost is within budget (binary search over
 /// the prefix length, so a huge over-budget range doesn't cost O(n^2) to
-/// shrink one line at a time). Always keeps at least one line — a
-/// single line that alone exceeds budget is still returned as-is, since
-/// there's no narrower full-line unit to fall back to. Returns the joined
-/// (possibly truncated) content and how many lines it kept; the caller
-/// compares that against `lines.len()` to decide whether to note the cut.
+/// shrink one line at a time). A first line that alone exceeds budget is cut
+/// mid-line, since there's no narrower full-line unit to fall back to.
+/// Returns the joined (possibly truncated) content and how many lines it
+/// touched; the caller compares that against `lines.len()` to decide whether
+/// to note the cut.
 fn truncate_to_budget(lines: &[&str], budget_tokens: u32) -> (String, usize) {
     let full = lines.join("\n");
-    if lines.len() <= 1 || estimate_tokens(&full) <= budget_tokens {
+    if estimate_tokens(&full) <= budget_tokens {
         return (full, lines.len());
     }
 
     let fits = |n: usize| estimate_tokens(&lines[0..n].join("\n")) <= budget_tokens;
     if !fits(1) {
-        return (lines[0].to_string(), 1);
+        let head = lines[0].chars().take(budget_tokens as usize * 4);
+        return (head.collect(), 1);
     }
 
     let mut lo = 1usize;
@@ -256,40 +278,126 @@ mod tests {
         );
     }
 
-    /// Regression: a symbol big enough to be chunked into several pieces
-    /// (per `vexus_index::chunk`'s `MAX_TOKENS` splitting) must say so when
-    /// a tight budget only lets some of those pieces through — silently
-    /// showing a truncated body with no indication reads as the whole
-    /// symbol, which it isn't.
+    /// `open` is described as exact source, so a container must come back as
+    /// the file has it, not as the skeleton the index embeds.
     #[test]
-    fn open_symbol_truncation_note_when_chunks_dropped_by_budget() {
+    fn open_container_returns_the_file_not_the_skeleton() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        // ~300 short statements comfortably exceeds MAX_TOKENS (512),
-        // forcing `big` to be indexed as multiple chunks.
+        let source = "export interface Options {\n  /** Largest payload, in bytes. */\n  limit: number;\n\n  name?: string;\n}\n";
+        write(root, "opts.ts", source);
+
+        let state = indexed_state(root);
+        let out = open_text(&state, "Options", None);
+
+        assert!(out.contains("opts.ts:1-6"), "got: {out:?}");
+        assert!(out.contains(source), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_class_keeps_method_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "c.py",
+            "class C:\n    def a(self):\n        return 'body of a'\n",
+        );
+
+        let state = indexed_state(root);
+        let out = open_text(&state, "C", None);
+
+        assert!(out.contains("return 'body of a'"), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_split_function_has_no_injected_signatures() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let body: String = (0..300).map(|i| format!("    line_{i:04} = 0\n")).collect();
+        write(root, "big.py", &format!("def big():\n{body}"));
+
+        let state = indexed_state(root);
+        let out = open_text(&state, "big.big", Some(20_000));
+
+        assert_eq!(out.matches("def big():").count(), 1, "got: {out:?}");
+        assert!(out.contains("big.py:1-301"), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_symbol_includes_its_doc_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "# Explains foo.\ndef foo():\n    return 1\n");
+
+        let state = indexed_state(root);
+        let out = open_text(&state, "a.foo", None);
+
+        assert!(out.contains("a.py:1-3"), "got: {out:?}");
+        assert!(out.contains("# Explains foo."), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_notes_when_the_symbol_changed_on_disk_after_indexing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def foo():\n    return 1\n");
+
+        let state = indexed_state(root);
+        write(root, "a.py", "# new first line\ndef foo():\n    return 2\n");
+        let out = open_text(&state, "a.foo", None);
+
+        assert!(out.contains("changed since it was indexed"), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_symbol_whose_file_is_gone_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def foo():\n    return 1\n");
+
+        let state = indexed_state(root);
+        std::fs::remove_file(root.join("a.py")).unwrap();
+        let out = open_text(&state, "a.foo", None);
+
+        assert!(out.contains("file not found"), "got: {out:?}");
+    }
+
+    #[test]
+    fn open_cuts_a_lone_line_that_exceeds_the_budget_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "min.js", &format!("{}\n", "x".repeat(20_000)));
+
+        let state = indexed_state(root);
+        let out = open_text(&state, "min.js:1-1", Some(100));
+
+        assert!(out.len() < 2_000, "got {} bytes", out.len());
+        assert!(out.contains("cut to fit budget_tokens"), "got: {out:?}");
+    }
+
+    /// Silently showing a truncated body reads as the whole symbol.
+    #[test]
+    fn open_symbol_over_budget_says_how_much_it_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let body: String = (0..300).map(|i| format!("    line_{i:04} = 0\n")).collect();
         write(root, "big.py", &format!("def big():\n{body}"));
 
         let state = indexed_state(root);
 
-        // A budget that only fits the first chunk.
         let out = open_text(&state, "big.big", Some(700));
-        assert!(
-            out.contains("symbol truncated:"),
-            "expected a truncation note when chunks are dropped by budget: {out:?}"
-        );
-        assert!(
-            out.contains("of ") && out.contains("chunks shown"),
-            "got: {out:?}"
-        );
+        assert!(out.contains("range truncated to"), "got: {out:?}");
+        assert!(out.contains("of 301 lines"), "got: {out:?}");
         assert!(out.contains("raise budget_tokens"), "got: {out:?}");
+        assert!(!out.contains("line_0299"), "got: {out:?}");
 
-        // A generous budget fits every chunk — no truncation note.
         let out_full = open_text(&state, "big.big", Some(20_000));
         assert!(
-            !out_full.contains("symbol truncated:"),
-            "no chunks dropped, so no truncation note expected: {out_full:?}"
+            !out_full.contains("range truncated to"),
+            "got: {out_full:?}"
         );
+        assert!(out_full.contains("line_0299"), "got: {out_full:?}");
     }
 
     #[test]
