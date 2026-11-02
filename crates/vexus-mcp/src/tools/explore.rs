@@ -9,8 +9,8 @@
 //!
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
 //!    → entry chunks, trimmed by `RELEVANCE_FLOOR`, after any symbol the
-//!    question names. `entry_limit` and the
-//!    limits below scale with the corpus tier — see `params_for`. A
+//!    question names. `entry_limit` and the limits below scale with the
+//!    corpus tier — see `params_for`. A
 //!    `WeakVectorOnly` outcome (no real keyword hit, nothing under the KNN floor)
 //!    renders under a "weak match" note and skips step 2.
 //! 2. One hop of callees and callers from the first `max_entry_symbols`
@@ -72,10 +72,12 @@ const SYMBOL_REQUEST_WORDS: &[&str] = &[
     "source",
 ];
 
-/// Search hits scoring under this fraction of the best hit are dropped, so a
-/// map ends where relevance does. A hit in one search list scores about half
-/// a hit in both, so a one-list hit survives and one carrying the 0.4 test
-/// penalty, at 0.2, doesn't.
+/// Search hits scoring under this fraction of the best hit are dropped. A hit
+/// in one search list scores about half a hit in both, so a one-list hit
+/// survives and one carrying the 0.4 test penalty, at 0.2, doesn't. RRF scores
+/// can't say where relevance ends, so this only ever removes penalized hits,
+/// and raising it costs answers: at 0.5 the real embedder's `answer_in_bundle`
+/// falls 1.0 -> 0.9655.
 const RELEVANCE_FLOOR: f64 = 0.25;
 
 fn keep_strong<T>(items: Vec<T>, score: impl Fn(&T) -> f64) -> Vec<T> {

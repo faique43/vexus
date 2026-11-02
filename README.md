@@ -68,18 +68,18 @@ Below is the complete, unedited response. Reproduce it by indexing
 ```text
 explore: "how does an invoice get created"
 
-Best match first. These are locations, not source: `open` "path:start-end" for what you need.
+Grouped by file, best first. These are locations, not source: `open` "path:start-end" for what you need.
 
-## services/notification_service.py
-20-28 def notify_invoice_created(invoice, notifier):
-  calls: send  called by: create_invoice
-7-9 def send(self, message):
 ## services/invoice_service.py
 13-25 def create_invoice(customer_id, amount_cents, currency="usd"):
   calls: Invoice, _default_notifier, notify_invoice_created, generate_id  called by: create
 28-30 def get_invoice(invoice_id):
-39-47 def refund_invoice(invoice_id, amount_cents=None):
 50-52 def _default_notifier():
+39-47 def refund_invoice(invoice_id, amount_cents=None):
+## services/notification_service.py
+20-28 def notify_invoice_created(invoice, notifier):
+  calls: send  called by: create_invoice
+7-9 def send(self, message):
 ## handlers/invoices.py
 14-18 def create(self, req):
   calls: get, create_invoice  called by: dispatch_create
@@ -88,6 +88,8 @@ Best match first. These are locations, not source: `open` "path:start-end" for w
 24-26 def list(self, req):
 ## jobs/invoice_reminders.py
 7-17 def send_invoice_reminders(customer_ids):
+## handlers/webhooks.py
+17-22 def _handle_charge_failed(self, req):
 ## models/invoice.py
 7-14 class Invoice:
 ## utils/ids.py
@@ -96,15 +98,11 @@ Best match first. These are locations, not source: `open` "path:start-end" for w
 20-25 def validate_amount(amount_cents):
 ## app.py
 37-46 def dispatch_create(handler, req):
-## config.py
-16-24 def load_config():
-## handlers/reports.py
-10-13 def generate_usage_report(self, req):
-## services/rate_limiter.py
-19-29 def allow(self, key):
 ## services/subscription_service.py
 10-22 def renew_subscription(subscription_id):
 25-31 def cancel_subscription(subscription_id):
+## services/user_service.py
+23-25 def get_user(user_id):
 ```
 
 The model reads the map, decides what matters, and calls `open` on exactly those
