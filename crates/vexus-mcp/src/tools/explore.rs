@@ -167,14 +167,16 @@ fn hit_row(hit: &SearchHit, info: &SymbolInfo) -> Row {
 }
 
 /// A label for a chunk outside any symbol: its first line of code, or failing
-/// that of comment. Such a chunk can open on a `/**`, or on the `})` that ends
-/// the symbol before it, and neither says what's there.
+/// that of comment. Such a chunk can open on a `/**`, a `'use strict'`, or the
+/// `})` that ends the symbol before it, and none says what's there.
 fn preamble_label(content: &str) -> String {
     let readable = |l: &&str| l.chars().any(char::is_alphanumeric);
-    let comment = |l: &&str| ["/*", "*", "//", "#"].iter().any(|m| l.starts_with(m));
+    let boilerplate = |l: &&str| {
+        ["/*", "*", "//", "#"].iter().any(|m| l.starts_with(m)) || l.contains("use strict")
+    };
     let lines = || content.lines().map(str::trim).filter(readable);
     let label = lines()
-        .find(|l| !comment(l))
+        .find(|l| !boilerplate(l))
         .or_else(|| lines().next())
         .or_else(|| content.lines().next());
     truncated(label.unwrap_or(""))
@@ -947,6 +949,10 @@ mod tests {
         assert_eq!(preamble_label("# Only a comment.\n"), "# Only a comment.");
         assert_eq!(preamble_label("/**\n * Only docs.\n */\n"), "* Only docs.");
         assert_eq!(preamble_label("})\n"), "})");
+        assert_eq!(
+            preamble_label("'use strict'\n\nvar debug = require('debug');\n"),
+            "var debug = require('debug');"
+        );
     }
 
     /// Examples call a library's public functions all day, so one hop from
