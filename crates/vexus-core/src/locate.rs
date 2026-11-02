@@ -13,6 +13,7 @@ use anyhow::Result;
 
 use crate::priors::{is_non_core_path, is_non_core_word, is_test_path};
 use crate::search::is_stopword;
+use crate::search::SearchOutcome;
 use crate::Store;
 
 /// Long prompts wander, so only their earliest terms get searched: reports
@@ -22,6 +23,7 @@ const MAX_QUERY_TERMS: usize = 20;
 const MAX_NAMED_MATCHES: usize = 2;
 const SEARCH_CANDIDATES: u32 = 40;
 const MIN_TERM_CHARS: usize = 3;
+const MAX_PROMPT_CHARS: usize = 20_000;
 
 /// The vocabulary of issue templates and of any bug report, which a code search
 /// learns nothing from on top of `is_stopword`'s words. Search can't share this
@@ -110,6 +112,15 @@ pub struct Hint {
     pub named: bool,
 }
 
+/// The start of `prompt`. A pasted log can run to megabytes, and a report says
+/// what's wrong well before that.
+fn opening(prompt: &str) -> &str {
+    match prompt.char_indices().nth(MAX_PROMPT_CHARS) {
+        Some((end, _)) => &prompt[..end],
+        None => prompt,
+    }
+}
+
 fn looks_like_code(word: &str) -> bool {
     if word.chars().count() < MIN_TERM_CHARS {
         return false;
@@ -127,25 +138,22 @@ fn trim_to_word(word: &str) -> &str {
 /// Words in the prompt that look like code rather than prose: anything in
 /// backticks, plus camelCase, snake_case and dotted names outside them.
 pub fn code_terms(prompt: &str) -> Vec<String> {
-    let in_backticks = prompt
+    let ticked: HashSet<&str> = prompt
         .split('`')
         .skip(1)
         .step_by(2)
         .flat_map(|span| span.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.'))
         .map(trim_to_word)
-        .filter(|word| word.chars().count() >= MIN_TERM_CHARS);
-    let spelled_out = prompt
+        .filter(|word| word.chars().count() >= MIN_TERM_CHARS)
+        .collect();
+    let mut seen = HashSet::new();
+    prompt
         .split(|c: char| c.is_whitespace() || "()[]{}<>,;:\"'`=/@#*!?|".contains(c))
         .map(trim_to_word)
-        .filter(|word| looks_like_code(word));
-    let mut seen = HashSet::new();
-    let mut terms: Vec<(usize, String)> = spelled_out
-        .chain(in_backticks)
-        .filter(|word| seen.insert(word.to_string()))
-        .map(|word| (prompt.find(word).unwrap_or(usize::MAX), word.to_string()))
-        .collect();
-    terms.sort_by_key(|(position, _)| *position);
-    terms.into_iter().map(|(_, word)| word).collect()
+        .filter(|word| looks_like_code(word) || ticked.contains(word))
+        .filter(|word| seen.insert(*word))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The prompt reduced to the words worth searching for: no fenced code, noise
@@ -236,12 +244,16 @@ impl Store {
         query_vec: Option<&[f32]>,
         knn_floor: Option<f64>,
     ) -> Result<Vec<Hint>> {
-        let (hits, _) = self.search_hybrid_scored(
+        let (hits, outcome) = self.search_hybrid_scored(
             &focus_query(prompt),
             query_vec,
             knn_floor,
             SEARCH_CANDIDATES,
         )?;
+        // Nearest neighbours of something the repo doesn't have aren't hints.
+        if outcome == SearchOutcome::WeakVectorOnly {
+            return Ok(Vec::new());
+        }
         Ok(hits
             .into_iter()
             .filter_map(|hit| {
@@ -262,6 +274,17 @@ impl Store {
             .collect())
     }
 
+    /// Whether `prompt` names a symbol in the project's own code. Cheap: no
+    /// embedding and no search.
+    pub fn names_code(&self, prompt: &str) -> Result<bool> {
+        for term in code_terms(opening(prompt)) {
+            if !self.named_hints(&term)?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The best locations for `prompt`, symbols it names first. `query_vec`
     /// and `knn_floor` are as for `search_hybrid_scored`.
     pub fn locate(
@@ -271,6 +294,7 @@ impl Store {
         knn_floor: Option<f64>,
         limit: usize,
     ) -> Result<Vec<Hint>> {
+        let prompt = opening(prompt);
         let mut hints = Vec::new();
         for term in code_terms(prompt) {
             hints.extend(self.named_hints(&term)?);
@@ -436,6 +460,21 @@ mod tests {
         ]);
         let hints = store.locate("frobnicate", None, None, 5).unwrap();
         assert_eq!(hints[0].path, "src/b.py", "{hints:?}");
+    }
+
+    #[test]
+    fn a_prompt_past_the_cap_is_cut_to_its_opening() {
+        let (_d, store) = store_with(&[("a.py", "a.parse_thing", "alpha")]);
+        let prompt = format!("{} parse_thing", "word ".repeat(MAX_PROMPT_CHARS / 4));
+        let hints = store.locate(&prompt, None, None, 5).unwrap();
+        assert!(hints.iter().all(|h| !h.named), "{hints:?}");
+    }
+
+    #[test]
+    fn names_code_finds_a_named_symbol_without_searching() {
+        let (_d, store) = store_with(&[("a.py", "a.parse_thing", "alpha")]);
+        assert!(store.names_code("look at parse_thing").unwrap());
+        assert!(!store.names_code("look at the alpha code").unwrap());
     }
 
     #[test]

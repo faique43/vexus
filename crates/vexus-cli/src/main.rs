@@ -187,14 +187,18 @@ fn register_mcp_server(root: &Path, force: bool) -> Result<()> {
 }
 
 /// A vector for `text` and the distance floor to use with it, both `None` when
-/// the selected embedder isn't the one this index was built with: its vector
-/// wouldn't fit `vec_chunks`, which sqlite-vec rejects as a hard error.
+/// the embedder from `build` isn't the one this index was built with: its
+/// vector wouldn't fit `vec_chunks`, which sqlite-vec rejects as a hard error.
 ///
 /// Reads the indexed model from `meta` BEFORE building an embedder, because
 /// the default path loads a full ONNX session, which is wasted work when
 /// `meta.model_id` already says it can't match. `VEXUS_EMBEDDER=mock`/`none`
 /// stay cheap either way.
-fn embed_for_query(store: &vexus_core::Store, text: &str) -> (Option<Vec<f32>>, Option<f64>) {
+fn embed_for_query(
+    store: &vexus_core::Store,
+    text: &str,
+    build: impl FnOnce() -> Option<Box<dyn vexus_embed::Embedder>>,
+) -> (Option<Vec<f32>>, Option<f64>) {
     let indexed_id = store.meta("model_id").ok().flatten();
     let indexed_dim = store.meta("model_dim").ok().flatten();
     let worth_building = match std::env::var("VEXUS_EMBEDDER").ok().as_deref() {
@@ -204,7 +208,7 @@ fn embed_for_query(store: &vexus_core::Store, text: &str) -> (Option<Vec<f32>>, 
     if !worth_building {
         return (None, None);
     }
-    let Some(embedder) = vexus_embed::select::make_embedder() else {
+    let Some(embedder) = build() else {
         return (None, None);
     };
     let same_model = indexed_id.as_deref() == Some(embedder.id())
@@ -226,20 +230,22 @@ const EMBEDDED_PROMPT_CHARS: usize = 1200;
 const LOCATED_HINTS: usize = 8;
 
 /// `vexus hook prompt`: locations for a prompt, as Claude Code hook output.
+/// Everything that can rule a prompt out comes before the model loads, which
+/// costs 0.3 s and 380 MB.
 fn prompt_hook(payload: &str) -> Option<String> {
     let (prompt, cwd) = hooks::parse_prompt_payload(payload)?;
-    let root = PathBuf::from(cwd);
-    if !db_path(&root).exists() {
-        return None;
-    }
+    let root = hooks::find_root(Path::new(&cwd))?;
     hooks::refresh_index(&root);
     let store = vexus_core::Store::open_read_only(&db_path(&root)).ok()?;
+    if !hooks::worth_locating(&prompt, store.names_code(&prompt).ok()?) {
+        return None;
+    }
     let opening: String = prompt.chars().take(EMBEDDED_PROMPT_CHARS).collect();
-    let (vector, floor) = embed_for_query(&store, &opening);
+    let (vector, floor) = embed_for_query(&store, &opening, vexus_embed::select::cached_embedder);
     let located = store
         .locate(&prompt, vector.as_deref(), floor, LOCATED_HINTS)
         .ok()?;
-    let context = hooks::prompt_context(&root, &store, &prompt, &located)?;
+    let context = hooks::prompt_context(&root, &store, &located)?;
     Some(hooks::context_json("UserPromptSubmit", &context))
 }
 
@@ -260,9 +266,13 @@ fn run_hook(name: &str) -> Result<()> {
 fn init_steering_packs(agent: &str, root: &Path, force: bool, mcp: bool) -> Result<()> {
     match agent {
         "claude-code" => {
-            hooks::install(root)?;
+            hooks::install(root, force)?;
             if mcp {
                 register_mcp_server(root, force)?;
+            }
+            if !db_path(root).exists() {
+                hooks::index_in_background(root);
+                println!("\nIndexing in the background. Hints start when it finishes.");
             }
             println!(
                 "\nStart Claude Code from {}. The hooks point it at relevant code on each \
@@ -311,8 +321,8 @@ fn main() -> Result<()> {
                 Some(lock) => lock,
                 None => {
                     eprintln!(
-                        "error: a vexus serve owns this index — indexing skipped \
-                         (stop it or let its watcher handle changes)"
+                        "error: another vexus process owns this index — indexing skipped \
+                         (a running serve or index; let it finish or stop it)"
                     );
                     std::process::exit(1);
                 }
@@ -417,7 +427,8 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let store = vexus_core::Store::open(&db_path(&root))?;
-            let (query_vec, knn_floor) = embed_for_query(&store, &query);
+            let (query_vec, knn_floor) =
+                embed_for_query(&store, &query, vexus_embed::select::make_embedder);
             let (hits, outcome) =
                 store.search_hybrid_scored(&query, query_vec.as_deref(), knn_floor, limit)?;
             if outcome == vexus_core::search::SearchOutcome::WeakVectorOnly {

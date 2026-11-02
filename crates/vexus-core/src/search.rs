@@ -82,11 +82,12 @@ fn sanitize_fts(query: &str) -> Option<String> {
 /// `user` and `users`, or `register` and `registration`, not `process` and
 /// `product`.
 fn same_root(a: &str, b: &str) -> bool {
+    let shorter = a.chars().count().min(b.chars().count());
+    if shorter < MIN_ROOT_CHARS {
+        return a == b;
+    }
     let shared = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-    shared
-        >= MIN_SHARED_ROOT
-            .min(a.chars().count())
-            .min(b.chars().count())
+    shared >= MIN_SHARED_ROOT.min(shorter)
 }
 
 /// Whether `text` holds at least half of `terms`. A keyword hit needs that to
@@ -147,6 +148,8 @@ pub(crate) fn identifier_parts(text: &str) -> String {
 
 /// Leading characters two words must share to count as one root.
 const MIN_SHARED_ROOT: usize = 5;
+/// Below this a word is too short to be anyone's root: `a` isn't `autoscaling`.
+const MIN_ROOT_CHARS: usize = 4;
 const RRF_K: f64 = 60.0;
 const CANDIDATES: u32 = 50;
 
@@ -857,6 +860,11 @@ mod tests {
             "export function registerUser(req)",
             &["user", "registration"]
         ));
+    }
+
+    #[test]
+    fn a_short_word_is_not_a_root_of_a_longer_one() {
+        assert!(!covers_terms("def f(a, b)", &["autoscaling"]));
     }
 
     #[test]

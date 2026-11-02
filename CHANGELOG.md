@@ -27,6 +27,34 @@ delete `.claude/skills/vexus`, which never ran.
   nor its nudge hook fired once in 28 sessions. Hooks now go in
   `.claude/settings.json`, and the pack is gone.
 
+- **Finding fields, enum variants and interface members.** Their lines reached
+  neither search nor vectors, so a query for one found nothing. Recall@5 on those
+  queries went from 0 to 0.95. The index schema moves to 5, so upgrading
+  re-indexes once.
+- **`open` returns what's in the file.** For a class or interface it claimed the
+  whole range and returned one line.
+- **A question naming a symbol still gets a map,** unless it's only that symbol.
+- **Call links no longer lose real callees to builtins or real callers to
+  tests,** and a guessed caller no longer shows as a real one in `explore`.
+- **Sample and example directories rank below the code they copy.** `ParseIntPipe`
+  in NestJS came 8th and now comes 1st.
+- **Weak matches are labelled honestly** when a question's words only touch the
+  repo, and on-topic questions aren't labelled weak on keyword-only builds.
+- **Search understands stems and identifier parts:** `send file` finds `sendFile`.
+- **Rust methods know their type,** so `Store.open` resolves, and doc comments
+  stay attached across a blank line.
+- **`install.sh` and `install.ps1` no longer use the GitHub API,** which failed
+  after 60 anonymous calls an hour from one address.
+- **Model downloads can't collide.** Each process writes its own temporary file,
+  and one failing no longer deletes another's finished model.
+
+### Eval
+
+- The CI gate now runs keyword-only. Mock vectors took full weight in ranking, so
+  it had been measuring noise.
+- Added field and member queries, a medium-tier corpus, graded map order, a
+  real-prompt report, and the change-request eval in `eval/agent/change/`.
+
 ### Docs
 
 - Replaced the 29% and 17% savings claims. They came from read-only questions

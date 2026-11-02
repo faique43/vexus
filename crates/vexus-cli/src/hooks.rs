@@ -5,7 +5,7 @@
 //! choose. A hook runs on every prompt whether or not it can help, so nothing
 //! here may break a session: anything unexpected ends in silence and exit 0.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
@@ -23,11 +23,20 @@ const MIN_PROMPT_CHARS: usize = 15;
 /// those cost more than they saved and lowered the pass rate, even exact ones.
 const DETAILED_PROMPT_CHARS: usize = 800;
 
-/// Whether `hints` would help with `prompt`.
-pub fn worth_showing(prompt: &str, hints: &[Hint]) -> bool {
+/// Whether `prompt` could use hints at all, given whether it names code. This
+/// is what's knowable before paying to load the model.
+pub fn worth_locating(prompt: &str, names_code: bool) -> bool {
     let chars = prompt.chars().count();
-    let already_detailed = chars > DETAILED_PROMPT_CHARS && hints.iter().any(|h| h.named);
-    chars >= MIN_PROMPT_CHARS && !hints.is_empty() && !already_detailed
+    chars >= MIN_PROMPT_CHARS && !(names_code && chars > DETAILED_PROMPT_CHARS)
+}
+
+/// The nearest directory at or above `start` holding an index. An agent's
+/// working directory can be anywhere in the repo.
+pub fn find_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".vexus/index.db").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// `path:start-end Parent.name`, or without the range when `span` is unknown.
@@ -73,10 +82,7 @@ fn current_span(root: &Path, store: &Store, hint: &Hint) -> Option<Option<(u32, 
 }
 
 /// The context to add for `prompt`, if any.
-pub fn prompt_context(root: &Path, store: &Store, prompt: &str, hints: &[Hint]) -> Option<String> {
-    if !worth_showing(prompt, hints) {
-        return None;
-    }
+pub fn prompt_context(root: &Path, store: &Store, hints: &[Hint]) -> Option<String> {
     let lines: Vec<String> = hints
         .iter()
         .filter_map(|h| Some(hint_line(h, current_span(root, store, h)?)))
@@ -111,22 +117,55 @@ const BINARY_NAME: &str = "vexus";
 /// The event's default is 30 seconds. A hook that slow has already failed.
 const PROMPT_HOOK_TIMEOUT_SECS: u64 = 20;
 
-/// What the hook should run. A bare `vexus` that isn't on PATH would fail on
-/// every prompt, so the running binary's full path stands in for it.
+fn shell_quoted(path: &Path) -> String {
+    let path = path.display().to_string();
+    #[cfg(not(windows))]
+    let path = path
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    format!("\"{path}\"")
+}
+
+fn version_of(binary: &Path) -> Option<String> {
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    text.lines().next().map(str::to_string)
+}
+
+/// What the hook should run. The bare command only when `vexus` on PATH is
+/// this same build: missing, it would fail on every prompt, and an older one
+/// exits 0 without a word, so the hook would seem installed and do nothing.
 fn hook_command(path_var: Option<&std::ffi::OsStr>, exe: &Path) -> String {
-    let on_path = path_var.is_some_and(|paths| {
-        std::env::split_paths(paths).any(|dir| dir.join(BINARY_NAME).is_file())
+    let on_path = path_var.and_then(|paths| {
+        std::env::split_paths(paths)
+            .map(|dir| dir.join(BINARY_NAME))
+            .find(|candidate| candidate.is_file())
     });
-    if on_path {
+    let same_build = on_path.is_some_and(|found| {
+        found.canonicalize().ok() == exe.canonicalize().ok()
+            || version_of(&found) == Some(format!("vexus {}", env!("CARGO_PKG_VERSION")))
+    });
+    if same_build {
         PROMPT_HOOK_COMMAND.to_string()
     } else {
-        format!("\"{}\" {PROMPT_HOOK_ARGS}", exe.display())
+        format!("{} {PROMPT_HOOK_ARGS}", shell_quoted(exe))
     }
 }
 
 /// `existing` settings with the prompt hook added, or `None` when it's already
-/// there. An error means the file can't be safely rewritten.
-pub fn merge_settings(existing: Option<&str>, command: &str) -> anyhow::Result<Option<String>> {
+/// there. `force` replaces an installed one, which is how a hook pointing at a
+/// moved binary gets repaired. An error means the file can't be safely
+/// rewritten.
+pub fn merge_settings(
+    existing: Option<&str>,
+    command: &str,
+    force: bool,
+) -> anyhow::Result<Option<String>> {
     let mut root = match existing {
         None => serde_json::Map::new(),
         Some(text) => match serde_json::from_str::<Value>(text)? {
@@ -143,7 +182,10 @@ pub fn merge_settings(existing: Option<&str>, command: &str) -> anyhow::Result<O
         anyhow::bail!(r#""hooks.UserPromptSubmit" is not a JSON array"#);
     };
     if entries.iter().any(runs_prompt_hook) {
-        return Ok(None);
+        if !force {
+            return Ok(None);
+        }
+        entries.retain(|entry| !runs_prompt_hook(entry));
     }
     entries.push(json!({"hooks": [{
         "type": "command",
@@ -170,7 +212,7 @@ fn runs_prompt_hook(entry: &Value) -> bool {
 /// Adds the hooks to `<root>/.claude/settings.json`, where Claude Code loads
 /// them from. A file it can't safely rewrite is left alone, and the snippet is
 /// printed to add by hand.
-pub fn install(root: &Path) -> anyhow::Result<()> {
+pub fn install(root: &Path, force: bool) -> anyhow::Result<()> {
     let path = root.join(".claude/settings.json");
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
@@ -182,12 +224,12 @@ pub fn install(root: &Path) -> anyhow::Result<()> {
     let command = hook_command(path_var.as_deref(), &exe);
     if command != PROMPT_HOOK_COMMAND {
         eprintln!(
-            "vexus: not on PATH, so the hook uses {}. Anyone else sharing this settings file \
-             needs the same path.",
+            "vexus: this build isn't first on PATH, so the hook uses {}. Anyone else sharing \
+             this settings file needs the same path.",
             exe.display()
         );
     }
-    match merge_settings(existing.as_deref(), &command) {
+    match merge_settings(existing.as_deref(), &command, force) {
         Ok(Some(text)) => {
             std::fs::create_dir_all(root.join(".claude"))?;
             std::fs::write(&path, text)?;
@@ -199,7 +241,10 @@ pub fn install(root: &Path) -> anyhow::Result<()> {
                 "vexus: could not update {} ({e:#}) — add this yourself:",
                 path.display()
             );
-            println!("{}", merge_settings(None, &command)?.unwrap_or_default());
+            println!(
+                "{}",
+                merge_settings(None, &command, false)?.unwrap_or_default()
+            );
         }
     }
     Ok(())
@@ -220,8 +265,18 @@ fn refresh_due(marker: &Path, now: SystemTime) -> bool {
 /// there's no watcher, and a hook can't make the prompt wait for this: hints
 /// use the index as it stands, and `current_span` covers what's changed.
 pub fn refresh_index(root: &Path) {
-    let marker = root.join(".vexus/refreshed");
-    if !refresh_due(&marker, SystemTime::now()) || std::fs::write(&marker, b"").is_err() {
+    if refresh_due(&root.join(".vexus/refreshed"), SystemTime::now()) {
+        index_in_background(root);
+    }
+}
+
+/// Starts `vexus index` and leaves it running. A second one exits at once, on
+/// the writer lock.
+pub fn index_in_background(root: &Path) {
+    let vexus_dir = root.join(".vexus");
+    if std::fs::create_dir_all(&vexus_dir).is_err()
+        || std::fs::write(vexus_dir.join("refreshed"), b"").is_err()
+    {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -274,32 +329,39 @@ mod tests {
 
     #[test]
     fn replies_get_no_hints() {
-        assert!(!worth_showing("yes do it", &[hint("a.py", false)]));
-    }
-
-    #[test]
-    fn no_hints_means_nothing_to_show() {
-        assert!(!worth_showing("the cache misses on every read", &[]));
+        assert!(!worth_locating("yes do it", false));
     }
 
     #[test]
     fn a_short_request_gets_hints_even_when_it_names_code() {
-        assert!(worth_showing(
-            "add a date option to ConsoleLogger",
-            &[hint("a.py", true)]
-        ));
+        assert!(worth_locating("add a date option to ConsoleLogger", true));
     }
 
     #[test]
     fn a_long_vague_report_gets_hints() {
         let report = "the app hangs when the broker restarts ".repeat(30);
-        assert!(worth_showing(&report, &[hint("a.py", false)]));
+        assert!(worth_locating(&report, false));
     }
 
     #[test]
     fn a_long_report_that_names_code_gets_none() {
         let report = "ClientNats hangs when the broker restarts ".repeat(30);
-        assert!(!worth_showing(&report, &[hint("a.py", true)]));
+        assert!(!worth_locating(&report, true));
+    }
+
+    #[test]
+    fn the_root_is_found_from_below() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".vexus")).unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join(".vexus/index.db"), b"").unwrap();
+        assert_eq!(find_root(&dir.path().join("a/b")), Some(dir.path().into()));
+    }
+
+    #[test]
+    fn no_index_anywhere_means_no_root() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_root(dir.path()), None);
     }
 
     #[test]
@@ -359,13 +421,7 @@ mod tests {
     #[test]
     fn context_lists_hints_under_the_header() {
         let (dir, store) = indexed_repo("a.py", "x = 1\n");
-        let text = prompt_context(
-            dir.path(),
-            &store,
-            "why does this crash on startup",
-            &[hint("a.py", false)],
-        )
-        .unwrap();
+        let text = prompt_context(dir.path(), &store, &[hint("a.py", false)]).unwrap();
         assert_eq!(text, format!("{HINT_HEADER}\na.py:10-40 Router.handle"));
     }
 
@@ -373,13 +429,7 @@ mod tests {
     fn context_follows_a_symbol_through_an_edit() {
         let (dir, store) = indexed_repo("a.py", "x = 1\n");
         std::fs::write(dir.path().join("a.py"), file_with_sig_at(13)).unwrap();
-        let text = prompt_context(
-            dir.path(),
-            &store,
-            "why does this crash on startup",
-            &[hint("a.py", false)],
-        )
-        .unwrap();
+        let text = prompt_context(dir.path(), &store, &[hint("a.py", false)]).unwrap();
         assert!(text.ends_with("\na.py:13-43 Router.handle"), "{text}");
     }
 
@@ -387,13 +437,7 @@ mod tests {
     fn context_drops_the_range_when_the_symbol_cant_be_found() {
         let (dir, store) = indexed_repo("a.py", "x = 1\n");
         std::fs::write(dir.path().join("a.py"), "x = 2\n").unwrap();
-        let text = prompt_context(
-            dir.path(),
-            &store,
-            "why does this crash on startup",
-            &[hint("a.py", false)],
-        )
-        .unwrap();
+        let text = prompt_context(dir.path(), &store, &[hint("a.py", false)]).unwrap();
         assert!(text.ends_with("\na.py Router.handle"), "{text}");
     }
 
@@ -401,12 +445,7 @@ mod tests {
     fn context_skips_a_deleted_file() {
         let (dir, store) = indexed_repo("a.py", "x = 1\n");
         std::fs::remove_file(dir.path().join("a.py")).unwrap();
-        let text = prompt_context(
-            dir.path(),
-            &store,
-            "why does this crash on startup",
-            &[hint("a.py", false)],
-        );
+        let text = prompt_context(dir.path(), &store, &[hint("a.py", false)]);
         assert_eq!(text, None);
     }
 
@@ -414,8 +453,7 @@ mod tests {
     fn context_shows_at_most_four() {
         let (dir, store) = indexed_repo("a.py", "x = 1\n");
         let hints = vec![hint("a.py", false); 9];
-        let text =
-            prompt_context(dir.path(), &store, "why does this crash on startup", &hints).unwrap();
+        let text = prompt_context(dir.path(), &store, &hints).unwrap();
         assert_eq!(text.lines().count(), 5);
     }
 
@@ -443,7 +481,7 @@ mod tests {
 
     #[test]
     fn settings_are_created_when_there_are_none() {
-        let text = merge_settings(None, COMMAND).unwrap().unwrap();
+        let text = merge_settings(None, COMMAND, false).unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
@@ -453,34 +491,49 @@ mod tests {
 
     #[test]
     fn settings_already_holding_the_hook_need_no_write() {
-        let once = merge_settings(None, COMMAND).unwrap().unwrap();
-        assert_eq!(merge_settings(Some(&once), COMMAND).unwrap(), None);
+        let once = merge_settings(None, COMMAND, false).unwrap().unwrap();
+        assert_eq!(merge_settings(Some(&once), COMMAND, false).unwrap(), None);
     }
 
     #[test]
     fn a_hook_installed_by_path_counts_as_installed() {
-        let once = merge_settings(None, "\"/opt/my tools/vexus\" hook prompt")
+        let once = merge_settings(None, "\"/opt/my tools/vexus\" hook prompt", false)
             .unwrap()
             .unwrap();
-        assert_eq!(merge_settings(Some(&once), COMMAND).unwrap(), None);
+        assert_eq!(merge_settings(Some(&once), COMMAND, false).unwrap(), None);
     }
 
     #[test]
     fn settings_that_are_not_an_object_are_refused() {
-        assert!(merge_settings(Some("[]"), COMMAND).is_err());
-        assert!(merge_settings(Some(r#"{"hooks": []}"#), COMMAND).is_err());
-        assert!(merge_settings(Some(r#"{"hooks": {"UserPromptSubmit": 1}}"#), COMMAND).is_err());
+        assert!(merge_settings(Some("[]"), COMMAND, false).is_err());
+        assert!(merge_settings(Some(r#"{"hooks": []}"#), COMMAND, false).is_err());
+        assert!(merge_settings(
+            Some(r#"{"hooks": {"UserPromptSubmit": 1}}"#),
+            COMMAND,
+            false
+        )
+        .is_err());
     }
 
     #[test]
-    fn the_command_is_plain_when_vexus_is_on_path() {
+    fn force_repairs_a_hook_pointing_at_a_moved_binary() {
+        let old = merge_settings(None, "\"/gone/vexus\" hook prompt", false)
+            .unwrap()
+            .unwrap();
+        let text = merge_settings(Some(&old), COMMAND, true).unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entries = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["hooks"][0]["command"], COMMAND);
+    }
+
+    #[test]
+    fn the_command_is_plain_when_this_build_is_on_path() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(BINARY_NAME), b"").unwrap();
+        let exe = dir.path().join(BINARY_NAME);
+        std::fs::write(&exe, b"").unwrap();
         let path = std::env::join_paths([dir.path()]).unwrap();
-        assert_eq!(
-            hook_command(Some(&path), Path::new("/opt/x/vexus")),
-            "vexus hook prompt"
-        );
+        assert_eq!(hook_command(Some(&path), &exe), "vexus hook prompt");
     }
 
     #[test]
@@ -490,6 +543,23 @@ mod tests {
         assert_eq!(
             hook_command(Some(&path), Path::new("/opt/my tools/vexus")),
             "\"/opt/my tools/vexus\" hook prompt"
+        );
+    }
+
+    #[test]
+    fn the_command_uses_the_full_path_when_path_has_another_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(BINARY_NAME), b"").unwrap();
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert!(hook_command(Some(&path), Path::new("/opt/x/vexus")).contains("/opt/x/vexus"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_path_the_shell_would_expand_is_escaped() {
+        assert_eq!(
+            shell_quoted(Path::new("/opt/$HOME/vexus")),
+            "\"/opt/\\$HOME/vexus\""
         );
     }
 

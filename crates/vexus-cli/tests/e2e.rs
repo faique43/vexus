@@ -137,7 +137,7 @@ fn index_refuses_when_a_writer_lock_is_already_held() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains(
-            "a vexus serve owns this index — indexing skipped",
+            "another vexus process owns this index — indexing skipped",
         ));
 
     // Nothing was written — the refusal happened before any index.db work.
@@ -251,6 +251,7 @@ fn init_claude_code(root: &std::path::Path, extra: &[&str]) -> assert_cmd::asser
     Command::cargo_bin("vexus")
         .unwrap()
         .env("PATH", bin.parent().unwrap())
+        .env("VEXUS_EMBEDDER", "mock")
         .args(["init", "--agent", "claude-code"])
         .args(extra)
         .arg(root.to_str().unwrap())
@@ -284,6 +285,7 @@ fn init_claude_code_uses_the_full_path_when_vexus_is_not_on_path() {
     Command::cargo_bin("vexus")
         .unwrap()
         .env("PATH", root)
+        .env("VEXUS_EMBEDDER", "mock")
         .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
         .assert()
         .success();
@@ -294,6 +296,23 @@ fn init_claude_code_uses_the_full_path_when_vexus_is_not_on_path() {
         .unwrap();
     let bin = assert_cmd::cargo::cargo_bin("vexus");
     assert_eq!(command, format!("\"{}\" hook prompt", bin.display()));
+}
+
+#[test]
+fn init_claude_code_builds_a_missing_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app.py", "def f():\n    return 1\n");
+
+    init_claude_code(root, &[]).success();
+
+    for _ in 0..100 {
+        if root.join(".vexus/index.db").exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("hints would never start");
 }
 
 #[test]
@@ -403,6 +422,98 @@ fn prompt_hook_points_at_the_code_a_prompt_is_about() {
         .as_str()
         .unwrap();
     assert!(context.contains("app.py:1-2 compute_backoff"), "{context}");
+}
+
+/// A repo indexed keyword-only, with its background refresh already done.
+fn keyword_repo(root: &std::path::Path) {
+    write(
+        root,
+        "app.py",
+        "def compute_backoff(delay):\n    # plan the next retry\n    return delay * 2\n",
+    );
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["index", root.to_str().unwrap()])
+        .assert()
+        .success();
+    write(root, ".vexus/refreshed", "");
+}
+
+#[test]
+fn prompt_hook_never_downloads_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    keyword_repo(&root);
+    let payload = serde_json::json!({
+        "prompt": "retries wait too long in compute_backoff",
+        "cwd": root.to_str().unwrap(),
+    });
+
+    let output = Command::cargo_bin("vexus")
+        .unwrap()
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("VEXUS_MODEL_URL", "file:///nowhere/")
+        .env_remove("VEXUS_EMBEDDER")
+        .args(["hook", "prompt"])
+        .write_stdin(payload.to_string())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        !home.join(".vexus/models").exists(),
+        "a prompt must not start a 160 MB download"
+    );
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("compute_backoff"), "{text}");
+}
+
+#[test]
+fn prompt_hook_works_from_a_subdirectory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    keyword_repo(root);
+    write(root, "sub/dir/notes.txt", "x");
+    let payload = serde_json::json!({
+        "prompt": "retries wait too long in compute_backoff",
+        "cwd": root.join("sub/dir").to_str().unwrap(),
+    });
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["hook", "prompt"])
+        .write_stdin(payload.to_string())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("app.py:1-3 compute_backoff"));
+}
+
+#[test]
+fn prompt_hook_says_nothing_about_an_unrelated_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    keyword_repo(root);
+    let payload = serde_json::json!({
+        "prompt": "plan a three day hiking itinerary around Kyoto",
+        "cwd": root.to_str().unwrap(),
+    });
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["hook", "prompt"])
+        .write_stdin(payload.to_string())
+        .assert()
+        .success()
+        .stdout("");
 }
 
 #[test]
