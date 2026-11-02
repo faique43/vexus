@@ -12,6 +12,7 @@
 
 mod corpus;
 mod metrics;
+mod padding;
 mod perf;
 mod queries;
 mod tokenbench;
@@ -135,7 +136,7 @@ fn scoring_embedder(real: bool) -> Result<Option<Arc<dyn Embedder>>> {
 /// so the determinism test below can call this twice and diff the result
 /// without ever touching `eval/last-run.json`.
 fn compute_report(
-    embedder: Option<Arc<dyn Embedder>>,
+    embedder: Option<&Arc<dyn Embedder>>,
     root: &Path,
     names: &[String],
 ) -> Result<Report> {
@@ -149,7 +150,7 @@ fn compute_report(
     let mut per_corpus_accum: BTreeMap<String, corpus::CorpusAccum> = BTreeMap::new();
     for name in names {
         eprintln!("vexus-eval: indexing + scoring corpus {name}...");
-        let accum = corpus::eval_corpus(root, name, embedder.as_ref())?;
+        let accum = corpus::eval_corpus(root, name, embedder)?;
         per_corpus_accum.insert(name.clone(), accum);
     }
 
@@ -168,6 +169,24 @@ fn compute_report(
         per_corpus,
         overall: overall_accum.metrics(),
     })
+}
+
+/// [`compute_report`] plus the Medium-tier scope, which is what a command
+/// reports. It's kept apart because it re-indexes a padded corpus, and it stays
+/// out of "overall", which already counts these queries once.
+fn full_report(
+    embedder: Option<&Arc<dyn Embedder>>,
+    root: &Path,
+    names: &[String],
+) -> Result<Report> {
+    let mut report = compute_report(embedder, root, names)?;
+    if names.iter().any(|name| name == corpus::MEDIUM_CORPUS) {
+        let scope = format!("{}@medium", corpus::MEDIUM_CORPUS);
+        eprintln!("vexus-eval: indexing + scoring {scope}...");
+        let accum = corpus::eval_corpus_at_medium(root, corpus::MEDIUM_CORPUS, embedder)?;
+        report.per_corpus.insert(scope, accum.metrics());
+    }
+    Ok(report)
 }
 
 fn print_table(report: &Report) {
@@ -202,7 +221,7 @@ fn run(real: bool, only_corpus: Option<String>) -> Result<()> {
         None => corpus::discover_corpora(&root)?,
     };
 
-    let report = compute_report(embedder, &root, &names)?;
+    let report = full_report(embedder.as_ref(), &root, &names)?;
     print_table(&report);
 
     let out_path = root.join("last-run.json");
@@ -316,6 +335,19 @@ fn diff_reports(baseline: &Report, current: &Report) -> (Vec<MetricDelta>, Vec<M
     (regressions, improvements)
 }
 
+/// Scopes in `current` that `diff_reports` has nothing to compare against.
+fn scopes_without_baseline<'a>(
+    baseline: &Report,
+    current: &'a Report,
+) -> Vec<(&'a str, &'a metrics::MetricSet)> {
+    current
+        .per_corpus
+        .iter()
+        .filter(|(name, _)| !baseline.per_corpus.contains_key(*name))
+        .map(|(name, set)| (name.as_str(), set))
+        .collect()
+}
+
 /// `eval/baseline-mock.json`, or `eval/baseline-real.json` when `real`.
 fn baseline_path(eval_root: &Path, real: bool) -> PathBuf {
     eval_root.join(if real {
@@ -362,13 +394,22 @@ fn check(real: bool) -> Result<()> {
     let root = eval_root()?;
     let embedder = scoring_embedder(real)?;
     let names = corpus::discover_corpora(&root)?;
-    let current = compute_report(embedder, &root, &names)?;
+    let current = full_report(embedder.as_ref(), &root, &names)?;
 
     let baseline_file = baseline_path(&root, real);
     let baseline = load_baseline(&baseline_file, real)?;
     ensure_same_mode(&baseline, &current)?;
 
     let (regressions, improvements) = diff_reports(&baseline, &current);
+
+    let ungated = scopes_without_baseline(&baseline, &current);
+    if !ungated.is_empty() {
+        println!("scored but not gated, no baseline yet:");
+        for (scope, set) in ungated {
+            print_metric_set(scope, set);
+        }
+        println!();
+    }
 
     if !improvements.is_empty() {
         println!("improvements:");
@@ -413,7 +454,7 @@ fn bless(real: bool) -> Result<()> {
     let root = eval_root()?;
     let embedder = scoring_embedder(real)?;
     let names = corpus::discover_corpora(&root)?;
-    let report = compute_report(embedder, &root, &names)?;
+    let report = full_report(embedder.as_ref(), &root, &names)?;
     print_table(&report);
 
     let path = baseline_path(&root, real);
@@ -656,6 +697,21 @@ mod tests {
         let (regressions, improvements) = diff_reports(&baseline, &current);
         assert!(regressions.is_empty(), "{regressions:?}");
         assert!(improvements.is_empty(), "{improvements:?}");
+    }
+
+    #[test]
+    fn a_scope_missing_from_the_baseline_is_named_as_ungated() {
+        let baseline = report_with(&[("pyapp", metric_set(0.5))], metric_set(0.5));
+        let current = report_with(
+            &[
+                ("pyapp", metric_set(0.5)),
+                ("polyglot@medium", metric_set(0.4)),
+            ],
+            metric_set(0.5),
+        );
+        let ungated = scopes_without_baseline(&baseline, &current);
+        assert_eq!(ungated.len(), 1);
+        assert_eq!(ungated[0].0, "polyglot@medium");
     }
 
     #[test]

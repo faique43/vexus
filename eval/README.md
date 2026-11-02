@@ -100,6 +100,20 @@ Improvements are printed too, but never fail the gate. A missing baseline
 file fails with a message telling you to run `bless` first (and to commit
 the result) rather than a generic file-not-found error.
 
+### The Medium tier: `polyglot@medium`
+
+The fixtures are Tiny, so on their own they never reach the 2000-chunk boundary
+real repositories cross, and `explore`'s Medium parameters would go unscored.
+`polyglot@medium` runs polyglot's labelled queries and edges again with 420
+generated filler files around them (`crates/vexus-eval/src/padding.rs`). The
+filler reuses the fixtures' domain words, because a haystack nothing matches
+would only change the tier. It's built in a tempdir, adds a second or two to a
+release run, and fails loudly if it ever lands in another tier.
+
+It's reported as its own scope and stays out of "overall", which already counts
+these queries once. Neither baseline records it yet, so `check` prints it as
+scored but not gated until the next deliberate `bless`.
+
 ### Pre-release: `--real --check`
 
 The keyword-only gate never touches a downloaded model and never runs against

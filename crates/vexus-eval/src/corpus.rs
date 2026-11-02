@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{ensure, Context, Result};
+use vexus_core::model::CorpusTier;
 use vexus_core::query::Resolution;
 use vexus_core::Store;
 use vexus_embed::Embedder;
@@ -28,7 +29,7 @@ use vexus_mcp::state::AppState;
 use vexus_mcp::tools::explore::explore_text;
 
 use crate::metrics::{self, Accum, EdgeCounts, LabeledEdge};
-use crate::queries;
+use crate::{padding, queries};
 
 /// Raw `SearchHit`s are fetched well past the largest cutoff (`@10`) so that
 /// filtering out `qualname: None` preamble/module-level chunks (the binding
@@ -133,7 +134,72 @@ pub fn eval_corpus(
     // same hazard) — so it stays bound as `_db_dir` for this whole function,
     // not dropped the moment `index_into_temp_state` returns.
     let (state, _db_dir) = index_into_temp_state(&corpus_root, embedder)?;
+    score_corpus(eval_root, name, &state, embedder)
+}
 
+/// The corpus `eval_corpus_at_medium` runs against: the fixture with the most
+/// labelled queries. One is enough to reach the tier's code paths, and each
+/// one padded costs a re-index on every gate run.
+pub const MEDIUM_CORPUS: &str = "polyglot";
+
+/// `name` padded past the Medium boundary, indexed. Returns the repository's
+/// tempdir too, since the state's `root` points into it.
+fn medium_state(
+    eval_root: &Path,
+    name: &str,
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<(AppState, tempfile::TempDir, tempfile::TempDir)> {
+    let repo = tempfile::tempdir().context("tempdir for the padded corpus")?;
+    copy_tree(&eval_root.join("corpora").join(name), repo.path())?;
+    padding::write_padding(repo.path())?;
+    let (state, db_dir) = index_into_temp_state(repo.path(), embedder)?;
+    Ok((state, repo, db_dir))
+}
+
+/// Scores `name`'s labelled queries and edges with enough filler around them
+/// to put the repository in the Medium tier, the one real repositories hit.
+/// The fixtures themselves are Tiny, so without this no tier-specific
+/// parameter is ever scored. Fails rather than quietly scoring a smaller tier.
+pub fn eval_corpus_at_medium(
+    eval_root: &Path,
+    name: &str,
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<CorpusAccum> {
+    let (state, _repo, _db_dir) = medium_state(eval_root, name, embedder)?;
+    let tier = state
+        .lock_store_fresh()
+        .map_err(|msg| anyhow::anyhow!("{msg}"))?
+        .corpus_tier()?;
+    ensure!(
+        tier == CorpusTier::Medium,
+        "padded {name} landed in the {tier:?} tier, so the Medium scope isn't scoring Medium"
+    );
+    score_corpus(eval_root, name, &state, embedder)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create_dir_all {}", target.display()))?;
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)
+                .with_context(|| format!("copy to {}", target.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs `name`'s labelled queries and edges against an already indexed state.
+fn score_corpus(
+    eval_root: &Path,
+    name: &str,
+    state: &AppState,
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<CorpusAccum> {
     let queries_path = eval_root.join("queries").join(format!("{name}.yaml"));
     let queries = queries::load_queries(&queries_path)?;
     let edges_path = eval_root.join("edges").join(format!("{name}.yaml"));
@@ -142,10 +208,10 @@ pub fn eval_corpus(
     let mut accum = CorpusAccum::default();
 
     for query in queries.iter().filter(|q| q.tool == "search") {
-        score_search_query(&state, embedder, query, &mut accum)?;
+        score_search_query(state, embedder, query, &mut accum)?;
     }
     for query in queries.iter().filter(|q| q.tool == "explore") {
-        score_explore_query(&state, query, &mut accum);
+        score_explore_query(state, query, &mut accum);
     }
 
     let labeled: Vec<LabeledEdge> = edges
@@ -155,7 +221,7 @@ pub fn eval_corpus(
             callee: e.callee,
         })
         .collect();
-    accum.edges = metrics::edge_counts(&labeled, |caller| depth1_resolved_callees(&state, caller));
+    accum.edges = metrics::edge_counts(&labeled, |caller| depth1_resolved_callees(state, caller));
 
     Ok(accum)
 }
@@ -436,6 +502,38 @@ mod tests {
         assert!(m.mrr > 0.0, "{m:?}");
         assert!(m.answer_in_bundle > 0.0, "{m:?}");
         assert_eq!(accum.edges.labeled, 57, "eval/edges/pyapp.yaml row count");
+    }
+
+    /// Worthless if the padding fell short of the tier or shadowed a label:
+    /// the scope would quietly go back to scoring the tier it's there to
+    /// escape, or score misses that are really unresolved names.
+    #[test]
+    fn the_medium_scope_reaches_the_tier_with_every_label_intact() {
+        let root = eval_root();
+        let (state, _repo, _db_dir) = medium_state(&root, MEDIUM_CORPUS, None).unwrap();
+        assert_eq!(
+            state.lock_store_fresh().unwrap().corpus_tier().unwrap(),
+            CorpusTier::Medium
+        );
+
+        let queries =
+            queries::load_queries(&root.join("queries").join(format!("{MEDIUM_CORPUS}.yaml")))
+                .unwrap();
+        let answerable = queries
+            .iter()
+            .filter(|q| q.tool != "callers" && q.tool != "callees");
+        for qualname in answerable.flat_map(|q| &q.expect) {
+            assert!(
+                symbol_location(&state, qualname).is_some(),
+                "{qualname} no longer resolves once padded"
+            );
+        }
+
+        let padded = score_corpus(&root, MEDIUM_CORPUS, &state, None).unwrap();
+        let plain = eval_corpus(&root, MEDIUM_CORPUS, None).unwrap();
+        assert_eq!(padded.recall_at_5.count, plain.recall_at_5.count);
+        assert_eq!(padded.answer_in_bundle.count, plain.answer_in_bundle.count);
+        assert_eq!(padded.edges.labeled, plain.edges.labeled);
     }
 
     #[test]
