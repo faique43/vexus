@@ -89,7 +89,7 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
                     def_node = Some(cap.node);
                     def_kind = "type";
                 }
-                // Namespace-like containers: Ruby `module`, C++/C#/PHP
+                // Namespace-like containers: Ruby `module`, Rust `mod`, C++/C#/PHP
                 // `namespace`, Elixir `defmodule`. Members nest under them
                 // for qualnames, but functions inside stay `Function`, not
                 // `Method` (the promotion list below excludes Module).
