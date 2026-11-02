@@ -28,6 +28,7 @@ use vexus_watch::pipeline;
 use vexus_core::model::estimate_tokens;
 use vexus_core::priors::query_seeks_tests;
 use vexus_core::query::{EdgeHit, Resolution, SymbolInfo};
+use vexus_core::search::{SearchHit, SearchOutcome};
 use vexus_core::Store;
 
 use crate::state::{freshness_header, AppState};
@@ -124,6 +125,20 @@ fn symbol_row(info: &SymbolInfo) -> Row {
         label: truncated(info.sig.as_deref().unwrap_or(&info.qualname)),
         symbol_id: Some(info.id),
     }
+}
+
+/// A row for a search hit. A symbol too long for one chunk gets the chunk
+/// that matched, since `open` can stop at its budget before reaching it. A
+/// chunk that only reaches further up, over a doc comment, is the whole symbol.
+fn hit_row(hit: &SearchHit, info: &SymbolInfo) -> Row {
+    let mut row = symbol_row(info);
+    if hit.start_line > info.start_line || hit.end_line < info.end_line {
+        row.start_line = hit.start_line;
+        row.end_line = hit.end_line;
+        let whole = format!("(part of {}-{})", info.start_line, info.end_line);
+        row.label = format!("{} {whole}", row.label);
+    }
+    row
 }
 
 fn is_test_code(store: &Store, info: &SymbolInfo) -> bool {
@@ -306,7 +321,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     if hits.is_empty() {
         return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
-    let weak = outcome == vexus_core::search::SearchOutcome::WeakVectorOnly;
+    let weak = outcome == SearchOutcome::WeakVectorOnly;
     let wants_tests = query_seeks_tests(question);
 
     let mut rows: Vec<Row> = Vec::new();
@@ -321,7 +336,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             Some(info) => {
                 if seen.insert(info.id) {
                     entry_symbols.push(info.id);
-                    rows.push(symbol_row(&info));
+                    rows.push(hit_row(&hit, &info));
                 }
             }
             None => rows.push(Row {
@@ -641,6 +656,56 @@ mod tests {
             out.contains("def test_settle"),
             "a question about tests must still reach them: {out}"
         );
+    }
+
+    /// `open` stops at its budget, so pointing at all of a long function can
+    /// hand back everything but the part that matched.
+    #[test]
+    fn a_match_inside_a_long_function_points_at_that_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let padding: String = (0..600)
+            .map(|i| format!("    value_{i} = compute_something({i}) + other_thing({i})\n"))
+            .collect();
+        write(
+            root,
+            "pkg/long.py",
+            &format!(
+                "def long_function(x):\n{padding}    reticulate_the_splines = x\n    return reticulate_the_splines\n"
+            ),
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulate_the_splines", None);
+
+        let row = out
+            .lines()
+            .find(|l| l.contains("def long_function"))
+            .unwrap_or_else(|| panic!("{out}"));
+        let range = row.split_once(' ').unwrap().0;
+        let (start, end) = range.split_once('-').unwrap();
+        let (start, end): (u32, u32) = (start.parse().unwrap(), end.parse().unwrap());
+        assert!(start > 1 && end == 603, "{row}");
+        assert!(row.contains("part of 1-603"), "{row}");
+    }
+
+    /// Doc comments stretch a chunk past its symbol. That isn't a partial
+    /// match, and the row should keep naming the symbol.
+    #[test]
+    fn a_doc_comment_does_not_shift_a_whole_symbols_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/lib.rs",
+            "/// Reticulates the splines.\npub fn settle(x: u32) -> u32 {\n    x\n}\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("\n2-4 pub fn settle"), "{out}");
+        assert!(!out.contains("part of"), "{out}");
     }
 
     /// An unresolved `x.drain_queue()` names no target, so it can't be shown
