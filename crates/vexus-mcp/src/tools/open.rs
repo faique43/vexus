@@ -143,7 +143,7 @@ fn open_path_slice(
     let content = match std::fs::read_to_string(&candidate) {
         Ok(c) => c,
         Err(_) => {
-            return format!("file not found: {rel_path} — try `search` to locate the right path.")
+            return format!("file not found: {rel_path} — try `explore` to locate the right path.")
         }
     };
 
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn open_path_slice_missing_file_suggests_search() {
+    fn open_path_slice_missing_file_points_at_explore() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write(root, "a.py", "line1\n");
@@ -386,7 +386,8 @@ mod tests {
         let out = open_text(&state, "does_not_exist.py:1-2", None);
 
         assert!(out.contains("file not found"), "got: {out:?}");
-        assert!(out.contains("search"), "got: {out:?}");
+        assert!(out.contains("`explore`"), "got: {out:?}");
+        assert!(!out.contains("`search`"), "got: {out:?}");
     }
 
     #[test]
