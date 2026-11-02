@@ -39,12 +39,9 @@
 //!   hook's file@3 falls 25 -> 23 of 48. 0.3 is the least aggressive value
 //!   that holds all of it.
 //!
-//! `preamble: 0.6, tiny: 0.8` was measured and deliberately NOT taken: on
-//! the real embedder it buys recall@5 0.9061 -> 0.9152 and ndcg@10 0.7191
-//! -> 0.7239 with mrr flat, but it costs the mock gate 0.0345 of
-//! `answer_in_bundle`. Trading a real regression in the blind-mode ratchet
-//! that guards every future change for a fractional gain here is a bad
-//! bargain, so the values stay where the sweep says they are safest.
+//! `preamble: 0.6, tiny: 0.8` was measured again on the keyword gate and the
+//! real embedder and isn't taken: recall@5 and MRR come out level, and it costs
+//! `map_ndcg@10` .7629 -> .7550 on the real embedder.
 
 /// Multiplicative penalty coefficients. Constructed via [`Priors::from_env`]
 /// in production; tests build custom values directly.

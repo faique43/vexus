@@ -78,14 +78,29 @@ fn sanitize_fts(query: &str) -> Option<String> {
     Some(quoted.join(" OR "))
 }
 
-/// Whether `content` holds at least half of `terms`. A keyword hit needs that
-/// to count as evidence of a match, because any question has some generic word
+/// Whether two words share a root, as the index's stemming would treat them:
+/// `user` and `users`, or `register` and `registration`, not `process` and
+/// `product`.
+fn same_root(a: &str, b: &str) -> bool {
+    let shared = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    shared
+        >= MIN_SHARED_ROOT
+            .min(a.chars().count())
+            .min(b.chars().count())
+}
+
+/// Whether `text` holds at least half of `terms`. A keyword hit needs that to
+/// count as evidence of a match, because any question has some generic word
 /// the corpus also has: `configure` is no sign a web framework knows about
-/// "configure kubernetes pod autoscaling".
-fn covers_terms(content: &str, terms: &[&str]) -> bool {
+/// "configure kubernetes pod autoscaling". Words are compared the way the index
+/// reads them, inside identifiers and past their endings.
+fn covers_terms(text: &str, terms: &[&str]) -> bool {
     let is_word_break = |c: char| !c.is_alphanumeric();
-    let words: HashSet<String> = content
+    let split = identifier_parts(text);
+    let words: HashSet<String> = text
         .split(is_word_break)
+        .chain(split.split(is_word_break))
+        .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
         .collect();
     // FTS breaks `alpha_process` at the underscore, so a term matches the same way.
@@ -93,7 +108,10 @@ fn covers_terms(content: &str, terms: &[&str]) -> bool {
         .iter()
         .filter(|term| {
             let mut parts = term.split(is_word_break).filter(|p| !p.is_empty());
-            parts.all(|part| words.contains(&part.to_lowercase()))
+            parts.all(|part| {
+                let part = part.to_lowercase();
+                words.iter().any(|word| same_root(word, &part))
+            })
         })
         .count();
     matched > 0 && matched * 2 >= terms.len()
@@ -127,6 +145,8 @@ pub(crate) fn identifier_parts(text: &str) -> String {
     parts
 }
 
+/// Leading characters two words must share to count as one root.
+const MIN_SHARED_ROOT: usize = 5;
 const RRF_K: f64 = 60.0;
 const CANDIDATES: u32 = 50;
 
@@ -223,9 +243,10 @@ impl Store {
 
         let keyword_hits = self.search_keyword(query_text, CANDIDATES)?;
         let terms = content_terms(query_text);
-        let keyword_hit = keyword_hits
-            .iter()
-            .any(|hit| covers_terms(&hit.content, &terms));
+        let keyword_hit = keyword_hits.iter().any(|hit| {
+            let qualname = hit.qualname.as_deref().unwrap_or_default();
+            covers_terms(&format!("{} {qualname} {}", hit.path, hit.content), &terms)
+        });
         for (rank, hit) in keyword_hits.iter().enumerate() {
             *scores.entry(hit.chunk_id).or_default() += 1.0 / (RRF_K + rank as f64);
         }
@@ -382,6 +403,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::covers_terms;
     use super::SearchOutcome;
     use crate::model::*;
     use crate::Store;
@@ -713,6 +735,15 @@ mod tests {
         (dir, store)
     }
 
+    fn store_with_file(path: &str, content: &str) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let mut idx = one_fn_file("m.f", "unused");
+        idx.chunks[0].content = format!("{content}\n");
+        store.replace_file(path, "lua", &[1u8; 32], &idx).unwrap();
+        (dir, store)
+    }
+
     /// Two lists ranking two chunks in opposite orders fuse to the same score,
     /// and chunk id only says which file was indexed first.
     #[test]
@@ -817,6 +848,29 @@ mod tests {
         assert_eq!(
             outcome(&store, "how do I configure kubernetes pod autoscaling"),
             SearchOutcome::WeakVectorOnly
+        );
+    }
+
+    #[test]
+    fn evidence_sees_inside_identifiers_and_past_word_endings() {
+        assert!(covers_terms(
+            "export function registerUser(req)",
+            &["user", "registration"]
+        ));
+    }
+
+    #[test]
+    fn evidence_stops_short_of_a_shared_prefix() {
+        assert!(!covers_terms("the product catalogue", &["process"]));
+    }
+
+    #[test]
+    fn a_term_in_the_location_is_evidence() {
+        let (_d, store) = store_with_file("gamescripts/loyalty.lua", "function tier_label(points)");
+
+        assert_eq!(
+            outcome(&store, "how is the loyalty tier decided"),
+            SearchOutcome::Strong
         );
     }
 

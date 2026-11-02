@@ -265,16 +265,17 @@ regressions, not for comparing against grep.
 
 ### Retrieval quality
 
-Measured against hand-labelled fixture corpora — 69 graded queries, 99 labelled
-call edges — and **gated in CI**: any metric dropping more than 0.02 absolute
-fails the build.
+Measured against hand-labelled fixture corpora, 131 graded queries and 117
+labelled call edges, on the real embedding model. The same set runs keyword-only
+in CI, and any metric dropping more than 0.02 fails the build.
 
-| | |
-| --- | ---: |
-| recall@5 | 0.80 |
-| recall@10 | 0.92 |
-| answer-in-bundle (`explore` returned the source you needed) | 0.83 |
-| call-edge precision / recall | 0.88 / 0.93 |
+| | Real model | Keyword only |
+| --- | ---: | ---: |
+| recall@5 | 0.95 | 0.92 |
+| recall@10 | 0.98 | 0.96 |
+| MRR | 0.78 | 0.74 |
+| `explore` map holds the answer | 1.00 | 0.93 |
+| call-edge precision / recall | 0.91 / 0.94 | 0.91 / 0.94 |
 
 ### Speed
 
