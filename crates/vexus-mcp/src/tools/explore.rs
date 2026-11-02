@@ -138,7 +138,7 @@ fn linked_symbols(store: &Store, edges: Vec<EdgeHit>, wants_tests: bool) -> Vec<
     let mut seen = HashSet::new();
     edges
         .into_iter()
-        .filter(|e| e.symbol.id != -1 && seen.insert(e.symbol.id))
+        .filter(|e| e.confidence.is_some() && seen.insert(e.symbol.id))
         .filter(|e| wants_tests || !is_test_code(store, &e.symbol))
         .map(|e| e.symbol)
         .take(NEIGHBOR_LIMIT)
@@ -641,6 +641,34 @@ mod tests {
             out.contains("def test_settle"),
             "a question about tests must still reach them: {out}"
         );
+    }
+
+    /// An unresolved `x.drain_queue()` names no target, so it can't be shown
+    /// as a fact about any one of the methods sharing that name.
+    #[test]
+    fn an_unresolved_call_is_not_a_caller_of_every_method_with_that_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..7 {
+            write(
+                root,
+                &format!("pkg/worker_{i}.py"),
+                &format!(
+                    "class Worker{i}:\n    def drain_queue(self, x):\n        \"\"\"Reticulates splines {i}.\"\"\"\n        return x\n\n\ndef local_caller_{i}(worker):\n    return worker.drain_queue(1)\n"
+                ),
+            );
+        }
+        write(
+            root,
+            "pkg/other.py",
+            "def totally_unrelated(thing):\n    return thing.drain_queue(1)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("called by: local_caller_0"), "{out}");
+        assert!(!out.contains("totally_unrelated"), "{out}");
     }
 
     /// Rows arrive in id order, so a file indexed late sits behind every

@@ -171,7 +171,9 @@ impl Store {
 
     /// Direct callers of `symbol_id` (edges kind='calls' with dst_id =
     /// symbol_id), plus name-only matches (dst_id NULL AND dst_name
-    /// suffix-matches the symbol's name) reported with confidence None.
+    /// suffix-matches the symbol's name) reported with confidence None. The
+    /// resolver only leaves such an edge unresolved when the name fits several
+    /// symbols, so each of them reports it: it's a guess, to label or skip.
     /// `depth` walks callers-of-callers over resolved edges only.
     pub fn callers_of(&self, symbol_id: i64, depth: u32, limit: u32) -> Result<Vec<EdgeHit>> {
         let Some(info) = self.symbol_info(symbol_id)? else {
@@ -373,9 +375,10 @@ impl Store {
     ///
     /// `via_name`/`confidence` aren't part of `reach` (they're per-edge, not
     /// per-node); the outer `SELECT` re-joins the edge(s) that could have
-    /// produced each `(node, depth)` pair and picks the one with the
-    /// smallest edge id, purely for a deterministic single answer — any one
-    /// of them is an equally valid "how did we get here".
+    /// produced each `(node, depth)` pair and picks one: a resolved edge over
+    /// a name match, since `confidence` says whether the caller is known, then
+    /// the smallest edge id for a deterministic answer. Name matches sort after
+    /// resolved callers at each depth so `row_cap` can't cost a known caller.
     fn walk_callers(
         &self,
         symbol_id: i64,
@@ -406,7 +409,7 @@ impl Store {
             JOIN symbols s ON s.id = reach.id
             JOIN files f ON f.id = s.file_id
             JOIN edges e ON e.id = (
-                SELECT MIN(e2.id)
+                SELECT e2.id
                 FROM edges e2
                 WHERE e2.src_id = reach.id
                   AND e2.kind = 'calls'
@@ -417,8 +420,10 @@ impl Store {
                         SELECT r2.id FROM reach r2 WHERE r2.depth = reach.depth - 1
                     ))
                   )
+                ORDER BY e2.dst_id IS NULL, e2.id
+                LIMIT 1
             )
-            ORDER BY reach.depth ASC, s.id ASC
+            ORDER BY reach.depth ASC, e.dst_id IS NULL, s.id ASC
             LIMIT ?4"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -846,6 +851,82 @@ mod tests {
             "dst_id IS NULL must render as confidence None"
         );
         assert_eq!(main_hit.via_name, "leaf");
+    }
+
+    /// Unresolved matches on a common name can run to thousands of rows, and
+    /// the limit applies after the sort.
+    #[test]
+    fn callers_of_keeps_resolved_callers_when_name_matches_fill_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = Box::leak(Box::new(dir));
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let call = |name: &str| NewEdge {
+            src: 0,
+            kind: EdgeKind::Calls,
+            dst_name: name.into(),
+            dst_arity: Some(0),
+        };
+        for i in 0..12u8 {
+            let guess = FileIndex {
+                symbols: vec![fn_sym("guess", &format!("g{i}.guess"), Some(0))],
+                edges: vec![call("target")],
+                chunks: vec![],
+            };
+            store
+                .replace_file(&format!("g{i}.py"), "python", &[i; 32], &guess)
+                .unwrap();
+        }
+        let real = FileIndex {
+            symbols: vec![fn_sym("real", "z.real", Some(0))],
+            edges: vec![call("t.target")],
+            chunks: vec![],
+        };
+        store
+            .replace_file("z.py", "python", &[20u8; 32], &real)
+            .unwrap();
+        for (path, qualname) in [("t.py", "t.target"), ("u.py", "u.target")] {
+            let target = FileIndex {
+                symbols: vec![fn_sym("target", qualname, Some(0))],
+                edges: vec![],
+                chunks: vec![],
+            };
+            store
+                .replace_file(path, "python", &[21u8; 32], &target)
+                .unwrap();
+        }
+        store.resolve_all_edges().unwrap();
+        store
+            .conn_ref_for_tests()
+            .execute(
+                "UPDATE edges SET dst_id = NULL, confidence = 'name_only' WHERE dst_name = 'target'",
+                [],
+            )
+            .unwrap();
+
+        let hits = store.callers_of(id_of(&store, "t.target"), 1, 10).unwrap();
+
+        assert_eq!(hits[0].symbol.qualname, "z.real", "{hits:?}");
+        assert!(hits[0].confidence.is_some(), "{hits:?}");
+    }
+
+    /// One caller can hold a guess and a real edge to the same symbol. It's a
+    /// known caller, whichever edge happens to have been written first.
+    #[test]
+    fn a_caller_with_a_resolved_edge_is_not_reported_as_a_name_match() {
+        let (store, main_id, _helper_id, leaf_id) = graph_fixture();
+        store
+            .conn_ref_for_tests()
+            .execute(
+                "INSERT INTO edges (src_id, dst_id, kind, dst_name, confidence)
+                 VALUES (?1, ?2, 'calls', 'c.leaf', 'exact')",
+                [main_id, leaf_id],
+            )
+            .unwrap();
+
+        let hits = store.callers_of(leaf_id, 1, 50).unwrap();
+
+        let main_hit = hits.iter().find(|h| h.symbol.id == main_id).unwrap();
+        assert!(main_hit.confidence.is_some(), "{main_hit:?}");
     }
 
     #[test]
