@@ -203,6 +203,7 @@ impl Store {
         }
 
         let mut near_vector_hit = false;
+        let mut vector_rank: HashMap<i64, usize> = HashMap::new();
         if let Some(qv) = query_vec {
             let knn = self.knn_chunks(qv, CANDIDATES)?;
             let near: Vec<&(i64, f64)> = match knn_floor {
@@ -219,6 +220,7 @@ impl Store {
             };
             for (rank, (chunk_id, _dist)) in ranked_list.into_iter().enumerate() {
                 *scores.entry(*chunk_id).or_default() += 1.0 / (RRF_K + rank as f64);
+                vector_rank.insert(*chunk_id, rank);
             }
         }
 
@@ -227,8 +229,16 @@ impl Store {
         // therefore explore's graph-expansion seeds), not just display order.
         self.apply_ranking_priors(query_text, &mut scores, &crate::priors::Priors::from_env())?;
 
+        // The lists tie whenever they rank two chunks in opposite orders. The
+        // vector list settles it, being the stronger of the two by far on the
+        // eval, and chunk id only keeps the order deterministic.
+        let vector_order = |id: &i64| vector_rank.get(id).copied().unwrap_or(usize::MAX);
         let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        ranked.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then(vector_order(&a.0).cmp(&vector_order(&b.0)))
+                .then(a.0.cmp(&b.0))
+        });
         ranked.truncate(limit as usize);
         let outcome = if keyword_hit || near_vector_hit || ranked.is_empty() {
             SearchOutcome::Strong
@@ -672,6 +682,45 @@ mod tests {
                 .unwrap();
         }
         (dir, store)
+    }
+
+    /// Two lists ranking two chunks in opposite orders fuse to the same score,
+    /// and chunk id only says which file was indexed first.
+    #[test]
+    fn the_vector_list_breaks_a_tie_between_the_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+        let mut keyword_first = one_fn_file("a.handler", "frobnicate");
+        keyword_first.chunks[0]
+            .content
+            .push_str("frobnicate frobnicate\n");
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &keyword_first)
+            .unwrap();
+        store
+            .replace_file(
+                "b.py",
+                "python",
+                &[2u8; 32],
+                &one_fn_file("b.service", "frobnicate"),
+            )
+            .unwrap();
+        for (id, content, _hash) in store.chunks_missing_embedding(10).unwrap() {
+            let v = if content.matches("frobnicate").count() == 2 {
+                vec![1.0, 0.0, 0.0, 0.0]
+            } else {
+                vec![0.5, 0.5, 0.5, 0.5]
+            };
+            store.put_embeddings(&[(id, v)]).unwrap();
+        }
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", Some(&[1.0, 0.0, 0.0, 0.0]), None, 10)
+            .unwrap();
+
+        assert_eq!(hits[0].score, hits[1].score, "the fixture must tie");
+        assert_eq!(hits[0].path, "b.py", "{hits:?}");
     }
 
     #[test]
