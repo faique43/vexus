@@ -1,0 +1,5 @@
+what does Injector.loadInstance do | loadInstance, instantiateClass
+what does RouterProxy.createProxy do | createProxy, next
+how does ModuleRef.get work | ModuleRef, get
+what does NestFactory.create do | NestFactory, create
+what does Reflector.getAllAndOverride do | getAllAndOverride, Reflector

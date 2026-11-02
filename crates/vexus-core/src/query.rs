@@ -91,7 +91,11 @@ impl Store {
             return Ok(Resolution::Exact(info));
         }
 
-        let by_name = self.symbols_by_name(target, NAME_MATCH_LIMIT)?;
+        let mut by_name = self.symbols_by_name(target, NAME_MATCH_LIMIT)?;
+        // A dotted target is a symbol, never a file that happens to share it.
+        if last_segment(target) != target {
+            by_name.retain(|info| info.kind != "module");
+        }
         match by_name.len() {
             0 => {}
             1 => return Ok(Resolution::Exact(by_name.into_iter().next().unwrap())),
@@ -114,6 +118,20 @@ impl Store {
         }
 
         let seg = last_segment(target);
+        // `res.sendFile` can be assigned in a file that names it something
+        // else, so the prefix isn't reliable. Its own name still is.
+        if seg != target {
+            let mut by_segment = self.symbols_by_name(seg, NAME_MATCH_LIMIT)?;
+            by_segment.retain(|info| !crate::priors::is_test_path(&info.path));
+            match by_segment.len() {
+                0 => {}
+                1 => return Ok(Resolution::Exact(by_segment.into_iter().next().unwrap())),
+                _ => {
+                    by_segment.truncate(10);
+                    return Ok(Resolution::Candidates(by_segment));
+                }
+            }
+        }
         let mut suggestions = self.suggest_by_name_like(seg)?;
         if suggestions.is_empty() {
             let prefix: String = seg.chars().take(3).collect();
@@ -447,7 +465,8 @@ impl Store {
     /// can say `Class.method` without spelling out the module path.
     fn symbols_by_qualname_suffix(&self, target: &str, limit: i64) -> Result<Vec<SymbolInfo>> {
         let sql = format!(
-            "{SYMBOL_INFO_SELECT} WHERE {} ORDER BY s.qualname LIMIT ?2",
+            "{SYMBOL_INFO_SELECT} WHERE {} AND s.kind != 'module'
+             ORDER BY s.qualname LIMIT ?2",
             suffix_match_sql("s.qualname", "?1")
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -602,6 +621,37 @@ mod tests {
                     "packages.core.injector.Injector.lookupComponent"
                 );
             }
+            other => panic!("expected Exact, got {other:?}"),
+        }
+    }
+
+    /// Express assigns `res.sendFile` inside response.js, so it indexes as
+    /// `response.sendFile`, and test/res.sendFile.js is a module whose
+    /// qualname ends in the same words. Matching that file returned 15,000
+    /// characters of tests for one function.
+    #[test]
+    fn dotted_name_finds_the_function_rather_than_a_file_named_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let test_file = FileIndex {
+            symbols: vec![sym("res.sendFile", "test.res.sendFile", SymbolKind::Module)],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("test/res.sendFile.js", "javascript", &[4u8; 32], &test_file)
+            .unwrap();
+        let source = FileIndex {
+            symbols: vec![sym("sendFile", "response.sendFile", SymbolKind::Function)],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("lib/response.js", "javascript", &[5u8; 32], &source)
+            .unwrap();
+
+        match store.resolve_symbol("res.sendFile").unwrap() {
+            Resolution::Exact(info) => assert_eq!(info.qualname, "response.sendFile"),
             other => panic!("expected Exact, got {other:?}"),
         }
     }

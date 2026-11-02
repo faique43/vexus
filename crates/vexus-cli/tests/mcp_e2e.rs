@@ -229,7 +229,7 @@ async fn mcp_stdio_e2e_lists_and_drives_all_seven_tools() {
 
     // explore: a `## <path>` map with the one-hop callee listed, and no source.
     let mut explore_args = serde_json::Map::new();
-    explore_args.insert("question".to_string(), json!("alpha_process"));
+    explore_args.insert("question".to_string(), json!("alpha process"));
     let explore = call_tool(&client, "explore", Some(explore_args)).await;
     assert!(
         explore.contains("## app.py"),

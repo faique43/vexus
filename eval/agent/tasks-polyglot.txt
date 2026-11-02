@@ -1,0 +1,4 @@
+How does placing an order flow through the service? | place_order, quote_total
+Where does the frontend talk to the orders API? | orders
+What calls the pricing quote function? | quote_total, create_order_endpoint
+How does cancelling an order notify the customer? | cancel_order, notify_order_cancelled
