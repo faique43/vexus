@@ -141,6 +141,20 @@ fn hit_row(hit: &SearchHit, info: &SymbolInfo) -> Row {
     row
 }
 
+/// A label for a chunk outside any symbol: its first line of code, or failing
+/// that of comment. Such a chunk can open on a `/**`, or on the `})` that ends
+/// the symbol before it, and neither says what's there.
+fn preamble_label(content: &str) -> String {
+    let readable = |l: &&str| l.chars().any(char::is_alphanumeric);
+    let comment = |l: &&str| ["/*", "*", "//", "#"].iter().any(|m| l.starts_with(m));
+    let lines = || content.lines().map(str::trim).filter(readable);
+    let label = lines()
+        .find(|l| !comment(l))
+        .or_else(|| lines().next())
+        .or_else(|| content.lines().next());
+    truncated(label.unwrap_or(""))
+}
+
 fn is_test_code(store: &Store, info: &SymbolInfo) -> bool {
     store.is_test_symbol(info.id, &info.path).unwrap_or(false)
 }
@@ -343,7 +357,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
                 path: hit.path.clone(),
                 start_line: hit.start_line,
                 end_line: hit.end_line,
-                label: truncated(hit.content.lines().next().unwrap_or("")),
+                label: preamble_label(&hit.content),
                 symbol_id: None,
             }),
         }
@@ -363,6 +377,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             let siblings: Vec<SymbolInfo> = if rank == 0 {
                 callers
                     .iter()
+                    .filter(|caller| caller.kind != "module")
                     .take(SIBLING_CALLERS)
                     .flat_map(|caller| callees_shown(&store, caller.id, wants_tests))
                     .collect()
@@ -373,7 +388,9 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             // answered by what it does, more than by who reaches it.
             neighbors.extend(callees.into_iter().chain(callers).chain(siblings));
         }
-        let unseen = neighbors.iter().filter(|s| seen.insert(s.id));
+        let unseen = neighbors
+            .iter()
+            .filter(|s| s.kind != "module" && seen.insert(s.id));
         rows.extend(unseen.take(params.max_neighbor_ids).map(symbol_row));
     }
 
@@ -706,6 +723,63 @@ mod tests {
 
         assert!(out.contains("\n2-4 pub fn settle"), "{out}");
         assert!(!out.contains("part of"), "{out}");
+    }
+
+    /// A call at the top of a file has the file's module as its caller. A
+    /// row for that is the whole file, and what the file calls is not a step
+    /// in the flow being asked about.
+    #[test]
+    fn a_file_level_caller_is_not_a_neighbor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n\n\ndef unrelated_step():\n    return 1\n",
+        );
+        write(
+            root,
+            "pkg/boot.py",
+            "from pkg.core import settle, unrelated_step\n\nsettle(1)\nunrelated_step()\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(!out.contains("pkg/boot.py"), "{out}");
+        assert!(!out.contains("unrelated_step"), "{out}");
+    }
+
+    #[test]
+    fn a_preamble_row_is_labelled_with_what_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/app.js",
+            "/**\n * Reticulates the splines.\n */\n\nvar splines = require('splines');\n\nfunction other() {\n  return 1;\n}\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("var splines = require('splines');"), "{out}");
+        assert!(!out.contains(" /**"), "{out}");
+    }
+
+    #[test]
+    fn preamble_labels_skip_punctuation_and_comment_markers() {
+        assert_eq!(
+            preamble_label("})\n\napp.listen(3000);\n"),
+            "app.listen(3000);"
+        );
+        assert_eq!(
+            preamble_label("/**\n * Docs.\n */\nconst a = 1;\n"),
+            "const a = 1;"
+        );
+        assert_eq!(preamble_label("# Only a comment.\n"), "# Only a comment.");
+        assert_eq!(preamble_label("/**\n * Only docs.\n */\n"), "* Only docs.");
+        assert_eq!(preamble_label("})\n"), "})");
     }
 
     /// An unresolved `x.drain_queue()` names no target, so it can't be shown
