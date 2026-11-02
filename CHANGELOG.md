@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.1 — exact symbols, faster index
 
 ### Changed
 

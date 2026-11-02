@@ -122,7 +122,7 @@ cargo install --git https://github.com/faique43/vexus vexus-cli
 **Pin a version / change the location:**
 
 ```sh
-VEXUS_VERSION=0.3.0 VEXUS_INSTALL_DIR=/usr/local/bin \
+VEXUS_VERSION=0.4.0 VEXUS_INSTALL_DIR=/usr/local/bin \
   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
