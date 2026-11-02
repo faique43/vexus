@@ -422,7 +422,7 @@
   expect:
     - service.src.services.order_service.cancel_order
   expect_not:
-    - service.src.services.order_service.cancel_order_persists_the_cancelled_status
+    - service.src.services.order_service.tests.cancel_order_persists_the_cancelled_status
     - service.tests.integration.cancelling_an_unknown_order_still_notifies
 
 - q: "how does cancelling an order notify the customer"
@@ -431,7 +431,7 @@
     - service.src.services.order_service.cancel_order
     - service.src.services.notifications.notify_order_cancelled
   expect_not:
-    - service.src.services.order_service.cancel_order_persists_the_cancelled_status
+    - service.src.services.order_service.tests.cancel_order_persists_the_cancelled_status
     - service.tests.integration.cancelling_an_unknown_order_still_notifies
 
 - q: "how does the frontend place a new order"
@@ -447,14 +447,14 @@
     - service.src.services.order_service.place_order
     - service.src.utils.retry.retry_with_backoff
   expect_not:
-    - service.src.services.order_service.place_order_returns_a_generated_order_id
+    - service.src.services.order_service.tests.place_order_returns_a_generated_order_id
     - service.tests.integration.order_lifecycle_place_pay_cancel
 
 - q: "where do we validate a session token"
   expect:
     - service.src.services.auth.validate
   expect_not:
-    - service.src.services.auth.validate_rejects_an_empty_session_token
+    - service.src.services.auth.tests.validate_rejects_an_empty_session_token
 
 # Test-seeking queries must still find tests — pins the query-aware bypass.
 - q: "integration tests for the order lifecycle"

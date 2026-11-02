@@ -10,6 +10,7 @@ onnx = ["vexus-embed/onnx", "vexus-watch/onnx"]
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
 vexus-core = { path = "../vexus-core" }
 vexus-embed = { path = "../vexus-embed", default-features = false }
 vexus-watch = { path = "../vexus-watch", default-features = false }

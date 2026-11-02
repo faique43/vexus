@@ -99,6 +99,34 @@ fn covers_terms(content: &str, terms: &[&str]) -> bool {
     matched > 0 && matched * 2 >= terms.len()
 }
 
+/// The words inside camelCase and PascalCase names, for the FTS index. Its
+/// tokenizer already splits snake_case. A name repeats its words each time it
+/// occurs, so bm25 sees how often they really appear.
+pub(crate) fn identifier_parts(text: &str) -> String {
+    let mut parts = String::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<(usize, char)> = word.char_indices().collect();
+        let mut starts = vec![0];
+        for window in chars.windows(2) {
+            let ((_, prev), (at, c)) = (window[0], window[1]);
+            let next = word[at + c.len_utf8()..].chars().next();
+            let acronym_ends = prev.is_uppercase() && next.is_some_and(char::is_lowercase);
+            if c.is_uppercase() && (prev.is_lowercase() || prev.is_numeric() || acronym_ends) {
+                starts.push(at);
+            }
+        }
+        if starts.len() < 2 {
+            continue;
+        }
+        starts.push(word.len());
+        for piece in starts.windows(2) {
+            parts.push_str(&word[piece[0]..piece[1]]);
+            parts.push(' ');
+        }
+    }
+    parts
+}
+
 const RRF_K: f64 = 60.0;
 const CANDIDATES: u32 = 50;
 
@@ -250,12 +278,12 @@ impl Store {
 
     /// Multiply each candidate chunk's fused score by the structural
     /// penalties it earns (see `priors.rs` for the rationale and
-    /// magnitudes): test code — by path convention, or by a Rust
-    /// `#[cfg(test)]`/`#[test]` content sniff since inline test modules
-    /// live on production paths — module-level preamble (the chunk's owning
-    /// symbol is the file's module), sub-floor tiny fragments, and non-core
-    /// directories. The test and non-core penalties are suspended entirely
-    /// when the query itself asks about that code.
+    /// magnitudes): test code — by path convention, or flagged at index time
+    /// since inline test modules live on production paths — module-level
+    /// preamble (the chunk's owning symbol is the file's module), sub-floor
+    /// tiny fragments, and non-core directories. The test and non-core
+    /// penalties are suspended entirely when the query itself asks about that
+    /// code.
     ///
     /// One point lookup per candidate (≤ 2×CANDIDATES rows, same
     /// prepared-statement pattern as `hydrate_hits`) — sub-millisecond
@@ -277,9 +305,7 @@ impl Store {
             return Ok(());
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT c.token_count, f.path, s.kind,
-                    (f.lang = 'rust' AND (instr(c.content, '#[cfg(test)]') > 0
-                                          OR instr(c.content, '#[test]') > 0))
+            "SELECT c.token_count, f.path, s.kind, c.is_test
              FROM chunks c JOIN files f ON f.id = c.file_id
              LEFT JOIN symbols s ON s.id = c.symbol_id WHERE c.id = ?1",
         )?;
@@ -289,10 +315,10 @@ impl Store {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .optional()?;
-            let Some((token_count, path, kind, rust_test_sniff)) = row else {
+            let Some((token_count, path, kind, is_test)) = row else {
                 continue; // chunk deleted between rank and lookup
             };
-            if !skip_test_penalty && (crate::priors::is_test_path(&path) || rust_test_sniff) {
+            if !skip_test_penalty && (crate::priors::is_test_path(&path) || is_test) {
                 *score *= priors.test;
             }
             if !skip_non_core_penalty && crate::priors::is_non_core_path(&path) {
@@ -308,19 +334,15 @@ impl Store {
         Ok(())
     }
 
-    /// Whether a symbol is test code: by path convention, or by the Rust
-    /// content sniff `apply_ranking_priors` uses, since inline tests live on
-    /// production paths.
+    /// Whether a symbol is test code: by path convention, or by the index-time
+    /// flag `apply_ranking_priors` uses, since inline tests live on production
+    /// paths.
     pub fn is_test_symbol(&self, symbol_id: i64, path: &str) -> Result<bool> {
         if crate::priors::is_test_path(path) {
             return Ok(true);
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT EXISTS(
-                 SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id
-                 WHERE c.symbol_id = ?1 AND f.lang = 'rust'
-                   AND (instr(c.content, '#[cfg(test)]') > 0
-                        OR instr(c.content, '#[test]') > 0))",
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE symbol_id = ?1 AND is_test = 1)",
         )?;
         Ok(stmt.query_row([symbol_id], |r| r.get(0))?)
     }
@@ -382,6 +404,7 @@ mod tests {
             }],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: 1,
                 end_line: 4,
@@ -425,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_cfg_test_sniff_demotes_inline_tests_on_a_production_path() {
+    fn flagged_test_chunk_ranks_below_an_identical_production_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         store
@@ -436,21 +459,23 @@ mod tests {
                 &one_fn_file("src.billing.charge", "frobnicate"),
             )
             .unwrap();
-        let mut sniffed = one_fn_file("src.orders.charge_twice", "frobnicate");
-        sniffed.chunks[0].content = format!("#[cfg(test)]\n{}", sniffed.chunks[0].content);
+        let mut flagged = one_fn_file("src.orders.tests.charge_twice", "frobnicate");
+        flagged.chunks[0].is_test = true;
         store
-            .replace_file("src/orders.rs", "rust", &[2u8; 32], &sniffed)
+            .replace_file("src/orders.rs", "rust", &[2u8; 32], &flagged)
             .unwrap();
 
         let (hits, _) = store
             .search_hybrid_scored("frobnicate", None, None, 10)
             .unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(
-            hits[0].path, "src/billing.rs",
-            "the #[cfg(test)]-sniffed chunk must rank below the clean one \
-             despite both living on production paths"
-        );
+        assert_eq!(hits[0].path, "src/billing.rs");
+        assert!(store
+            .is_test_symbol(hits[1].symbol_id.unwrap(), &hits[1].path)
+            .unwrap());
+        assert!(!store
+            .is_test_symbol(hits[0].symbol_id.unwrap(), &hits[0].path)
+            .unwrap());
     }
 
     #[test]
@@ -550,12 +575,14 @@ mod tests {
                 // Module-preamble chunk: owned by the module symbol, and
                 // tiny — an import line. Earns both penalties.
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "from frobnicate import frobnicate\n".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(1),
                     start_line: 10,
                     end_line: 14,
@@ -597,6 +624,7 @@ mod tests {
         };
         let mut symbols = vec![module];
         let mut chunks = vec![NewChunk {
+            is_test: false,
             symbol: Some(0),
             start_line: 1,
             end_line: 5,
@@ -614,6 +642,7 @@ mod tests {
                 arity: Some(0),
             });
             chunks.push(NewChunk {
+                is_test: false,
                 symbol: Some(i as usize + 1),
                 start_line: 10 + i * 5,
                 end_line: 12 + i * 5,
@@ -810,6 +839,86 @@ mod tests {
     }
 
     #[test]
+    fn keyword_search_matches_other_forms_of_a_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.py",
+                "python",
+                &[1u8; 32],
+                &one_fn_file("a.work", "validates retries"),
+            )
+            .unwrap();
+
+        for query in ["validating", "validation", "retry"] {
+            let hits = store.search_keyword(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn keyword_search_finds_the_words_inside_camel_case_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[1u8; 32],
+                &one_fn_file("a.work", "res.sendFile HTTPServer parseJSON"),
+            )
+            .unwrap();
+
+        for query in ["send", "sendFile", "http", "server", "json", "parsing"] {
+            let hits = store.search_keyword(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn removing_a_file_removes_its_split_words_from_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[1u8; 32],
+                &one_fn_file("a.work", "sendFile"),
+            )
+            .unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[2u8; 32],
+                &one_fn_file("a.work", "readStream"),
+            )
+            .unwrap();
+
+        assert!(store.search_keyword("send", 10).unwrap().is_empty());
+        assert_eq!(store.search_keyword("stream", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn identifier_parts_split_on_case_changes() {
+        for (text, parts) in [
+            ("sendFile", "send File "),
+            ("HTTPServer", "HTTP Server "),
+            ("parseJSON", "parse JSON "),
+            ("XMLHttpRequest", "XML Http Request "),
+            ("utf8Decode", "utf8 Decode "),
+            ("res.sendFile(aB)", "send File a B "),
+            ("sendFile sendFile", "send File send File "),
+            ("plain snake_case UPPER Title v2", ""),
+            ("überGroßÄnderung", "über Groß Änderung "),
+        ] {
+            assert_eq!(super::identifier_parts(text), parts, "{text}");
+        }
+    }
+
+    #[test]
     fn keyword_search_ranks_and_survives_weird_queries() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
@@ -827,6 +936,7 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 3,
@@ -834,6 +944,7 @@ mod tests {
                         .into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: None,
                     start_line: 5,
                     end_line: 6,
@@ -878,18 +989,21 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "keyword banana split".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 3,
                     end_line: 3,
                     content: "vector only content".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 5,
                     end_line: 5,
@@ -964,12 +1078,14 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "alpha near".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 3,
                     end_line: 3,
@@ -1050,12 +1166,14 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "banana one".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 2,
                     end_line: 2,

@@ -92,6 +92,8 @@ pub struct NewChunk {
     pub start_line: u32,
     pub end_line: u32,
     pub content: String,
+    /// Test code the path alone can't reveal, like Rust's inline tests.
+    pub is_test: bool,
 }
 
 #[derive(Debug, Clone, Default)]

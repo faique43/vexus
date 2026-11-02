@@ -303,6 +303,7 @@ mod tests {
             }],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: 12,
                 end_line: 20,

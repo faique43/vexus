@@ -48,6 +48,9 @@ CREATE TABLE chunks (
   content TEXT NOT NULL,
   content_hash BLOB NOT NULL,
   token_count INTEGER NOT NULL,
+  is_test INTEGER NOT NULL DEFAULT 0,
+  -- The words inside camelCase names, which the FTS tokenizer can't separate.
+  terms TEXT NOT NULL,
   -- 1 once this chunk's vector has been written to vec_chunks. Kept here,
   -- in an ordinary indexed column, rather than derived by anti-joining
   -- vec_chunks: vec0 is a virtual table, so `LEFT JOIN vec_chunks ... WHERE
@@ -59,13 +62,13 @@ CREATE TABLE chunks (
 CREATE INDEX idx_chunks_embedded ON chunks(embedded) WHERE embedded = 0;
 
 CREATE VIRTUAL TABLE fts_chunks USING fts5(
-  content, content='chunks', content_rowid='id'
+  content, terms, content='chunks', content_rowid='id', tokenize='porter unicode61'
 );
 
 CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
-  INSERT INTO fts_chunks(rowid, content) VALUES (new.id, new.content);
+  INSERT INTO fts_chunks(rowid, content, terms) VALUES (new.id, new.content, new.terms);
 END;
 CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
-  INSERT INTO fts_chunks(fts_chunks, rowid, content) VALUES ('delete', old.id, old.content);
+  INSERT INTO fts_chunks(fts_chunks, rowid, content, terms) VALUES ('delete', old.id, old.content, old.terms);
 END;
 
