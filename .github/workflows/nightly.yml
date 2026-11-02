@@ -38,7 +38,7 @@ jobs:
 
       # Advisory: a real-model regression should be visible in the run's
       # artifacts and summary, but a nightly is not a merge gate — the
-      # gating comparison is the mock ratchet in ci.yml.
+      # gating comparison is the keyword-only ratchet in ci.yml.
       - name: Compare against the real baseline (advisory)
         continue-on-error: true
         run: cargo run --release -p vexus-eval -- check --real

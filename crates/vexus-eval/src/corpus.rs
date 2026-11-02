@@ -109,12 +109,12 @@ impl CorpusAccum {
 
 /// Indexes `eval_root/corpora/{name}` into a fresh `tempfile::tempdir()`
 /// database (never in-place under `eval/` — no `.vexus` artifact is ever
-/// created there), embeds it with `embedder`, then scores every applicable
-/// `queries.yaml`/`edges.yaml` row for that corpus.
+/// created there), embeds it with `embedder` if there is one, then scores
+/// every applicable `queries.yaml`/`edges.yaml` row for that corpus.
 pub fn eval_corpus(
     eval_root: &Path,
     name: &str,
-    embedder: &Arc<dyn Embedder>,
+    embedder: Option<&Arc<dyn Embedder>>,
 ) -> Result<CorpusAccum> {
     let corpus_root = eval_root.join("corpora").join(name);
     ensure!(
@@ -157,11 +157,16 @@ pub fn eval_corpus(
     Ok(accum)
 }
 
-/// Builds a fresh, fully indexed + embedded `AppState` over `corpus_root`,
-/// backed by a brand-new temp-directory database — the exact same struct
-/// `vexus serve`'s tool handlers run against (see `vexus_mcp::state`), so
+/// Builds a fresh, fully indexed `AppState` over `corpus_root`, backed by a
+/// brand-new temp-directory database — the exact same struct `vexus serve`'s
+/// tool handlers run against (see `vexus_mcp::state`), so
 /// `explore_text`/`Store::search_hybrid`/`Store::callees_of` below are the
 /// real production code paths, not a reimplementation of them.
+///
+/// With no `embedder` nothing is embedded and every search runs keyword-only,
+/// which is what a machine without the model gets too. The mock embedder's
+/// vectors are hashes that know nothing about the text, so scoring through
+/// it only measures how much noise a full-weight RRF list adds.
 ///
 /// Returns the `tempfile::TempDir` guard alongside the `AppState`: the
 /// caller must keep it alive for as long as `AppState` is in use (see
@@ -170,7 +175,7 @@ pub fn eval_corpus(
 /// need to (re)create `-wal`/`-shm` companion files in.
 pub fn index_into_temp_state(
     corpus_root: &Path,
-    embedder: &Arc<dyn Embedder>,
+    embedder: Option<&Arc<dyn Embedder>>,
 ) -> Result<(AppState, tempfile::TempDir)> {
     let db_dir = tempfile::tempdir().context("tempdir for eval index")?;
     let mut store = Store::open(&db_dir.path().join("index.db"))
@@ -189,12 +194,14 @@ pub fn index_into_temp_state(
         corpus_root.display()
     );
 
-    store.set_model(embedder.id(), embedder.dim())?;
-    vexus_watch::pipeline::embed_pending(&mut store, embedder.as_ref())
-        .with_context(|| format!("embed corpus at {}", corpus_root.display()))?;
+    if let Some(embedder) = embedder {
+        store.set_model(embedder.id(), embedder.dim())?;
+        vexus_watch::pipeline::embed_pending(&mut store, embedder.as_ref())
+            .with_context(|| format!("embed corpus at {}", corpus_root.display()))?;
+    }
 
     let embedder_slot: OnceLock<Option<Arc<dyn Embedder>>> = OnceLock::new();
-    let _ = embedder_slot.set(Some(embedder.clone()));
+    let _ = embedder_slot.set(embedder.cloned());
     let state = AppState {
         store: Mutex::new(Some(store)),
         embedder: embedder_slot,
@@ -206,33 +213,35 @@ pub fn index_into_temp_state(
 }
 
 /// Scores one `tool: search` query: embeds `query.q` directly with
-/// `embedder` (skipping `vexus_mcp::tools::embed_query`'s model-mismatch
-/// guard — that guard exists for a long-lived server process where the
-/// active embedder might not match what's indexed; here we just called
-/// `store.set_model` with this exact embedder a moment ago, so there's
+/// `embedder`, if any (skipping `vexus_mcp::tools::embed_query`'s
+/// model-mismatch guard — that guard exists for a long-lived server process
+/// where the active embedder might not match what's indexed; here we just
+/// called `store.set_model` with this exact embedder a moment ago, so there's
 /// nothing for it to catch), then calls the same `Store::search_hybrid`
 /// `tools::search::search_text` calls internally, and folds the ranked
 /// qualname list into `accum` via `recall_at_k`/`reciprocal_rank`/
 /// `ndcg_at_10`.
 fn score_search_query(
     state: &AppState,
-    embedder: &Arc<dyn Embedder>,
+    embedder: Option<&Arc<dyn Embedder>>,
     query: &queries::Query,
     accum: &mut CorpusAccum,
 ) -> Result<()> {
-    let query_vec = embedder
-        .embed(&[query.q.as_str()])
-        .with_context(|| format!("embed query {:?}", query.q))?
-        .pop();
+    let query_vec = match embedder {
+        Some(embedder) => embedder
+            .embed(&[query.q.as_str()])
+            .with_context(|| format!("embed query {:?}", query.q))?
+            .pop(),
+        None => None,
+    };
 
     let hits = {
         let store = state
             .lock_store_fresh()
             .map_err(|msg| anyhow::anyhow!("{msg}"))?;
         // The embedder's own floor so the real-model eval exercises exactly
-        // what serving does; the mock embedder declares no floor, keeping
-        // the CI baseline untouched.
-        let floor = vexus_embed::effective_distance_floor(embedder.as_ref());
+        // what serving does.
+        let floor = embedder.and_then(|e| vexus_embed::effective_distance_floor(e.as_ref()));
         store
             .search_hybrid_scored(&query.q, query_vec.as_deref(), floor, SEARCH_FETCH_LIMIT)?
             .0
@@ -374,10 +383,6 @@ mod tests {
             .expect("eval/ must exist at the repo root")
     }
 
-    fn mock_embedder() -> Arc<dyn Embedder> {
-        Arc::new(vexus_embed::MockEmbedder)
-    }
-
     #[test]
     fn discover_corpora_finds_pyapp_and_polyglot() {
         let names = discover_corpora(&eval_root()).unwrap();
@@ -390,8 +395,8 @@ mod tests {
     }
 
     #[test]
-    fn eval_corpus_pyapp_produces_sane_nonzero_metrics_under_mock() {
-        let accum = eval_corpus(&eval_root(), "pyapp", &mock_embedder()).unwrap();
+    fn eval_corpus_pyapp_produces_sane_nonzero_metrics_keyword_only() {
+        let accum = eval_corpus(&eval_root(), "pyapp", None).unwrap();
         let m = accum.metrics();
 
         for (name, value) in [
@@ -410,8 +415,7 @@ mod tests {
         }
         // A hand-authored corpus this small, with an exact-substring search
         // query set, should not score a flat zero on the primary retrieval
-        // metrics under the mock embedder (keyword/FTS half of the hybrid
-        // fusion alone should find plenty) — a hard zero here would mean
+        // metrics from keyword search alone — a hard zero here would mean
         // something upstream (indexing, query loading, or the scoring glue
         // itself) is broken, not that retrieval quality is merely mediocre.
         assert!(m.recall_at_10 > 0.0, "{m:?}");
@@ -420,15 +424,28 @@ mod tests {
         assert_eq!(accum.edges.labeled, 57, "eval/edges/pyapp.yaml row count");
     }
 
+    /// The gate's whole point: with no embedder, nothing can reach the
+    /// ranking except what the index itself knows. A vector anywhere here
+    /// would put content-blind noise back into the fusion.
+    #[test]
+    fn a_blind_index_has_no_embedder_and_no_vectors() {
+        let (state, _db_dir) =
+            index_into_temp_state(&eval_root().join("corpora/pyapp"), None).unwrap();
+        assert!(state.embedder().is_none());
+        let store = state.lock_store_fresh().unwrap();
+        assert!(store.counts().unwrap().chunks > 0);
+        assert_eq!(store.embedded_count().unwrap(), 0);
+    }
+
     #[test]
     fn eval_corpus_unknown_name_errors() {
-        let err = eval_corpus(&eval_root(), "does-not-exist", &mock_embedder()).unwrap_err();
+        let err = eval_corpus(&eval_root(), "does-not-exist", None).unwrap_err();
         assert!(format!("{err:#}").contains("no such corpus"));
     }
 
     #[test]
     fn eval_corpus_never_leaves_a_vexus_dir_under_eval() {
-        let _ = eval_corpus(&eval_root(), "pyapp", &mock_embedder()).unwrap();
+        let _ = eval_corpus(&eval_root(), "pyapp", None).unwrap();
         let vexus_dir = eval_root().join("corpora/pyapp/.vexus");
         assert!(
             !vexus_dir.exists(),

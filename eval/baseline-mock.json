@@ -1,36 +1,36 @@
 {
-  "mode": "mock",
+  "mode": "keyword",
   "per_corpus": {
     "polyglot": {
-      "recall@5": 0.2286,
-      "recall@10": 0.5857,
-      "mrr": 0.1786,
-      "ndcg@10": 0.166,
+      "recall@5": 0.7714,
+      "recall@10": 0.8857,
+      "mrr": 0.6745,
+      "ndcg@10": 0.5707,
       "clean@5": 1.0,
-      "answer_in_bundle": 0.4706,
+      "answer_in_bundle": 0.8824,
       "bundle_clean": 1.0,
       "edge_precision": 0.918,
       "edge_recall": 0.9333
     },
     "pyapp": {
-      "recall@5": 0.425,
-      "recall@10": 0.5167,
-      "mrr": 0.293,
-      "ndcg@10": 0.438,
+      "recall@5": 0.7917,
+      "recall@10": 0.7917,
+      "mrr": 0.6542,
+      "ndcg@10": 0.5753,
       "clean@5": 1.0,
-      "answer_in_bundle": 0.8333,
+      "answer_in_bundle": 1.0,
       "bundle_clean": 1.0,
       "edge_precision": 0.9,
       "edge_recall": 0.9474
     }
   },
   "overall": {
-    "recall@5": 0.3,
-    "recall@10": 0.5606,
-    "mrr": 0.2202,
-    "ndcg@10": 0.2164,
+    "recall@5": 0.7788,
+    "recall@10": 0.8515,
+    "mrr": 0.6671,
+    "ndcg@10": 0.5715,
     "clean@5": 1.0,
-    "answer_in_bundle": 0.6207,
+    "answer_in_bundle": 0.931,
     "bundle_clean": 1.0,
     "edge_precision": 0.9091,
     "edge_recall": 0.9402

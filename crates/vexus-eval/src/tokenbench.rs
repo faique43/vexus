@@ -166,7 +166,7 @@ pub fn run(eval_root: &Path, embedder: Arc<dyn Embedder>, real: bool) -> Result<
     for corpus in corpora {
         let corpus_root = eval_root.join("corpora").join(corpus);
         eprintln!("vexus-eval: token-bench indexing corpus {corpus}...");
-        let (state, _db_dir) = index_into_temp_state(&corpus_root, &embedder)?;
+        let (state, _db_dir) = index_into_temp_state(&corpus_root, Some(&embedder))?;
         let files = corpus_files(&corpus_root)?;
 
         for task in tasks.iter().filter(|t| t.corpus == corpus) {
@@ -248,7 +248,7 @@ pub fn run_scaling(embedder: Arc<dyn Embedder>) -> Result<Vec<ScalingPoint>> {
                 },
             )?;
 
-        let (state, _db_dir) = index_into_temp_state(dir.path(), &embedder)?;
+        let (state, _db_dir) = index_into_temp_state(dir.path(), Some(&embedder))?;
         let vexus_tokens = estimate_tokens(&explore_text(
             &state,
             "what do the helper functions in this codebase do",

@@ -5,6 +5,10 @@
 //! `answer_in_bundle`/`edge_precision`/`edge_recall` (see `metrics.rs` for
 //! the exact formulas and `corpus.rs` for how each is fed), prints a table,
 //! and writes `eval/last-run.json`.
+//!
+//! Two modes: keyword-only by default (no vectors at all, so the numbers come
+//! from the index's own structure and text), and `--real`, which adds the
+//! ONNX model. CI's ratchet is the keyword-only one.
 
 mod corpus;
 mod metrics;
@@ -36,9 +40,9 @@ enum Cmd {
     /// Index each corpus, run every applicable query, compute metrics, print
     /// a table, and write eval/last-run.json.
     Run {
-        /// Use the real ONNX embedder (requires a model already downloaded
+        /// Add the real ONNX embedder (requires a model already downloaded
         /// under ~/.vexus/models — run `vexus index` once against any repo
-        /// first to fetch it) instead of the deterministic mock embedder.
+        /// first to fetch it) instead of scoring keyword-only.
         #[arg(long)]
         real: bool,
         /// Only evaluate this one corpus (a directory name under
@@ -51,8 +55,8 @@ enum Cmd {
     /// exit 1 if any metric dropped more than 0.02 absolute against it.
     Check {
         /// Compare a --real run against eval/baseline-real.json instead of
-        /// the mock run against eval/baseline-mock.json. Never used by CI
-        /// (real requires a downloaded model) — for local/nightly
+        /// the keyword-only run against eval/baseline-mock.json. Never used
+        /// by CI (real requires a downloaded model) — for local/nightly
         /// pre-release checks only.
         #[arg(long)]
         real: bool,
@@ -60,7 +64,7 @@ enum Cmd {
     /// Overwrite the committed baseline with a fresh run's metrics.
     Bless {
         /// Bless eval/baseline-real.json from a --real run instead of
-        /// eval/baseline-mock.json from a mock run.
+        /// eval/baseline-mock.json from a keyword-only run.
         #[arg(long)]
         real: bool,
     },
@@ -116,22 +120,36 @@ fn eval_root() -> Result<PathBuf> {
         .context("eval/ must exist at the repo root")
 }
 
-/// The pure computation behind `run`: build the embedder, evaluate every
-/// named corpus, and pool into a [`Report`] — no printing, no JSON file
-/// write. Split out from `run` so the determinism test below can call this
-/// twice and diff the result without ever touching `eval/last-run.json`.
-fn compute_report(embedder: Arc<dyn Embedder>, root: &Path, names: &[String]) -> Result<Report> {
-    ensure!(!names.is_empty(), "no corpora to evaluate");
-    let mode = if embedder.id() == vexus_embed::MockEmbedder.id() {
-        "mock"
+/// The real model for `--real`, otherwise nothing: retrieval then runs
+/// keyword-only, the way it does on a machine without the model.
+fn scoring_embedder(real: bool) -> Result<Option<Arc<dyn Embedder>>> {
+    if real {
+        corpus::build_real_embedder().map(Some)
     } else {
+        Ok(None)
+    }
+}
+
+/// The pure computation behind `run`: evaluate every named corpus and pool
+/// into a [`Report`] — no printing, no JSON file write. Split out from `run`
+/// so the determinism test below can call this twice and diff the result
+/// without ever touching `eval/last-run.json`.
+fn compute_report(
+    embedder: Option<Arc<dyn Embedder>>,
+    root: &Path,
+    names: &[String],
+) -> Result<Report> {
+    ensure!(!names.is_empty(), "no corpora to evaluate");
+    let mode = if embedder.is_some() {
         "real"
+    } else {
+        "keyword"
     };
 
     let mut per_corpus_accum: BTreeMap<String, corpus::CorpusAccum> = BTreeMap::new();
     for name in names {
         eprintln!("vexus-eval: indexing + scoring corpus {name}...");
-        let accum = corpus::eval_corpus(root, name, &embedder)?;
+        let accum = corpus::eval_corpus(root, name, embedder.as_ref())?;
         per_corpus_accum.insert(name.clone(), accum);
     }
 
@@ -175,11 +193,7 @@ fn print_metric_set(label: &str, m: &metrics::MetricSet) {
 }
 
 fn run(real: bool, only_corpus: Option<String>) -> Result<()> {
-    let embedder: Arc<dyn Embedder> = if real {
-        corpus::build_real_embedder()?
-    } else {
-        Arc::new(vexus_embed::MockEmbedder)
-    };
+    let embedder = scoring_embedder(real)?;
 
     let root = eval_root()?;
     let names = match only_corpus {
@@ -330,18 +344,27 @@ fn load_baseline(path: &Path, real: bool) -> Result<Report> {
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
+/// Numbers from two modes differ by far more than any regression threshold,
+/// so comparing them would only ever report nonsense.
+fn ensure_same_mode(baseline: &Report, current: &Report) -> Result<()> {
+    ensure!(
+        baseline.mode == current.mode,
+        "baseline is from a {} run but this is a {} run — `bless` it deliberately before comparing",
+        baseline.mode,
+        current.mode
+    );
+    Ok(())
+}
+
 fn check(real: bool) -> Result<()> {
     let root = eval_root()?;
-    let embedder: Arc<dyn Embedder> = if real {
-        corpus::build_real_embedder()?
-    } else {
-        Arc::new(vexus_embed::MockEmbedder)
-    };
+    let embedder = scoring_embedder(real)?;
     let names = corpus::discover_corpora(&root)?;
     let current = compute_report(embedder, &root, &names)?;
 
     let baseline_file = baseline_path(&root, real);
     let baseline = load_baseline(&baseline_file, real)?;
+    ensure_same_mode(&baseline, &current)?;
 
     let (regressions, improvements) = diff_reports(&baseline, &current);
 
@@ -386,11 +409,7 @@ fn check(real: bool) -> Result<()> {
 
 fn bless(real: bool) -> Result<()> {
     let root = eval_root()?;
-    let embedder: Arc<dyn Embedder> = if real {
-        corpus::build_real_embedder()?
-    } else {
-        Arc::new(vexus_embed::MockEmbedder)
-    };
+    let embedder = scoring_embedder(real)?;
     let names = corpus::discover_corpora(&root)?;
     let report = compute_report(embedder, &root, &names)?;
     print_table(&report);
@@ -461,16 +480,12 @@ fn token_bench(real: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn mock_embedder() -> Arc<dyn Embedder> {
-        Arc::new(vexus_embed::MockEmbedder)
-    }
-
-    /// The binding determinism requirement: running the whole mock-mode
+    /// The binding determinism requirement: running the whole keyword-only
     /// pipeline twice, in-process, over every real corpus must produce
     /// byte-identical JSON — no reliance on wall-clock time, random seeds,
     /// or HashMap iteration order leaking into the result.
     #[test]
-    fn mock_mode_report_is_identical_across_two_independent_runs() {
+    fn keyword_mode_report_is_identical_across_two_independent_runs() {
         let root = eval_root().unwrap();
         let names = corpus::discover_corpora(&root).unwrap();
         assert!(
@@ -478,27 +493,27 @@ mod tests {
             "expected >= 2 real corpora, got {names:?}"
         );
 
-        let first = compute_report(mock_embedder(), &root, &names).unwrap();
-        let second = compute_report(mock_embedder(), &root, &names).unwrap();
+        let first = compute_report(None, &root, &names).unwrap();
+        let second = compute_report(None, &root, &names).unwrap();
 
         let first_json = serde_json::to_string_pretty(&first).unwrap();
         let second_json = serde_json::to_string_pretty(&second).unwrap();
         assert_eq!(
             first_json, second_json,
-            "mock-mode metrics must be identical across independent runs"
+            "keyword-mode metrics must be identical across independent runs"
         );
 
         // A quick sanity check on the shape itself, so a future regression
         // that made every metric trivially 0 (e.g. an empty query set) would
         // still fail this test even though "0 == 0" is technically stable.
-        assert_eq!(first.mode, "mock");
+        assert_eq!(first.mode, "keyword");
         assert!(first.overall.recall_at_10 > 0.0, "{:?}", first.overall);
     }
 
     #[test]
     fn compute_report_errors_on_an_empty_corpus_list() {
         let root = eval_root().unwrap();
-        let err = compute_report(mock_embedder(), &root, &[]).unwrap_err();
+        let err = compute_report(None, &root, &[]).unwrap_err();
         assert!(format!("{err:#}").contains("no corpora"));
     }
 
@@ -638,6 +653,17 @@ mod tests {
         let (regressions, improvements) = diff_reports(&baseline, &current);
         assert!(regressions.is_empty(), "{regressions:?}");
         assert!(improvements.is_empty(), "{improvements:?}");
+    }
+
+    #[test]
+    fn a_baseline_from_another_mode_is_refused_rather_than_compared() {
+        let mut stale = report_with(&[("pyapp", metric_set(0.3))], metric_set(0.3));
+        stale.mode = "mock".to_string();
+        let mut current = report_with(&[("pyapp", metric_set(0.8))], metric_set(0.8));
+        current.mode = "keyword".to_string();
+
+        let err = ensure_same_mode(&stale, &current).unwrap_err();
+        assert!(format!("{err:#}").contains("bless"), "{err:#}");
     }
 
     #[test]
