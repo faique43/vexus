@@ -271,10 +271,10 @@ in CI, and any metric dropping more than 0.02 fails the build.
 
 | | Real model | Keyword only |
 | --- | ---: | ---: |
-| recall@5 | 0.95 | 0.92 |
+| recall@5 | 0.95 | 0.93 |
 | recall@10 | 0.98 | 0.96 |
-| MRR | 0.78 | 0.74 |
-| `explore` map holds the answer | 1.00 | 0.93 |
+| MRR | 0.78 | 0.75 |
+| `explore` map holds the answer | 1.00 | 0.94 |
 | call-edge precision / recall | 0.91 / 0.94 | 0.91 / 0.94 |
 
 ### Speed
