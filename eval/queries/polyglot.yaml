@@ -464,3 +464,89 @@
 - q: "unit tests for duplicate order submission"
   expect:
     - frontend.src.api.orders.test.placeOrderRejectsADuplicateSubmission
+
+# --- pending: struct fields, enum variants, interface members -----------
+#
+# See the matching section of pyapp.yaml. `pending: true` keeps a row out of
+# every gated metric until the indexer change lands (see eval/README.md).
+
+# struct fields
+- q: "percent_off"
+  pending: true
+  expect:
+    - service.src.services.pricing.PercentageDiscount
+
+- q: "amount_off_cents field"
+  pending: true
+  expect:
+    - service.src.services.pricing.FlatDiscount
+
+- q: "which record stores total_cents"
+  pending: true
+  expect:
+    - service.src.models.order.Order
+
+- q: "Sku and Count fields"
+  pending: true
+  expect:
+    - worker.inventory.StockLine
+
+- q: "percent_off"
+  tool: explore
+  pending: true
+  expect:
+    - service.src.services.pricing.PercentageDiscount
+
+# enum variants
+- q: "OutForDelivery"
+  pending: true
+  expect:
+    - service.src.models.shipment_status.ShipmentStatus
+
+- q: "ReturnedToSender"
+  pending: true
+  expect:
+    - service.src.models.shipment_status.ShipmentStatus
+
+- q: "QUOTA_EXCEEDED"
+  pending: true
+  expect:
+    - android.SyncState.SyncState
+
+- q: "state after UPLOADING_RECEIPTS while WAITING_FOR_WIFI"
+  pending: true
+  expect:
+    - android.SyncState.SyncState
+
+- q: "OutForDelivery"
+  tool: explore
+  pending: true
+  expect:
+    - service.src.models.shipment_status.ShipmentStatus
+
+# interface members
+- q: "requestTimeoutMs"
+  pending: true
+  expect:
+    - frontend.src.config.AppConfig
+
+- q: "placedAt and itemCount"
+  pending: true
+  expect:
+    - frontend.src.views.order_summary.OrderSummaryData
+
+- q: "voidAuthorization"
+  pending: true
+  expect:
+    - frontend.src.api.payment_gateway.PaymentGateway
+
+- q: "CancelPickup"
+  pending: true
+  expect:
+    - worker.carrier.Carrier
+
+- q: "voidAuthorization"
+  tool: explore
+  pending: true
+  expect:
+    - frontend.src.api.payment_gateway.PaymentGateway

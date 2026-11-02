@@ -34,6 +34,11 @@ pub struct Query {
     pub expect_not: Vec<String>,
     #[serde(default)]
     pub graded: HashMap<String, u8>,
+    /// Waiting on a known fix: scored and reported, but kept out of every
+    /// gated metric, so a query can record a miss before the code can pass it.
+    /// Once it passes, delete the flag and bless.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 /// One `eval/edges/{repo}.yaml` row — just the two qualnames the runner
@@ -92,5 +97,6 @@ mod tests {
         let yaml = "- q: \"where is X\"\n  expect: [a.b]\n";
         let queries: Vec<Query> = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(queries[0].tool, "search");
+        assert!(!queries[0].pending);
     }
 }

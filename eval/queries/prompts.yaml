@@ -1,0 +1,246 @@
+# Real-prompt set: change requests and bug reports for eval/corpora, written the
+# way agents receive them. Short, vague, sometimes a pasted trace, and mostly
+# without the code's own words. The hand-written queries beside this file read
+# like search queries. These don't, which is the point.
+#
+# Schema:
+#   corpus  - a directory under eval/corpora/
+#   kind    - change | bug
+#   prompt  - the raw text
+#   files   - paths the work belongs in; any one in the top results counts
+#
+# `vexus-eval prompts` scores these through Store::locate, the code behind the
+# prompt hook. It's an advisory report and never gates anything.
+
+- corpus: pyapp
+  kind: bug
+  prompt: "customers keep getting told to try later after a handful of bad passwords. support wants them to get 10 goes instead of 5"
+  files:
+    - services/auth_service.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "someone got refunded more than they originally paid, how is that even possible"
+  files:
+    - services/invoice_service.py
+
+- corpus: pyapp
+  kind: change
+  prompt: "a declined card shouldn't be tried three times, only timeouts should go round again"
+  files:
+    - services/billing_service.py
+    - utils/retry.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "john@example.com. with the dot on the end gets through signup and then every mail bounces"
+  files:
+    - utils/validation.py
+
+- corpus: pyapp
+  kind: change
+  prompt: "lists always come back 20 at a time, let callers ask for 50"
+  files:
+    - utils/pagination.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "people get the due soon mail every single day, it should only go out once"
+  files:
+    - jobs/invoice_reminders.py
+
+- corpus: pyapp
+  kind: change
+  prompt: "one declined card in the nightly sweep kills the subscription straight away, we want a three day grace period"
+  files:
+    - jobs/subscription_renewals.py
+    - services/subscription_service.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "nobody hears about it when stripe sends charge.succeeded, only failures do anything"
+  files:
+    - handlers/webhooks.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "after I log out my old token still works against the api"
+  files:
+    - services/auth_service.py
+    - handlers/auth.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "names are saved with double spaces, tidy them up on profile edit too"
+  files:
+    - utils/strings.py
+    - services/user_service.py
+
+- corpus: pyapp
+  kind: change
+  prompt: "add total refunded to the usage report"
+  files:
+    - services/report_service.py
+    - models/report.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: |
+    Under load we run out of database connections after a few minutes.
+
+    ```
+    File "app.py", line 52, in main
+    RuntimeError: no free connections
+    ```
+
+    Expected: connections go back when a request finishes.
+  files:
+    - db.py
+
+- corpus: pyapp
+  kind: change
+  prompt: |
+    ## Summary
+    Abandoned sessions pile up because the job only handles the ids it's handed.
+
+    ## Proposal
+    Have it work out which ones are abandoned on its own, and leave alone anything
+    touched in the last hour.
+  files:
+    - jobs/cleanup.py
+
+- corpus: pyapp
+  kind: change
+  prompt: "text customers as well as emailing them when a bill goes out"
+  files:
+    - services/notification_service.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "the waits between attempts are way too short, the first one should be half a second"
+  files:
+    - utils/retry.py
+
+- corpus: pyapp
+  kind: bug
+  prompt: "running `close` twice on a period double charges, make it safe to repeat"
+  files:
+    - services/billing_service.py
+
+- corpus: polyglot
+  kind: bug
+  prompt: "double click on the order button still sends two orders now and then"
+  files:
+    - frontend/src/utils/idempotency.ts
+    - frontend/src/api/orders.ts
+
+- corpus: polyglot
+  kind: change
+  prompt: "app bar counter stops at 99, product wants it to say 99+"
+  files:
+    - flutter/cart_badge.dart
+
+- corpus: polyglot
+  kind: change
+  prompt: "old storefront codes are always 10 percent off, let SAVE20 mean 20 percent"
+  files:
+    - legacy/coupons.php
+
+- corpus: polyglot
+  kind: bug
+  prompt: "till prints $12.5 instead of $12.50"
+  files:
+    - pos/receipt.cpp
+
+- corpus: polyglot
+  kind: change
+  prompt: "the ops channel message about running low should say how many to order"
+  files:
+    - worker/inventory.go
+
+- corpus: polyglot
+  kind: bug
+  prompt: "conversion shows 100% for a funnel with no steps at all"
+  files:
+    - analytics/Funnel.scala
+
+- corpus: polyglot
+  kind: change
+  prompt: "that helper in the rust service still only tries once, do the jitter thing the TODO talks about"
+  files:
+    - service/src/utils/retry.rs
+
+- corpus: polyglot
+  kind: bug
+  prompt: "the processor callback takes any non empty token, it has to check the real signature"
+  files:
+    - service/src/handlers/webhooks.rs
+    - service/src/services/auth.rs
+
+- corpus: polyglot
+  kind: change
+  prompt: "only keep the last 14 dumps, the disk keeps filling up"
+  files:
+    - ops/backup.sh
+
+- corpus: polyglot
+  kind: change
+  prompt: "raise the gold threshold on the kiosk to 750"
+  files:
+    - gamescripts/loyalty.lua
+
+- corpus: polyglot
+  kind: change
+  prompt: "support wants anything up to 45 days old to go through without review"
+  files:
+    - backoffice/RefundPolicy.cs
+
+- corpus: polyglot
+  kind: bug
+  prompt: "search box hits the api on every keystroke"
+  files:
+    - frontend/src/utils/rate_limit.ts
+
+- corpus: polyglot
+  kind: change
+  prompt: "add slack as somewhere order updates can go"
+  files:
+    - notifier/dispatcher.ex
+    - service/src/services/notifications.rs
+
+- corpus: polyglot
+  kind: bug
+  prompt: "customer A can cancel customer B's order through the api"
+  files:
+    - service/src/services/order_service.rs
+    - service/src/handlers/orders.rs
+
+- corpus: polyglot
+  kind: bug
+  prompt: "POS bridge rejects big payloads, says the sum doesn't match"
+  files:
+    - native/checksum.c
+
+- corpus: polyglot
+  kind: bug
+  prompt: "android detail screen jumps back to packed when events arrive out of order"
+  files:
+    - android/OrderTracker.java
+
+- corpus: polyglot
+  kind: change
+  prompt: "mobile needs a review step between payment and confirm"
+  files:
+    - mobile/CheckoutFlow.kt
+
+- corpus: polyglot
+  kind: bug
+  prompt: |
+    The summary line shows the raw ISO date:
+
+    Order 123 (2026-01-05T10:00:00Z): 2 item(s), $10.00
+
+    Should read Jan 5, 2026.
+  files:
+    - frontend/src/views/order_summary.ts
+    - frontend/src/utils/format.ts

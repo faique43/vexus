@@ -11,7 +11,7 @@ pub trait Embedder: Send + Sync {
     /// A property of the embedder, not of retrieval: the distance
     /// distribution is model-specific, and the mock embedder's hash vectors
     /// have no meaningful notion of "near" at all — so it stays `None`
-    /// there, which also keeps the mock-mode eval baseline untouched.
+    /// there.
     fn distance_floor(&self) -> Option<f64> {
         None
     }

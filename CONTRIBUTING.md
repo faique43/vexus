@@ -46,8 +46,8 @@ Clippy runs with `-D warnings`, so a warning fails the build.
 ## The eval gate
 
 `vexus-eval check` scores retrieval against hand-authored fixture corpora in
-[`eval/`](eval/) and compares the result to a committed baseline. **Any of the
-seven metrics dropping more than 0.02 absolute fails the build.** This is
+[`eval/`](eval/), keyword-only, and compares the result to a committed baseline.
+**Any metric dropping more than 0.02 absolute fails the build.** This is
 deliberate: retrieval quality is easy to regress silently, and a passing test
 suite says nothing about whether search still finds the right code.
 
@@ -55,8 +55,8 @@ If your change moves a metric legitimately, say so in the PR and explain why.
 Re-blessing the baseline is a reviewable decision, not a formality:
 
 ```sh
-cargo run --release -p vexus-eval -- run        # writes eval/last-run.json
-# then copy it over eval/baseline-mock.json, and justify it in the PR
+cargo run --release -p vexus-eval -- bless      # rewrites eval/baseline-mock.json
+# then justify it in the PR
 ```
 
 If you add fixture code or queries, `eval_corpora_validation.rs` enforces that

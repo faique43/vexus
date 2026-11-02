@@ -12,8 +12,9 @@ gated** measurement instead of only ad-hoc manual spot-checks.
 eval/
   corpora/{pyapp,polyglot}/   hand-authored fixture repos (never real vendored code)
   queries/{pyapp,polyglot}.yaml   >=25 graded/ungraded queries per corpus
+  queries/prompts.yaml        change requests and bug reports as agents receive them
   edges/{pyapp,polyglot}.yaml     >=40 labeled caller/callee pairs per corpus
-  baseline-mock.json          committed ratchet baseline (mock embedder)
+  baseline-mock.json          committed ratchet baseline (keyword-only; the name predates that)
   baseline-real.json          local/nightly baseline (real ONNX embedder) — not committed by CI
   last-run.json                the most recent `run`'s output (gitignored — regeneratable, not ground truth)
 ```
@@ -67,26 +68,86 @@ cargo run -p vexus-eval -- bless [--real]
 
 ### The ratchet gate
 
-`check` (no flags) always uses the deterministic **mock** embedder and
+`check` (no flags) runs **keyword-only**, with no embedder and no vectors, and
 compares against the committed `eval/baseline-mock.json`. This is what CI's
-`eval-gate` job runs on every PR (`VEXUS_EMBEDDER=mock`) — mock mode has
-zero semantic signal, so it's a pure regression detector for the
-*structural* pipeline (chunking, keyword/FTS ranking, RRF fusion, call-graph
-resolution), not a measure of real search quality.
+`eval-gate` job runs on every PR. It measures the *structural* pipeline
+(chunking, keyword/FTS ranking, priors, explore's map, call-graph resolution)
+exactly as a machine without the model would get it. It says nothing about
+semantic search; that's what `--real` is for.
 
-Rule: **any** of the 7 metrics
-(`recall@5`, `recall@10`, `mrr`, `ndcg@10`, `answer_in_bundle`,
-`edge_precision`, `edge_recall`), in any corpus or in the pooled "overall"
-row, dropping by **more than 0.02 absolute** against the baseline fails the
-gate (`exit 1`, every regressed metric named with its before/after values).
+The gate used to run the mock embedder, whose vectors are hashes of the text.
+They carry no meaning but took full RRF weight, so half of every fused list was
+noise: on the same corpora recall@5 was 0.30 through the mock against 0.78
+without it, and a change could pass or fail on how hashes happened to fall.
+That is why the committed numbers jumped when the gate moved to keyword-only.
+Nothing got better; the gate stopped measuring noise.
+
+Rule: **any** of the 10 metrics
+(`recall@5`, `recall@10`, `mrr`, `ndcg@10`, `clean@5`, `answer_in_bundle`,
+`map_ndcg@10`, `bundle_clean`, `edge_precision`, `edge_recall`), in any corpus
+or in the pooled "overall" row, dropping by **more than 0.02 absolute** against
+the baseline fails the gate (`exit 1`, every regressed metric named with its
+before/after values). A baseline from a different mode is refused rather than
+compared.
+
+`answer_in_bundle` only asks whether the answer is on `explore`'s map, so it
+passes row 40 as readily as row 1 and can only rise as a map grows.
+`map_ndcg@10` grades the rendered row order instead: `graded` qualnames gain
+their grade, other `expect` qualnames gain 1, and rows past the tenth score
+nothing. A metric missing from a baseline reads as 0.0 and shows up as an
+improvement on every `check`, so `map_ndcg@10` can't fail the gate until the
+next deliberate `bless` records it.
 Improvements are printed too, but never fail the gate. A missing baseline
 file fails with a message telling you to run `bless` first (and to commit
 the result) rather than a generic file-not-found error.
 
+### The Medium tier: `polyglot@medium`
+
+The fixtures are Tiny, so on their own they never reach the 2000-chunk boundary
+real repositories cross, and `explore`'s Medium parameters would go unscored.
+`polyglot@medium` runs polyglot's labelled queries and edges again with 420
+generated filler files around them (`crates/vexus-eval/src/padding.rs`). The
+filler reuses the fixtures' domain words, because a haystack nothing matches
+would only change the tier. It's built in a tempdir, adds a second or two to a
+release run, and fails loudly if it ever lands in another tier.
+
+It's reported as its own scope and stays out of "overall", which already counts
+these queries once. Neither baseline records it yet, so `check` prints it as
+scored but not gated until the next deliberate `bless`.
+
+### Pending queries
+
+A row with `pending: true` records a miss the code can't pass yet. It's scored
+through the same code as any other row and printed by `run` and `check`, but it
+stays out of every gated metric and out of `diff_reports`, so it can't fail the
+gate and doesn't dilute the numbers around it. To graduate a row, delete the
+flag and `bless`.
+
+The rows at the bottom of `queries/{pyapp,polyglot}.yaml` are the current set:
+struct fields, enum variants and interface members, which no chunk holds today
+because a container's chunk is its signature and its children's signatures. All
+24 score 0 keyword-only, which is the state they exist to record. `expect` names
+the container, the symbol a member's text would land on. On the real model a few
+pass on the container's name and doc comment alone, so read the keyword numbers.
+
+### Real prompts: `prompts`
+
+```bash
+cargo run -p vexus-eval -- prompts [--real]
+```
+
+`queries/prompts.yaml` holds change requests and vague bug reports for the
+fixture corpora, and each one names the files the work belongs in. This runs
+them through `Store::locate`, the code behind the prompt hook, with the hook's
+own limits, and prints how often one of those files lands in the top 1, 3 and 5
+distinct files, plus every miss. It's advisory: there's no baseline, and CI only
+prints it. Read it with the size of the fixtures in mind, since on a few dozen
+files the top 5 is a good share of the repository.
+
 ### Pre-release: `--real --check`
 
-The mock gate never touches a downloaded model and never runs against real
-semantic search — by design, so PR CI stays fast and hermetic. Before
+The keyword-only gate never touches a downloaded model and never runs against
+real semantic search — by design, so PR CI stays fast and hermetic. Before
 cutting a release (or any time you want to check real embedding quality
 hasn't regressed), run the real-embedder equivalent locally:
 

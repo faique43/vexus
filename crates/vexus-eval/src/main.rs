@@ -2,13 +2,19 @@
 //! corpora under `eval/`. Indexes each corpus into a fresh
 //! temp-directory index, runs every applicable query through the same code
 //! paths the MCP tools use, computes `recall@5`/`recall@10`/`mrr`/`ndcg@10`/
-//! `answer_in_bundle`/`edge_precision`/`edge_recall` (see `metrics.rs` for
-//! the exact formulas and `corpus.rs` for how each is fed), prints a table,
-//! and writes `eval/last-run.json`.
+//! `answer_in_bundle`/`map_ndcg@10`/`edge_precision`/`edge_recall` (see
+//! `metrics.rs` for the exact formulas and `corpus.rs` for how each is fed),
+//! prints a table, and writes `eval/last-run.json`.
+//!
+//! Two modes: keyword-only by default (no vectors at all, so the numbers come
+//! from the index's own structure and text), and `--real`, which adds the
+//! ONNX model. CI's ratchet is the keyword-only one.
 
 mod corpus;
 mod metrics;
+mod padding;
 mod perf;
+mod prompts;
 mod queries;
 mod tokenbench;
 
@@ -36,9 +42,9 @@ enum Cmd {
     /// Index each corpus, run every applicable query, compute metrics, print
     /// a table, and write eval/last-run.json.
     Run {
-        /// Use the real ONNX embedder (requires a model already downloaded
+        /// Add the real ONNX embedder (requires a model already downloaded
         /// under ~/.vexus/models — run `vexus index` once against any repo
-        /// first to fetch it) instead of the deterministic mock embedder.
+        /// first to fetch it) instead of scoring keyword-only.
         #[arg(long)]
         real: bool,
         /// Only evaluate this one corpus (a directory name under
@@ -51,8 +57,8 @@ enum Cmd {
     /// exit 1 if any metric dropped more than 0.02 absolute against it.
     Check {
         /// Compare a --real run against eval/baseline-real.json instead of
-        /// the mock run against eval/baseline-mock.json. Never used by CI
-        /// (real requires a downloaded model) — for local/nightly
+        /// the keyword-only run against eval/baseline-mock.json. Never used
+        /// by CI (real requires a downloaded model) — for local/nightly
         /// pre-release checks only.
         #[arg(long)]
         real: bool,
@@ -60,7 +66,7 @@ enum Cmd {
     /// Overwrite the committed baseline with a fresh run's metrics.
     Bless {
         /// Bless eval/baseline-real.json from a --real run instead of
-        /// eval/baseline-mock.json from a mock run.
+        /// eval/baseline-mock.json from a keyword-only run.
         #[arg(long)]
         real: bool,
     },
@@ -77,6 +83,14 @@ enum Cmd {
         /// mock never embeds anything, so a default run's embed/search
         /// numbers describe a pipeline with the model taken out — use
         /// this for any figure quoted as vexus's performance.
+        #[arg(long)]
+        real: bool,
+    },
+    /// Run the real-prompt set (eval/queries/prompts.yaml) through
+    /// `Store::locate` and print how often the right file is near the top.
+    /// Advisory: there's no baseline and it never exits 1 on a score.
+    Prompts {
+        /// Add the real ONNX embedder instead of running keyword-only.
         #[arg(long)]
         real: bool,
     },
@@ -102,6 +116,10 @@ struct Report {
     mode: String,
     per_corpus: BTreeMap<String, metrics::MetricSet>,
     overall: metrics::MetricSet,
+    /// `pending: true` queries per corpus, plus "overall". `diff_reports`
+    /// never reads this, which is what keeps them from failing the gate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pending: BTreeMap<String, metrics::PendingSet>,
 }
 
 /// `crates/vexus-eval` -> repo root's `eval/` — resolved from the crate's
@@ -116,40 +134,83 @@ fn eval_root() -> Result<PathBuf> {
         .context("eval/ must exist at the repo root")
 }
 
-/// The pure computation behind `run`: build the embedder, evaluate every
-/// named corpus, and pool into a [`Report`] — no printing, no JSON file
-/// write. Split out from `run` so the determinism test below can call this
-/// twice and diff the result without ever touching `eval/last-run.json`.
-fn compute_report(embedder: Arc<dyn Embedder>, root: &Path, names: &[String]) -> Result<Report> {
-    ensure!(!names.is_empty(), "no corpora to evaluate");
-    let mode = if embedder.id() == vexus_embed::MockEmbedder.id() {
-        "mock"
+/// The real model for `--real`, otherwise nothing: retrieval then runs
+/// keyword-only, the way it does on a machine without the model.
+fn scoring_embedder(real: bool) -> Result<Option<Arc<dyn Embedder>>> {
+    if real {
+        corpus::build_real_embedder().map(Some)
     } else {
+        Ok(None)
+    }
+}
+
+/// The pure computation behind `run`: evaluate every named corpus and pool
+/// into a [`Report`] — no printing, no JSON file write. Split out from `run`
+/// so the determinism test below can call this twice and diff the result
+/// without ever touching `eval/last-run.json`.
+fn compute_report(
+    embedder: Option<&Arc<dyn Embedder>>,
+    root: &Path,
+    names: &[String],
+) -> Result<Report> {
+    ensure!(!names.is_empty(), "no corpora to evaluate");
+    let mode = if embedder.is_some() {
         "real"
+    } else {
+        "keyword"
     };
 
-    let mut per_corpus_accum: BTreeMap<String, corpus::CorpusAccum> = BTreeMap::new();
+    let mut per_corpus_scores: BTreeMap<String, corpus::CorpusScores> = BTreeMap::new();
     for name in names {
         eprintln!("vexus-eval: indexing + scoring corpus {name}...");
-        let accum = corpus::eval_corpus(root, name, &embedder)?;
-        per_corpus_accum.insert(name.clone(), accum);
+        let scores = corpus::eval_corpus(root, name, embedder)?;
+        per_corpus_scores.insert(name.clone(), scores);
     }
 
-    let overall_accum = per_corpus_accum
-        .values()
-        .copied()
-        .fold(corpus::CorpusAccum::default(), corpus::CorpusAccum::combine);
+    let pool = |part: fn(&corpus::CorpusScores) -> corpus::CorpusAccum| {
+        per_corpus_scores
+            .values()
+            .map(part)
+            .fold(corpus::CorpusAccum::default(), corpus::CorpusAccum::combine)
+    };
+    let overall_accum = pool(|s| s.gated);
 
-    let per_corpus = per_corpus_accum
+    let per_corpus = per_corpus_scores
         .iter()
-        .map(|(name, accum)| (name.clone(), accum.metrics()))
+        .map(|(name, scores)| (name.clone(), scores.gated.metrics()))
         .collect();
+
+    let mut pending: BTreeMap<String, metrics::PendingSet> = per_corpus_scores
+        .iter()
+        .map(|(name, scores)| (name.clone(), scores.pending.pending()))
+        .collect();
+    pending.insert("overall".to_string(), pool(|s| s.pending).pending());
+    pending.retain(|_, set| set.search_queries + set.explore_queries > 0);
 
     Ok(Report {
         mode: mode.to_string(),
         per_corpus,
         overall: overall_accum.metrics(),
+        pending,
     })
+}
+
+/// [`compute_report`] plus the Medium-tier scope, which is what a command
+/// reports. It's kept apart because it re-indexes a padded corpus, and it stays
+/// out of "overall", which already counts these queries once.
+fn full_report(
+    embedder: Option<&Arc<dyn Embedder>>,
+    root: &Path,
+    names: &[String],
+) -> Result<Report> {
+    let mut report = compute_report(embedder, root, names)?;
+    if names.iter().any(|name| name == corpus::MEDIUM_CORPUS) {
+        let scope = format!("{}@medium", corpus::MEDIUM_CORPUS);
+        eprintln!("vexus-eval: indexing + scoring {scope}...");
+        let scores = corpus::eval_corpus_at_medium(root, corpus::MEDIUM_CORPUS, embedder)?;
+        report.per_corpus.insert(scope, scores.gated.metrics());
+    }
+    Ok(report)
 }
 
 fn print_table(report: &Report) {
@@ -159,6 +220,29 @@ fn print_table(report: &Report) {
         println!();
     }
     print_metric_set("overall", &report.overall);
+    println!();
+    print_pending(report);
+}
+
+/// Queries waiting on a known fix. Low numbers here are the expected state.
+fn print_pending(report: &Report) {
+    if report.pending.is_empty() {
+        return;
+    }
+    println!("pending, scored but never gated:");
+    for (scope, p) in &report.pending {
+        println!(
+            "  {scope:<10} search {:>2}  recall@5 {:.4}  recall@10 {:.4}  mrr {:.4}  \
+             explore {:>2}  answer_in_bundle {:.4}",
+            p.search_queries,
+            p.recall_at_5,
+            p.recall_at_10,
+            p.mrr,
+            p.explore_queries,
+            p.answer_in_bundle
+        );
+    }
+    println!();
 }
 
 fn print_metric_set(label: &str, m: &metrics::MetricSet) {
@@ -169,17 +253,14 @@ fn print_metric_set(label: &str, m: &metrics::MetricSet) {
     println!("  ndcg@10           {:.4}", m.ndcg_at_10);
     println!("  clean@5           {:.4}", m.clean_at_5);
     println!("  answer_in_bundle  {:.4}", m.answer_in_bundle);
+    println!("  map_ndcg@10       {:.4}", m.map_ndcg_at_10);
     println!("  bundle_clean      {:.4}", m.bundle_clean);
     println!("  edge_precision    {:.4}", m.edge_precision);
     println!("  edge_recall       {:.4}", m.edge_recall);
 }
 
 fn run(real: bool, only_corpus: Option<String>) -> Result<()> {
-    let embedder: Arc<dyn Embedder> = if real {
-        corpus::build_real_embedder()?
-    } else {
-        Arc::new(vexus_embed::MockEmbedder)
-    };
+    let embedder = scoring_embedder(real)?;
 
     let root = eval_root()?;
     let names = match only_corpus {
@@ -187,7 +268,7 @@ fn run(real: bool, only_corpus: Option<String>) -> Result<()> {
         None => corpus::discover_corpora(&root)?,
     };
 
-    let report = compute_report(embedder, &root, &names)?;
+    let report = full_report(embedder.as_ref(), &root, &names)?;
     print_table(&report);
 
     let out_path = root.join("last-run.json");
@@ -228,12 +309,12 @@ impl MetricDelta {
     }
 }
 
-/// The 9 named metrics paired up
+/// The 10 named metrics paired up
 /// between `base` and `cur` for one scope (a corpus name, or "overall").
 fn metric_pairs(
     base: &metrics::MetricSet,
     cur: &metrics::MetricSet,
-) -> [(&'static str, f64, f64); 9] {
+) -> [(&'static str, f64, f64); 10] {
     [
         ("recall@5", base.recall_at_5, cur.recall_at_5),
         ("recall@10", base.recall_at_10, cur.recall_at_10),
@@ -245,6 +326,7 @@ fn metric_pairs(
             base.answer_in_bundle,
             cur.answer_in_bundle,
         ),
+        ("map_ndcg@10", base.map_ndcg_at_10, cur.map_ndcg_at_10),
         ("bundle_clean", base.bundle_clean, cur.bundle_clean),
         ("edge_precision", base.edge_precision, cur.edge_precision),
         ("edge_recall", base.edge_recall, cur.edge_recall),
@@ -300,6 +382,19 @@ fn diff_reports(baseline: &Report, current: &Report) -> (Vec<MetricDelta>, Vec<M
     (regressions, improvements)
 }
 
+/// Scopes in `current` that `diff_reports` has nothing to compare against.
+fn scopes_without_baseline<'a>(
+    baseline: &Report,
+    current: &'a Report,
+) -> Vec<(&'a str, &'a metrics::MetricSet)> {
+    current
+        .per_corpus
+        .iter()
+        .filter(|(name, _)| !baseline.per_corpus.contains_key(*name))
+        .map(|(name, set)| (name.as_str(), set))
+        .collect()
+}
+
 /// `eval/baseline-mock.json`, or `eval/baseline-real.json` when `real`.
 fn baseline_path(eval_root: &Path, real: bool) -> PathBuf {
     eval_root.join(if real {
@@ -330,20 +425,38 @@ fn load_baseline(path: &Path, real: bool) -> Result<Report> {
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
+/// Numbers from two modes differ by far more than any regression threshold,
+/// so comparing them would only ever report nonsense.
+fn ensure_same_mode(baseline: &Report, current: &Report) -> Result<()> {
+    ensure!(
+        baseline.mode == current.mode,
+        "baseline is from a {} run but this is a {} run — `bless` it deliberately before comparing",
+        baseline.mode,
+        current.mode
+    );
+    Ok(())
+}
+
 fn check(real: bool) -> Result<()> {
     let root = eval_root()?;
-    let embedder: Arc<dyn Embedder> = if real {
-        corpus::build_real_embedder()?
-    } else {
-        Arc::new(vexus_embed::MockEmbedder)
-    };
+    let embedder = scoring_embedder(real)?;
     let names = corpus::discover_corpora(&root)?;
-    let current = compute_report(embedder, &root, &names)?;
+    let current = full_report(embedder.as_ref(), &root, &names)?;
 
     let baseline_file = baseline_path(&root, real);
     let baseline = load_baseline(&baseline_file, real)?;
+    ensure_same_mode(&baseline, &current)?;
 
     let (regressions, improvements) = diff_reports(&baseline, &current);
+
+    let ungated = scopes_without_baseline(&baseline, &current);
+    if !ungated.is_empty() {
+        println!("scored but not gated, no baseline yet:");
+        for (scope, set) in ungated {
+            print_metric_set(scope, set);
+        }
+        println!();
+    }
 
     if !improvements.is_empty() {
         println!("improvements:");
@@ -358,6 +471,8 @@ fn check(real: bool) -> Result<()> {
         }
         println!();
     }
+
+    print_pending(&current);
 
     if regressions.is_empty() {
         println!(
@@ -386,13 +501,9 @@ fn check(real: bool) -> Result<()> {
 
 fn bless(real: bool) -> Result<()> {
     let root = eval_root()?;
-    let embedder: Arc<dyn Embedder> = if real {
-        corpus::build_real_embedder()?
-    } else {
-        Arc::new(vexus_embed::MockEmbedder)
-    };
+    let embedder = scoring_embedder(real)?;
     let names = corpus::discover_corpora(&root)?;
-    let report = compute_report(embedder, &root, &names)?;
+    let report = full_report(embedder.as_ref(), &root, &names)?;
     print_table(&report);
 
     let path = baseline_path(&root, real);
@@ -410,8 +521,16 @@ fn main() -> Result<()> {
         Cmd::Check { real } => check(real),
         Cmd::Bless { real } => bless(real),
         Cmd::Perf { enforce, real } => perf::run(enforce, real),
+        Cmd::Prompts { real } => prompts_report(real),
         Cmd::TokenBench { real } => token_bench(real),
     }
+}
+
+fn prompts_report(real: bool) -> Result<()> {
+    let embedder = scoring_embedder(real)?;
+    let report = prompts::score_prompts(&eval_root()?, embedder.as_ref())?;
+    prompts::print_report(if real { "real" } else { "keyword" }, &report);
+    Ok(())
 }
 
 /// Run the token-efficiency benchmark and rewrite docs/BENCHMARKS.md. The
@@ -461,16 +580,12 @@ fn token_bench(real: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn mock_embedder() -> Arc<dyn Embedder> {
-        Arc::new(vexus_embed::MockEmbedder)
-    }
-
-    /// The binding determinism requirement: running the whole mock-mode
+    /// The binding determinism requirement: running the whole keyword-only
     /// pipeline twice, in-process, over every real corpus must produce
     /// byte-identical JSON — no reliance on wall-clock time, random seeds,
     /// or HashMap iteration order leaking into the result.
     #[test]
-    fn mock_mode_report_is_identical_across_two_independent_runs() {
+    fn keyword_mode_report_is_identical_across_two_independent_runs() {
         let root = eval_root().unwrap();
         let names = corpus::discover_corpora(&root).unwrap();
         assert!(
@@ -478,27 +593,27 @@ mod tests {
             "expected >= 2 real corpora, got {names:?}"
         );
 
-        let first = compute_report(mock_embedder(), &root, &names).unwrap();
-        let second = compute_report(mock_embedder(), &root, &names).unwrap();
+        let first = compute_report(None, &root, &names).unwrap();
+        let second = compute_report(None, &root, &names).unwrap();
 
         let first_json = serde_json::to_string_pretty(&first).unwrap();
         let second_json = serde_json::to_string_pretty(&second).unwrap();
         assert_eq!(
             first_json, second_json,
-            "mock-mode metrics must be identical across independent runs"
+            "keyword-mode metrics must be identical across independent runs"
         );
 
         // A quick sanity check on the shape itself, so a future regression
         // that made every metric trivially 0 (e.g. an empty query set) would
         // still fail this test even though "0 == 0" is technically stable.
-        assert_eq!(first.mode, "mock");
+        assert_eq!(first.mode, "keyword");
         assert!(first.overall.recall_at_10 > 0.0, "{:?}", first.overall);
     }
 
     #[test]
     fn compute_report_errors_on_an_empty_corpus_list() {
         let root = eval_root().unwrap();
-        let err = compute_report(mock_embedder(), &root, &[]).unwrap_err();
+        let err = compute_report(None, &root, &[]).unwrap_err();
         assert!(format!("{err:#}").contains("no corpora"));
     }
 
@@ -512,6 +627,7 @@ mod tests {
             ndcg_at_10: v,
             clean_at_5: v,
             answer_in_bundle: v,
+            map_ndcg_at_10: v,
             bundle_clean: v,
             edge_precision: v,
             edge_recall: v,
@@ -529,20 +645,21 @@ mod tests {
                 .map(|(n, m)| (n.to_string(), *m))
                 .collect(),
             overall,
+            pending: BTreeMap::new(),
         }
     }
 
     #[test]
     fn diff_reports_flags_a_drop_over_the_threshold_as_a_regression() {
-        // Every one of the 9 metrics drops by 0.03 (> 0.02) in both the
-        // corpus scope and "overall" -> 18 regressions total, 0 improvements.
+        // Every one of the 10 metrics drops by 0.03 (> 0.02) in both the
+        // corpus scope and "overall" -> 20 regressions total, 0 improvements.
         let baseline = report_with(&[("pyapp", metric_set(0.50))], metric_set(0.50));
         let current = report_with(&[("pyapp", metric_set(0.47))], metric_set(0.47));
 
         let (regressions, improvements) = diff_reports(&baseline, &current);
 
         assert!(improvements.is_empty(), "{improvements:?}");
-        assert_eq!(regressions.len(), 18, "{regressions:?}");
+        assert_eq!(regressions.len(), 20, "{regressions:?}");
         assert!(regressions.iter().any(|m| m.label == "pyapp.recall@5"));
         assert!(regressions.iter().any(|m| m.label == "overall.mrr"));
         for m in &regressions {
@@ -638,6 +755,61 @@ mod tests {
         let (regressions, improvements) = diff_reports(&baseline, &current);
         assert!(regressions.is_empty(), "{regressions:?}");
         assert!(improvements.is_empty(), "{improvements:?}");
+    }
+
+    #[test]
+    fn a_pending_collapse_is_not_a_regression() {
+        let pending = |recall_at_5| metrics::PendingSet {
+            search_queries: 4,
+            recall_at_5,
+            recall_at_10: recall_at_5,
+            mrr: recall_at_5,
+            explore_queries: 1,
+            answer_in_bundle: recall_at_5,
+        };
+        let mut baseline = report_with(&[("pyapp", metric_set(0.5))], metric_set(0.5));
+        baseline.pending.insert("pyapp".to_string(), pending(1.0));
+        let mut current = report_with(&[("pyapp", metric_set(0.5))], metric_set(0.5));
+        current.pending.insert("pyapp".to_string(), pending(0.0));
+
+        let (regressions, improvements) = diff_reports(&baseline, &current);
+        assert!(regressions.is_empty(), "{regressions:?}");
+        assert!(improvements.is_empty(), "{improvements:?}");
+    }
+
+    #[test]
+    fn a_baseline_written_without_pending_rows_still_parses() {
+        let report = report_with(&[("pyapp", metric_set(0.3))], metric_set(0.3));
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("pending"), "{json}");
+        let loaded: Report = serde_json::from_str(&json).unwrap();
+        assert!(loaded.pending.is_empty());
+    }
+
+    #[test]
+    fn a_scope_missing_from_the_baseline_is_named_as_ungated() {
+        let baseline = report_with(&[("pyapp", metric_set(0.5))], metric_set(0.5));
+        let current = report_with(
+            &[
+                ("pyapp", metric_set(0.5)),
+                ("polyglot@medium", metric_set(0.4)),
+            ],
+            metric_set(0.5),
+        );
+        let ungated = scopes_without_baseline(&baseline, &current);
+        assert_eq!(ungated.len(), 1);
+        assert_eq!(ungated[0].0, "polyglot@medium");
+    }
+
+    #[test]
+    fn a_baseline_from_another_mode_is_refused_rather_than_compared() {
+        let mut stale = report_with(&[("pyapp", metric_set(0.3))], metric_set(0.3));
+        stale.mode = "mock".to_string();
+        let mut current = report_with(&[("pyapp", metric_set(0.8))], metric_set(0.8));
+        current.mode = "keyword".to_string();
+
+        let err = ensure_same_mode(&stale, &current).unwrap_err();
+        assert!(format!("{err:#}").contains("bless"), "{err:#}");
     }
 
     #[test]

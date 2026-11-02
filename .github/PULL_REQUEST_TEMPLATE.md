@@ -32,8 +32,7 @@ fixtures you checked by hand.
 <!--
 Delete this section if the eval gate passed untouched.
 
-The gate fails on any of the seven retrieval metrics dropping more than 0.02
-absolute. If you re-blessed eval/baseline-mock.json, explain why the new
+The gate fails on any retrieval metric dropping more than 0.02 absolute. If you re-blessed eval/baseline-mock.json, explain why the new
 numbers are correct rather than a regression. This is a reviewable decision.
 -->
 

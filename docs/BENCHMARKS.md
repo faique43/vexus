@@ -34,7 +34,7 @@ These two corpora are hand-authored and small (a few dozen short files) so every
 | Where is the retry/backoff logic and what uses it? | pyapp | 366 | 382 | 1.0× |
 | What would break if charge_card changed? | pyapp | 510 | 82 | 6.2× |
 | How are repeated login attempts throttled? | pyapp | 426 | 257 | 1.7× |
-| Show me the email validation helper. | pyapp | 230 | 635 | 0.4× |
+| Show me the email validation helper. | pyapp | 230 | 457 | 0.5× |
 
 ## Method
 
@@ -42,7 +42,7 @@ Both corpora (`eval/corpora/`) are hand-authored fixture repositories, indexed w
 
 The **grep+read** column is executed, not estimated. Each task in `eval/token-bench/tasks.yaml` carries an ordered transcript of the steps an agent would run without an index: every `grep` is a real regex pass over the corpus whose every matching line is counted (formatted `path:line:text`, as a real grep prints it), and every `read` really reads that file or slice and counts all of it. The transcripts include the wrong turns a real session has — a first pattern that is too broad, a file opened at the wrong layer — because a transcript that went straight to the answer would not be an honest baseline.
 
-The **vexus** column runs the same functions `vexus serve` exposes over MCP (`explore`, `search`, `open`, `callers`) at their default token budgets, and counts the full response.
+The **vexus** column runs the same functions `vexus serve` exposes over MCP (`explore`, `open`, `callers`) at their default token budgets, and counts the full response.
 
 Both sides are measured with vexus's own `chars / 4` estimate, so the ratio does not depend on a particular tokenizer.
 
