@@ -216,7 +216,7 @@ impl Store {
             LEFT JOIN symbols s ON s.id = e.dst_id
             LEFT JOIN files f ON f.id = s.file_id
             WHERE r.depth < ?2
-            ORDER BY r.depth + 1 ASC, e.dst_id ASC
+            ORDER BY r.depth + 1 ASC, e.dst_id IS NULL, e.dst_id ASC
             LIMIT ?3";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt
@@ -893,6 +893,46 @@ mod tests {
         );
         assert_eq!(leaf_hit.symbol.qualname, "leaf");
         assert_eq!(leaf_hit.confidence, None);
+    }
+
+    /// A body full of builtin calls must not cost the callees the index
+    /// actually knows about: SQLite sorts NULL first, and the limit cuts after.
+    #[test]
+    fn callees_of_keeps_resolved_callees_when_builtins_fill_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = Box::leak(Box::new(dir));
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let call = |name: String| NewEdge {
+            src: 0,
+            kind: EdgeKind::Calls,
+            dst_name: name,
+            dst_arity: Some(0),
+        };
+        let caller = FileIndex {
+            symbols: vec![fn_sym("busy", "a.busy", Some(0))],
+            edges: (0..12)
+                .map(|i| call(format!("builtin_{i}")))
+                .chain([call("helper".into())])
+                .collect(),
+            chunks: vec![],
+        };
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &caller)
+            .unwrap();
+        let callee = FileIndex {
+            symbols: vec![fn_sym("helper", "b.helper", Some(0))],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("b.py", "python", &[2u8; 32], &callee)
+            .unwrap();
+        store.resolve_all_edges().unwrap();
+
+        let hits = store.callees_of(id_of(&store, "a.busy"), 1, 10).unwrap();
+
+        assert_eq!(hits.len(), 10);
+        assert_eq!(hits[0].symbol.qualname, "b.helper", "{hits:?}");
     }
 
     #[test]
