@@ -644,10 +644,12 @@ mod tests {
             .unwrap();
 
         let missing = store.chunks_missing_embedding(10).unwrap();
-        // embed: B and C near the query vector, A orthogonal
+        // embed: C on the query vector, B near it, A orthogonal
         for (id, content, _hash) in &missing {
-            let v = if content.contains("vector") {
+            let v = if content.contains("hybrid") {
                 vec![1.0, 0.0, 0.0, 0.0]
+            } else if content.contains("vector") {
+                vec![0.8, 0.6, 0.0, 0.0]
             } else {
                 vec![0.0, 1.0, 0.0, 0.0]
             };

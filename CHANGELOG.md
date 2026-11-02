@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`vexus index` is about five times faster on a real repo.** A first index of
+  NestJS (14,806 chunks) took about 15 minutes and now takes 171 s on an 18-core
+  machine. Express went from 55 s to 15 s, and from 2.4 GB of memory to 1.4 GB.
+  Index size and search quality are unchanged. Three things changed: each text
+  now runs through the model alone, where batches were padded to their longest
+  member and made the model process 3.5× the tokens that existed; identical
+  chunks share one vector, and 16% of NestJS's chunks repeat; and a large
+  `vexus index` runs up to four model sessions at once, scaled to your core
+  count. `serve` stays on one session, so its memory does not grow.
+
+- **`explore` returns source when a question names one symbol.** That guess is
+  nearly certain, so a map only cost the agent an extra call.
+
+### Fixed
+
+- **`open` no longer returns a test file for a dotted name.** v0.4.0 resolved
+  `res.sendFile` to the module for `test/res.sendFile.js`, which cost 15,000
+  characters of tests for one function.
+- **A chunk's vector no longer depends on what it was embedded beside.** Batches
+  moved a text's vector (cosine as low as 0.992 against the same text alone), so
+  the same code could rank differently after a reindex. Overall MRR on the real
+  eval rose from 0.783 to 0.786. Recall is unchanged.
+
 ## v0.4.0 — explore returns a map
 
 Live Claude Code sessions showed `explore` costing up to 3.6× what plain

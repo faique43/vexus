@@ -352,7 +352,7 @@ fn main() -> Result<()> {
                 // store, so structural-only is the honest outcome here.
                 println!("embeddings: skipped (sqlite-vec unavailable)");
             } else {
-                match vexus_embed::select::make_embedder() {
+                match vexus_embed::select::make_embedder_for_backlog(store.embed_backlog()?) {
                     Some(embedder) => {
                         store.set_model(embedder.id(), embedder.dim())?;
                         // Degrade, never die: structural indexing above already
