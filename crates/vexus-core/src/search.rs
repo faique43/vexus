@@ -38,6 +38,34 @@ fn sanitize_fts(query: &str) -> Option<String> {
     }
 }
 
+/// The words inside camelCase and PascalCase names, for the FTS index. Its
+/// tokenizer already splits snake_case. A name repeats its words each time it
+/// occurs, so bm25 sees how often they really appear.
+pub(crate) fn identifier_parts(text: &str) -> String {
+    let mut parts = String::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<(usize, char)> = word.char_indices().collect();
+        let mut starts = vec![0];
+        for window in chars.windows(2) {
+            let ((_, prev), (at, c)) = (window[0], window[1]);
+            let next = word[at + c.len_utf8()..].chars().next();
+            let acronym_ends = prev.is_uppercase() && next.is_some_and(char::is_lowercase);
+            if c.is_uppercase() && (prev.is_lowercase() || prev.is_numeric() || acronym_ends) {
+                starts.push(at);
+            }
+        }
+        if starts.len() < 2 {
+            continue;
+        }
+        starts.push(word.len());
+        for piece in starts.windows(2) {
+            parts.push_str(&word[piece[0]..piece[1]]);
+            parts.push(' ');
+        }
+    }
+    parts
+}
+
 const RRF_K: f64 = 60.0;
 const CANDIDATES: u32 = 50;
 
@@ -568,6 +596,67 @@ mod tests {
         for query in ["validating", "validation", "retry"] {
             let hits = store.search_keyword(query, 10).unwrap();
             assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn keyword_search_finds_the_words_inside_camel_case_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[1u8; 32],
+                &one_fn_file("a.work", "res.sendFile HTTPServer parseJSON"),
+            )
+            .unwrap();
+
+        for query in ["send", "sendFile", "http", "server", "json", "parsing"] {
+            let hits = store.search_keyword(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn removing_a_file_removes_its_split_words_from_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[1u8; 32],
+                &one_fn_file("a.work", "sendFile"),
+            )
+            .unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[2u8; 32],
+                &one_fn_file("a.work", "readStream"),
+            )
+            .unwrap();
+
+        assert!(store.search_keyword("send", 10).unwrap().is_empty());
+        assert_eq!(store.search_keyword("stream", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn identifier_parts_split_on_case_changes() {
+        for (text, parts) in [
+            ("sendFile", "send File "),
+            ("HTTPServer", "HTTP Server "),
+            ("parseJSON", "parse JSON "),
+            ("XMLHttpRequest", "XML Http Request "),
+            ("utf8Decode", "utf8 Decode "),
+            ("res.sendFile(aB)", "send File a B "),
+            ("sendFile sendFile", "send File send File "),
+            ("plain snake_case UPPER Title v2", ""),
+            ("überGroßÄnderung", "über Groß Änderung "),
+        ] {
+            assert_eq!(super::identifier_parts(text), parts, "{text}");
         }
     }
 

@@ -603,11 +603,12 @@ impl Store {
             };
             let content_hash = blake3::hash(c.content.as_bytes());
             tx.execute(
-                "INSERT INTO chunks (file_id, symbol_id, start_line, end_line, content, content_hash, token_count, is_test)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO chunks (file_id, symbol_id, start_line, end_line, content, content_hash, token_count, is_test, terms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     file_id, symbol_id, c.start_line, c.end_line,
-                    c.content, content_hash.as_bytes().as_slice(), estimate_tokens(&c.content), c.is_test
+                    c.content, content_hash.as_bytes().as_slice(), estimate_tokens(&c.content), c.is_test,
+                    crate::search::identifier_parts(&c.content)
                 ],
             )?;
         }
