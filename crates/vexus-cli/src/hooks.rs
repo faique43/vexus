@@ -103,12 +103,30 @@ pub fn parse_prompt_payload(payload: &str) -> Option<(String, String)> {
 }
 
 const PROMPT_HOOK_COMMAND: &str = "vexus hook prompt";
+const PROMPT_HOOK_ARGS: &str = "hook prompt";
+#[cfg(windows)]
+const BINARY_NAME: &str = "vexus.exe";
+#[cfg(not(windows))]
+const BINARY_NAME: &str = "vexus";
 /// The event's default is 30 seconds. A hook that slow has already failed.
 const PROMPT_HOOK_TIMEOUT_SECS: u64 = 20;
 
+/// What the hook should run. A bare `vexus` that isn't on PATH would fail on
+/// every prompt, so the running binary's full path stands in for it.
+fn hook_command(path_var: Option<&std::ffi::OsStr>, exe: &Path) -> String {
+    let on_path = path_var.is_some_and(|paths| {
+        std::env::split_paths(paths).any(|dir| dir.join(BINARY_NAME).is_file())
+    });
+    if on_path {
+        PROMPT_HOOK_COMMAND.to_string()
+    } else {
+        format!("\"{}\" {PROMPT_HOOK_ARGS}", exe.display())
+    }
+}
+
 /// `existing` settings with the prompt hook added, or `None` when it's already
 /// there. An error means the file can't be safely rewritten.
-pub fn merge_settings(existing: Option<&str>) -> anyhow::Result<Option<String>> {
+pub fn merge_settings(existing: Option<&str>, command: &str) -> anyhow::Result<Option<String>> {
     let mut root = match existing {
         None => serde_json::Map::new(),
         Some(text) => match serde_json::from_str::<Value>(text)? {
@@ -129,7 +147,7 @@ pub fn merge_settings(existing: Option<&str>) -> anyhow::Result<Option<String>> 
     }
     entries.push(json!({"hooks": [{
         "type": "command",
-        "command": PROMPT_HOOK_COMMAND,
+        "command": command,
         "timeout": PROMPT_HOOK_TIMEOUT_SECS,
     }]}));
     let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
@@ -137,10 +155,16 @@ pub fn merge_settings(existing: Option<&str>) -> anyhow::Result<Option<String>> 
     Ok(Some(text))
 }
 
+fn is_prompt_hook(hook: &Value) -> bool {
+    hook["command"]
+        .as_str()
+        .is_some_and(|c| c == PROMPT_HOOK_COMMAND || c.ends_with(&format!("\" {PROMPT_HOOK_ARGS}")))
+}
+
 fn runs_prompt_hook(entry: &Value) -> bool {
     entry["hooks"]
         .as_array()
-        .is_some_and(|hooks| hooks.iter().any(|h| h["command"] == PROMPT_HOOK_COMMAND))
+        .is_some_and(|hooks| hooks.iter().any(is_prompt_hook))
 }
 
 /// Adds the hooks to `<root>/.claude/settings.json`, where Claude Code loads
@@ -153,7 +177,17 @@ pub fn install(root: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(anyhow::Error::from(e).context(format!("read {}", path.display()))),
     };
-    match merge_settings(existing.as_deref()) {
+    let exe = std::env::current_exe()?;
+    let path_var = std::env::var_os("PATH");
+    let command = hook_command(path_var.as_deref(), &exe);
+    if command != PROMPT_HOOK_COMMAND {
+        eprintln!(
+            "vexus: not on PATH, so the hook uses {}. Anyone else sharing this settings file \
+             needs the same path.",
+            exe.display()
+        );
+    }
+    match merge_settings(existing.as_deref(), &command) {
         Ok(Some(text)) => {
             std::fs::create_dir_all(root.join(".claude"))?;
             std::fs::write(&path, text)?;
@@ -165,7 +199,7 @@ pub fn install(root: &Path) -> anyhow::Result<()> {
                 "vexus: could not update {} ({e:#}) — add this yourself:",
                 path.display()
             );
-            println!("{}", merge_settings(None)?.unwrap_or_default());
+            println!("{}", merge_settings(None, &command)?.unwrap_or_default());
         }
     }
     Ok(())
@@ -405,27 +439,58 @@ mod tests {
         assert_eq!(parse_prompt_payload(r#"{"prompt":"no cwd"}"#), None);
     }
 
+    const COMMAND: &str = "vexus hook prompt";
+
     #[test]
     fn settings_are_created_when_there_are_none() {
-        let text = merge_settings(None).unwrap().unwrap();
+        let text = merge_settings(None, COMMAND).unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-            PROMPT_HOOK_COMMAND
+            COMMAND
         );
     }
 
     #[test]
     fn settings_already_holding_the_hook_need_no_write() {
-        let once = merge_settings(None).unwrap().unwrap();
-        assert_eq!(merge_settings(Some(&once)).unwrap(), None);
+        let once = merge_settings(None, COMMAND).unwrap().unwrap();
+        assert_eq!(merge_settings(Some(&once), COMMAND).unwrap(), None);
+    }
+
+    #[test]
+    fn a_hook_installed_by_path_counts_as_installed() {
+        let once = merge_settings(None, "\"/opt/my tools/vexus\" hook prompt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(merge_settings(Some(&once), COMMAND).unwrap(), None);
     }
 
     #[test]
     fn settings_that_are_not_an_object_are_refused() {
-        assert!(merge_settings(Some("[]")).is_err());
-        assert!(merge_settings(Some(r#"{"hooks": []}"#)).is_err());
-        assert!(merge_settings(Some(r#"{"hooks": {"UserPromptSubmit": 1}}"#)).is_err());
+        assert!(merge_settings(Some("[]"), COMMAND).is_err());
+        assert!(merge_settings(Some(r#"{"hooks": []}"#), COMMAND).is_err());
+        assert!(merge_settings(Some(r#"{"hooks": {"UserPromptSubmit": 1}}"#), COMMAND).is_err());
+    }
+
+    #[test]
+    fn the_command_is_plain_when_vexus_is_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(BINARY_NAME), b"").unwrap();
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(
+            hook_command(Some(&path), Path::new("/opt/x/vexus")),
+            "vexus hook prompt"
+        );
+    }
+
+    #[test]
+    fn the_command_uses_the_full_path_when_vexus_is_not_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(
+            hook_command(Some(&path), Path::new("/opt/my tools/vexus")),
+            "\"/opt/my tools/vexus\" hook prompt"
+        );
     }
 
     #[test]

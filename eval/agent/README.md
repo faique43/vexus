@@ -41,6 +41,9 @@ fabricated zero.
 
 Expect a handful of cents per run on the default corpus.
 
+For whether vexus saves money on change requests, and whether the change still
+works, see [`change/`](change/README.md).
+
 ## Comparing live cost
 
 `run.sh` shows whether an agent uses vexus. `compare.sh` shows whether that

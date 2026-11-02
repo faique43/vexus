@@ -247,8 +247,10 @@ fn init_cursor_writes_mdc_file() {
 }
 
 fn init_claude_code(root: &std::path::Path, extra: &[&str]) -> assert_cmd::assert::Assert {
+    let bin = assert_cmd::cargo::cargo_bin("vexus");
     Command::cargo_bin("vexus")
         .unwrap()
+        .env("PATH", bin.parent().unwrap())
         .args(["init", "--agent", "claude-code"])
         .args(extra)
         .arg(root.to_str().unwrap())
@@ -272,6 +274,26 @@ fn init_claude_code_installs_a_prompt_hook_claude_code_will_load() {
         settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
         "vexus hook prompt"
     );
+}
+
+#[test]
+fn init_claude_code_uses_the_full_path_when_vexus_is_not_on_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("PATH", root)
+        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let settings = claude_settings(root);
+    let command = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let bin = assert_cmd::cargo::cargo_bin("vexus");
+    assert_eq!(command, format!("\"{}\" hook prompt", bin.display()));
 }
 
 #[test]

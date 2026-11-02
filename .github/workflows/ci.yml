@@ -25,6 +25,30 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  install-script:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the latest release (Unix)
+        if: runner.os != 'Windows'
+        env:
+          VEXUS_INSTALL_DIR: ${{ runner.temp }}/vexus-bin
+        run: |
+          sh install.sh
+          "$VEXUS_INSTALL_DIR/vexus" --version
+      - name: Install the latest release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VEXUS_INSTALL_DIR: ${{ runner.temp }}\vexus-bin
+        run: |
+          .\install.ps1
+          & "$env:VEXUS_INSTALL_DIR\vexus.exe" --version
+
   structural:
     # The structural-only build (`--no-default-features`, ONNX compiled
     # out) ships as real release artifacts for Intel macOS / old-glibc /

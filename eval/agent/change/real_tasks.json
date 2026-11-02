@@ -1,0 +1,279 @@
+[
+ {
+  "n": 18214,
+  "title": "fix(platform-express): map http-errors exceptions to HttpException in Express adapter",
+  "issue": [
+   18213
+  ],
+  "base": "68d3a8f835b630ffb1f47dd910d14ae768fbebea",
+  "merge": "7ea87653af81d2fe29829ee78469715a97181cc8",
+  "src": [
+   "packages/platform-express/adapters/express-adapter.ts"
+  ],
+  "spec": [
+   "packages/platform-express/test/adapters/express-adapter.spec.ts"
+  ],
+  "vague": "When a request body is larger than the Express body parser allows, the error reaches our global exception filters as a raw body-parser error instead of a standard HTTP exception. The catch-all filter then responds with a 500 rather than a 413, and a filter that only handles HTTP exceptions never runs. On Fastify, the same oversized request correctly gives a 413 to both filters, and malformed JSON already works on both adapters. We expected Express to treat the oversized body the same way, so the filters receive a 413 HTTP exception and the response is 413."
+ },
+ {
+  "n": 18127,
+  "title": "fix(microservices): match empty mqtt topic levels",
+  "issue": [
+   18126
+  ],
+  "base": "7b92cb461deef468540fb7379c0ac8a9c90888da",
+  "merge": "a4a9426dc24ac82650739429b4e14ccf3671708a",
+  "src": [
+   "packages/microservices/server/server-mqtt.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/server/server-mqtt.spec.ts"
+  ],
+  "vague": "A message sent to the topic \"sport/\" is delivered by the broker to our Nest MQTT client, but the handler subscribed to \"sport/+\" never runs for it, and Nest logs that no matching handler was found. The handler should receive both \"sport/tennis\" and \"sport/\", since in MQTT a single-level wildcard matches an empty topic level, which is different from a missing one. The same should hold for empty levels at the start or middle of a topic, so \"+/score\" should match \"/score\" and \"sport/+/score\" should match \"sport//score\". The bug reproduces on Nest 12.1.3 and on the master branch."
+ },
+ {
+  "n": 18085,
+  "title": "fix(microservices): preserve null payloads in kafka tombstone records",
+  "issue": [
+   18078
+  ],
+  "base": "e787a24f7eb5db1a7af8e749cbf04ad337a55389",
+  "merge": "15f1ac1e60ef2001c231f2d5f2f635719f3e72ef",
+  "src": [
+   "packages/microservices/deserializers/kafka-request.deserializer.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/deserializers/kafka-request.deserializer.spec.ts"
+  ],
+  "vague": "When a message on a Kafka topic has no content, meaning a tombstone used to delete a key, the handler receives the entire message wrapper, with fields like key, offset, and topic, instead of an empty value. As a result, a handler that expects either the user object or nothing gets an object that always contains a null value field. The expected behavior is that the handler receives null as its payload for these records, while the full message stays accessible through the Kafka context."
+ },
+ {
+  "n": 17957,
+  "title": "fix(microservices): fail rmq connect and listen on channel setup errors",
+  "issue": [
+   17956
+  ],
+  "base": "a14248d7e54a1a2d5de72a5dcfe6edc81b7b285e",
+  "merge": "16c443dc3b8e74aaba469ca7a910abac8c62d9b2",
+  "src": [
+   "packages/microservices/client/client-rmq.ts",
+   "packages/microservices/server/server-rmq.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/client/client-rmq.spec.ts",
+   "packages/microservices/test/server/server-rmq.spec.ts"
+  ],
+  "vague": "When the message broker's setup step fails after the connection is already open, the whole app crashes instead of getting an error it can handle. For example, if the queue already exists on the broker as durable but the app asks for a non-durable one, the broker refuses it, and the app dies. It should instead reject the connect call with that error, log it, and keep running, and a later connect should succeed once the conflict is cleared. Right now the crash happens at startup if connect is called early, or on the first send or emit otherwise, and the server's listen callback never runs."
+ },
+ {
+  "n": 17961,
+  "title": "fix(microservices): run every event handler when a sibling completes empty",
+  "issue": [
+   17960
+  ],
+  "base": "e3a9d05129c669a3817ce925323d17c6dc76cc6b",
+  "merge": "125144c03ff699e271d6432c2ddd4af5d73912f3",
+  "src": [
+   "packages/microservices/listeners-controller.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/listeners-controller.spec.ts"
+  ],
+  "vague": "When several handlers listen for the same event, a handler that finishes without producing any value stops all the other handlers for that event from completing. Because of this, one handler that filters out an event, or returns an empty result, can silently prevent a sibling handler from doing its work, with no log or error. In the reproduction, a second handler that waits briefly and then records a side effect never runs for orders the first handler skips, though it does run for orders the first handler accepts. The expected behavior is that every handler for the event runs to the end regardless of whether another handler returns nothing, while an error from any handler should still be reported as it is today."
+ },
+ {
+  "n": 17959,
+  "title": "fix(microservices): fail nats requests on undecodable replies",
+  "issue": [
+   17958
+  ],
+  "base": "a0ac87df9d52df78dde9811ee0d40cc0599995d9",
+  "merge": "e3a9d05129c669a3817ce925323d17c6dc76cc6b",
+  "src": [
+   "packages/microservices/client/client-nats.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/client/client-nats.spec.ts"
+  ],
+  "vague": "When the client receives a reply that is not valid JSON, the whole process crashes with an unhandled error, and the request never completes. The same thing happens with a reply from a non-Nest service or from a plain NATS command-line tool. Instead, the call should fail with a parse error, the reply subscription should be cleaned up, and the process should keep running, as it already does when the reply is empty."
+ },
+ {
+  "n": 17955,
+  "title": "fix(microservices): stop rmq client opening two channels on connect",
+  "issue": [
+   17954
+  ],
+  "base": "2e4dea33b4255efccb19244e2ad473550a357ddb",
+  "merge": "528f5f1019929d0d49141117e31b092484c6601b",
+  "src": [
+   "packages/microservices/client/client-rmq.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/client/client-rmq.spec.ts"
+  ],
+  "vague": "When the client connects for the first time, the code that sets up its channel runs twice, so the client ends up with two channels on the broker where it should have one. The first channel is then left with no reference to it but stays open for the life of the client, and with a named reply queue it becomes a second consumer competing for replies. Messages still send and replies still arrive, so nothing visibly fails, but each client holds an extra channel that only closes when the client itself closes. The expected behavior is one channel per client and one consumer on its reply queue, with connecting being the only step that creates the channel."
+ },
+ {
+  "n": 17919,
+  "title": "fix(microservices): release the nats reply inbox when publish throws",
+  "issue": [
+   17918
+  ],
+  "base": "1ae307096f5747aff9a64e7f11484df16740a5ca",
+  "merge": "bc2a56dbaa36fd158612253ea31a50c2dc0769f5",
+  "src": [
+   "packages/microservices/client/client-nats.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/client/client-nats.spec.ts"
+  ],
+  "vague": "When a request fails because its payload is too large for the server, the client never removes the temporary reply subscription it created for that request. Each failed request leaves one subscription behind on both the client and the server, so after five failed sends the server still shows five unused subscriptions where it should show none. Once the publish fails, the request should clean up its reply subscription the same way the other transports do when a publish throws."
+ },
+ {
+  "n": 17922,
+  "title": "fix(microservices): settle the tcp listen callback on any listen error",
+  "issue": [
+   17921
+  ],
+  "base": "dee19bb6d7fe23982a2787450e38ea908b261876",
+  "merge": "1ae307096f5747aff9a64e7f11484df16740a5ca",
+  "src": [
+   "packages/microservices/server/server-tcp.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/server/server-tcp.spec.ts"
+  ],
+  "vague": "When the microservice's TCP server hits a startup failure other than the \"port already in use\" or \"connection refused\" errors, the failure is only written to the log. The await on starting the app then never finishes, so it neither succeeds nor throws an error. For example, binding to an IP address that isn't on the machine, or to a privileged port without the needed permissions, both hang this way. The app stays up with nothing listening and the calling code has no signal that anything went wrong. I expected the startup call to fail with the actual error, just as it already does for the port-in-use case, whatever the error code is."
+ },
+ {
+  "n": 17757,
+  "title": "fix(microservices): fail pending requests on client close",
+  "issue": [
+   17016
+  ],
+  "base": "e95ee3ab430256601ec79a9a0f12ae74ad5402e9",
+  "merge": "7b3572cc77f3236cb435d4ed76ff3be4380b88e5",
+  "src": [
+   "packages/microservices/client/client-kafka.ts",
+   "packages/microservices/client/client-mqtt.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/client/client-kafka.spec.ts",
+   "packages/microservices/test/client/client-mqtt.spec.ts"
+  ],
+  "vague": "When a Redis connection drops, or the client is closed while requests are still waiting for replies, the pending requests never report a result. The observable returned by the send call just stays open forever, with no error and no completion, which could also cause a memory leak. The expected behavior is that these pending requests fail with a clear connection-closed error, as the TCP client already does, so the Redis client behaves consistently with it."
+ },
+ {
+  "n": 17675,
+  "title": "fix(microservices): call RMQ listen callback once",
+  "issue": [
+   17673
+  ],
+  "base": "290ab07be0eef25fb842bf0ce83b77dece0a34f9",
+  "merge": "917aec5b874a829a2a98e9652b6b7884728b3069",
+  "src": [
+   "packages/microservices/server/server-rmq.ts"
+  ],
+  "spec": [
+   "packages/microservices/test/server/server-rmq.spec.ts"
+  ],
+  "vague": "When our service connects to RabbitMQ, its startup step runs once as expected, but it runs again every time the connection to the broker is re-established after a restart or drop. Each reconnect logs the \"started successfully\" message again and flushes logs again, so a broker that restarts three times makes it look like the service started four times, even though it started only once. The startup step should run exactly once per start, as it does with the other transports."
+ },
+ {
+  "n": 17668,
+  "title": "fix(common): Support numeric string values in ParseEnumPipe",
+  "issue": [
+   17638
+  ],
+  "base": "1c4d9c42dd0815a4c0b30c149b1f88d440fda237",
+  "merge": "02ee6d444cfe2a9b214228b940b7bc3d65f9b035",
+  "src": [
+   "packages/common/pipes/parse-enum.pipe.ts"
+  ],
+  "spec": [
+   "packages/common/test/pipes/parse-enum.pipe.spec.ts"
+  ],
+  "vague": "When a route reads a numeric enum value from a URL query or path and runs it through the built-in enum parsing step, valid numbers sent in the request are rejected with a validation error. A value of 0 that is part of the enum is refused, even though it is legal. I expected the step to accept the text form of the number, such as '0', and pass the matching numeric enum value to the handler, not the original text. String-based enums already work correctly, so only numeric enums are affected."
+ },
+ {
+  "n": 17702,
+  "title": "fix(common): treat empty string as array input in ParseArrayPipe",
+  "issue": [
+   17701
+  ],
+  "base": "d098bf98087bd42a92ff476cb87c6829876ee34d",
+  "merge": "2f78be248f53cfddc09bc12b0024d04307edec6b",
+  "src": [
+   "packages/common/pipes/parse-array.pipe.ts"
+  ],
+  "spec": [
+   "packages/common/test/pipes/parse-array.pipe.spec.ts"
+  ],
+  "vague": "When I pass an empty string to a required array-parsing pipe, it throws a \"parsable array expected\" validation error instead of returning a one-item list containing an empty string. A CSV string with empty entries inside it already works, and an optional pipe handles a lone empty string correctly, so only this required case fails. I expected a lone empty string to be split like any other string, not treated as a missing value, since only null or undefined should count as not provided, the same way the integer and boolean pipes handle it."
+ },
+ {
+  "n": 17625,
+  "title": "fix(core): clean up repeated shutdown signal listeners",
+  "issue": [
+   17623
+  ],
+  "base": "eb65d75ec42c153f1da5e4ef5499ee95e91dbb9e",
+  "merge": "ddbb455220b3099d67ee6d4a816528f9a6c0fab1",
+  "src": [
+   "packages/core/nest-application-context.ts"
+  ],
+  "spec": [
+   "packages/core/test/nest-application-context.spec.ts"
+  ],
+  "vague": "If shutdown hooks are turned on more than once in the same app, the process keeps a signal listener attached even after the app has been closed. This happens when the same signal is registered twice, and also when different signals are registered in separate calls, where the listener from the first call is the one left behind. Closing the app should remove every listener it added, so the process's listener count returns to what it was before the app was created. When two separate registrations are active, sending two shutdown signals in quick succession runs the shutdown steps twice, but the second signal should be ignored during shutdown."
+ },
+ {
+  "n": 17631,
+  "title": "fix(core): restore logger after silent lazy module load",
+  "issue": [
+   17628
+  ],
+  "base": "6262701930c0152c2879148b45a0a8b02493cb65",
+  "merge": "52b5e10a90cbfa11de46de68e5270b9f26612c73",
+  "src": [
+   "packages/core/injector/lazy-module-loader/lazy-module-loader.ts"
+  ],
+  "spec": [
+   "packages/core/test/injector/lazy-module-loader/lazy-module-loader.spec.ts"
+  ],
+  "vague": "When a developer turns off logging for one lazily loaded module, that setting is never undone. Every later lazy load in the application then stops printing its usual \"dependencies initialized\" messages, even when logging was not turned off for those loads. Turning off logging should apply only to that one load, and later loads should log normally."
+ },
+ {
+  "n": 17618,
+  "title": "fix(core): correctly discover value providers in discovery service",
+  "issue": [
+   17617
+  ],
+  "base": "abce26ecc997b7021bbdf9bb78e10af598885121",
+  "merge": "9b71cad975504156529a80b90a9b25083ce4cd94",
+  "src": [
+   "packages/core/discovery/discoverable-meta-host-collection.ts"
+  ],
+  "spec": [
+   "packages/core/test/discovery/discoverable-meta-host-collection.spec.ts",
+   "packages/core/test/discovery/discovery-service.spec.ts"
+  ],
+  "vague": "When a provider is registered with a value instead of a class, the discovery service fails to find it when searching by metadata key, even though the class behind it carries that key. Only providers registered with a class are returned, so a search that should find two matches finds one. The search should return both the class-based and the value-based provider."
+ },
+ {
+  "n": 17600,
+  "title": "fix(core): treat null as invalid in isCustomClass, isCustomFactory, isCustomUseExisting",
+  "issue": [
+   17599
+  ],
+  "base": "cd5ee129162d1d4b9cccfaf2def4cfb051bfe927",
+  "merge": "7f79233c7ff2cdbb7ae20a0e60fd190ceb14df57",
+  "src": [
+   "packages/core/injector/module.ts"
+  ],
+  "spec": [
+   "packages/core/test/injector/module.spec.ts"
+  ],
+  "vague": "When a provider is declared with its class field set to an empty value, the framework treats it as a valid custom class provider instead of rejecting it. Startup then fails with a confusing crash when it tries to create an instance from that empty value. The expected behavior is a clear validation error at startup, the same error it gives when that field is missing entirely."
+ }
+]
