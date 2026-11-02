@@ -48,6 +48,7 @@ CREATE TABLE chunks (
   content TEXT NOT NULL,
   content_hash BLOB NOT NULL,
   token_count INTEGER NOT NULL,
+  is_test INTEGER NOT NULL DEFAULT 0,
   -- 1 once this chunk's vector has been written to vec_chunks. Kept here,
   -- in an ordinary indexed column, rather than derived by anti-joining
   -- vec_chunks: vec0 is a virtual table, so `LEFT JOIN vec_chunks ... WHERE

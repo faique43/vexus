@@ -516,6 +516,7 @@ mod tests {
             symbols: vec![sym("slug", "app.util.slug", SymbolKind::Function)],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: 1,
                 end_line: 2,

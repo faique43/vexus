@@ -227,6 +227,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
         // index — skip them rather than emitting a chunk for them.
         if run_text.chars().any(|c| c.is_alphanumeric()) {
             chunks.push(NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: (rs + 1) as u32,
                 end_line: re as u32,
@@ -243,6 +244,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
                 let content = slice(ext_start, sym.end_line);
                 if estimate_tokens(&content) <= MAX_TOKENS {
                     chunks.push(NewChunk {
+                        is_test: false,
                         symbol: Some(i),
                         start_line: ext_start,
                         end_line: sym.end_line,
@@ -281,8 +283,7 @@ struct OutlineLine {
 }
 
 /// The container in source order: the lines it owns outright (docs, fields,
-/// variants, docstrings), with each child reduced to its signature. Children
-/// defined outside its range, like Rust's `impl` methods, go last.
+/// variants, docstrings), with each child reduced to its signature.
 fn outline(
     sym_index: usize,
     ext_start: u32,
@@ -324,7 +325,6 @@ fn outline(
             out.extend(child_line(ln, child));
         }
     }
-    out.extend(children.filter_map(|child| child_line(end, child)));
     out
 }
 
@@ -346,6 +346,7 @@ fn push_container(
         let content: String = outline.iter().map(|l| format!("{}\n", l.text)).collect();
         if !content.trim().is_empty() {
             chunks.push(NewChunk {
+                is_test: false,
                 symbol: Some(sym_index),
                 start_line: ext_start,
                 end_line: sym.end_line,
@@ -367,6 +368,7 @@ fn push_container(
         if piece_chars + chars > MAX_CHARS && !piece.is_empty() {
             if first || searchable {
                 chunks.push(NewChunk {
+                    is_test: false,
                     symbol: Some(sym_index),
                     start_line: range.0,
                     end_line: range.1,
@@ -398,6 +400,7 @@ fn push_container(
     }
     if !piece.is_empty() && (first || searchable) {
         chunks.push(NewChunk {
+            is_test: false,
             symbol: Some(sym_index),
             start_line: range.0,
             end_line: range.1,
@@ -427,6 +430,7 @@ fn split_oversized(
             _ => std::mem::take(buf),
         };
         chunks.push(NewChunk {
+            is_test: false,
             symbol: Some(sym_index),
             start_line: from,
             end_line: to,

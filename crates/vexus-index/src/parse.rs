@@ -5,6 +5,13 @@ use vexus_core::model::{EdgeKind, FileIndex, NewEdge, NewSymbol, SymbolKind};
 
 use crate::lang::Lang;
 
+/// A Rust `impl` block.
+struct ImplScope {
+    start_line: u32,
+    end_line: u32,
+    type_name: String,
+}
+
 pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
     let mut idx = FileIndex::default();
     let module_qual = rel_path
@@ -97,6 +104,10 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
                     def_node = Some(cap.node);
                     def_kind = "method";
                 }
+                "def.impl" => {
+                    def_node = Some(cap.node);
+                    def_kind = "impl";
+                }
                 "def.name" => {
                     name = Some(
                         cap.node
@@ -116,20 +127,36 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
     // Document order so parents precede children (store relies on this).
     defs.sort_by_key(|(n, ..)| n.start_byte());
 
+    let mut impls: Vec<ImplScope> = Vec::new();
     for (node, name, kind_hint, params) in defs {
         // Walk up to the nearest enclosing def already in idx.symbols.
         let parent = enclosing_symbol(&idx, node, true);
+        let start_line = node.start_position().row as u32 + 1;
+        let end_line = node.end_position().row as u32 + 1;
+        if kind_hint == "impl" {
+            impls.push(ImplScope {
+                start_line,
+                end_line,
+                type_name: name,
+            });
+            continue;
+        }
+        let impl_scope = impls.iter().rev().find(|scope| {
+            (scope.start_line..=scope.end_line).contains(&start_line)
+                && (parent == 0 || scope.start_line > idx.symbols[parent].start_line)
+        });
         let parent_kind = idx.symbols[parent].kind;
         let kind = match kind_hint {
             "function"
-                if matches!(
-                    parent_kind,
-                    SymbolKind::Class
-                        | SymbolKind::Struct
-                        | SymbolKind::Enum
-                        | SymbolKind::Trait
-                        | SymbolKind::Interface
-                ) =>
+                if impl_scope.is_some()
+                    || matches!(
+                        parent_kind,
+                        SymbolKind::Class
+                            | SymbolKind::Struct
+                            | SymbolKind::Enum
+                            | SymbolKind::Trait
+                            | SymbolKind::Interface
+                    ) =>
             {
                 SymbolKind::Method
             }
@@ -145,7 +172,11 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
             "module" => SymbolKind::Module,
             _ => SymbolKind::Function,
         };
-        let qualname = format!("{}.{}", idx.symbols[parent].qualname, name);
+        let parent_name = &idx.symbols[parent].qualname;
+        let qualname = match impl_scope {
+            Some(scope) => format!("{parent_name}.{}.{name}", scope.type_name),
+            None => format!("{parent_name}.{name}"),
+        };
         let sig = source
             .lines()
             .nth(node.start_position().row)
@@ -156,8 +187,8 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
             qualname,
             kind,
             sig,
-            start_line: node.start_position().row as u32 + 1,
-            end_line: node.end_position().row as u32 + 1,
+            start_line,
+            end_line,
             parent: Some(parent),
             arity,
         });
@@ -219,7 +250,57 @@ pub fn parse_file(lang: &Lang, rel_path: &str, source: &str) -> FileIndex {
     }
 
     crate::chunk::build_chunks(&mut idx, source);
+    if lang.name == "rust" {
+        mark_rust_tests(&mut idx, &impls, source);
+    }
     idx
+}
+
+/// Flags the chunks of Rust test code. It sits on production paths, and a
+/// helper in a test module has nothing of its own that says so, so what counts
+/// is the attribute on the outermost item around it.
+fn mark_rust_tests(idx: &mut FileIndex, impls: &[ImplScope], source: &str) {
+    let lines: Vec<&str> = source.lines().collect();
+    let symbols = idx.symbols.iter().skip(1);
+    let test_ranges: Vec<(u32, u32)> = symbols
+        .map(|s| (s.start_line, s.end_line))
+        .chain(impls.iter().map(|s| (s.start_line, s.end_line)))
+        .filter(|(start, _)| has_test_attribute(&lines, *start))
+        .collect();
+    for chunk in &mut idx.chunks {
+        let Some(symbol) = chunk.symbol.filter(|s| *s != 0) else {
+            continue;
+        };
+        let line = idx.symbols[symbol].start_line;
+        chunk.is_test = test_ranges.iter().any(|(s, e)| (*s..=*e).contains(&line));
+    }
+}
+
+/// Whether the attributes directly above `start_line` mark a test item.
+fn has_test_attribute(lines: &[&str], start_line: u32) -> bool {
+    lines[..start_line as usize - 1]
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .take_while(|line| line.starts_with("#[") || line.starts_with("//"))
+        .any(is_test_attribute)
+}
+
+fn is_test_attribute(line: &str) -> bool {
+    let Some(attribute) = line.strip_prefix("#[") else {
+        return false;
+    };
+    if let Some(condition) = attribute.strip_prefix("cfg(") {
+        // Odd segments are string literals, like `feature = "test-utils"`.
+        let code: String = condition.split('"').step_by(2).collect();
+        return !code.contains("not(")
+            && code
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|word| word == "test");
+    }
+    let path = attribute.split(['(', ']']).next().unwrap_or("");
+    let name = path.rsplit("::").next().unwrap_or(path);
+    name == "test" || name == "rstest" || name.starts_with("test_") || name.ends_with("_test")
 }
 
 /// True when a captured `(call)` node is not a real call site but part of a
@@ -309,4 +390,179 @@ fn count_params(params: Node, source: &str) -> u32 {
         n += 1;
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use vexus_core::model::{FileIndex, SymbolKind};
+
+    fn parsed(rel: &str, source: &str) -> FileIndex {
+        let lang = crate::lang::for_path(Path::new(rel)).unwrap();
+        super::parse_file(lang, rel, source)
+    }
+
+    fn symbol<'a>(idx: &'a FileIndex, qualname: &str) -> &'a vexus_core::model::NewSymbol {
+        idx.symbols
+            .iter()
+            .find(|s| s.qualname == qualname)
+            .unwrap_or_else(|| {
+                let names: Vec<_> = idx.symbols.iter().map(|s| &s.qualname).collect();
+                panic!("no {qualname} in {names:?}")
+            })
+    }
+
+    #[test]
+    fn impl_methods_are_named_after_their_type() {
+        let idx = parsed(
+            "store.rs",
+            "pub struct Store {\n    conn: u8,\n}\n\nimpl Store {\n    const LIMIT: u8 = 1;\n\n    pub fn open(path: u8) -> Self {\n        todo!()\n    }\n}\n",
+        );
+
+        let open = symbol(&idx, "store.Store.open");
+        assert_eq!(open.kind, SymbolKind::Method);
+        assert_eq!(open.arity, Some(1));
+        assert_eq!(symbol(&idx, "store.Store.LIMIT").kind, SymbolKind::Const);
+    }
+
+    #[test]
+    fn a_type_with_many_impls_stays_one_symbol() {
+        let idx = parsed(
+            "a.rs",
+            "struct A;\nimpl A {\n    fn x(&self) {}\n}\nimpl Clone for A {\n    fn clone(&self) -> A { A }\n}\n",
+        );
+
+        assert_eq!(idx.symbols.iter().filter(|s| s.name == "A").count(), 1);
+        symbol(&idx, "a.A.x");
+        symbol(&idx, "a.A.clone");
+    }
+
+    #[test]
+    fn impl_type_forms_all_resolve_to_the_type_name() {
+        for (header, qualname) in [
+            ("impl<T> Stack<T>", "a.Stack.go"),
+            ("impl fmt::Display for Stack", "a.Stack.go"),
+            ("impl crate::x::Stack", "a.Stack.go"),
+            ("impl<T> Trait for crate::x::Stack<T>", "a.Stack.go"),
+            ("impl<'a> Trait for &'a Stack", "a.Stack.go"),
+        ] {
+            let idx = parsed("a.rs", &format!("{header} {{\n    fn go() {{}}\n}}\n"));
+            assert_eq!(symbol(&idx, qualname).kind, SymbolKind::Method, "{header}");
+        }
+    }
+
+    #[test]
+    fn impl_of_a_type_from_elsewhere_still_names_it() {
+        let idx = parsed("a.rs", "impl Foreign {\n    fn go(&self) {}\n}\n");
+
+        assert_eq!(symbol(&idx, "a.Foreign.go").kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn impl_before_its_type_still_names_it() {
+        let idx = parsed(
+            "a.rs",
+            "impl Late {\n    fn go(&self) {}\n}\nstruct Late;\n",
+        );
+
+        symbol(&idx, "a.Late.go");
+        symbol(&idx, "a.Late");
+    }
+
+    #[test]
+    fn a_function_nested_in_a_method_stays_under_the_method() {
+        let idx = parsed(
+            "a.rs",
+            "struct A;\nimpl A {\n    fn outer(&self) {\n        fn inner() {}\n    }\n}\n",
+        );
+
+        symbol(&idx, "a.A.outer.inner");
+    }
+
+    #[test]
+    fn inline_modules_qualify_their_members() {
+        let idx = parsed(
+            "a.rs",
+            "mod inner {\n    pub struct S;\n    impl S {\n        pub fn go() {}\n    }\n    pub fn free() {}\n}\nmod declared_elsewhere;\n",
+        );
+
+        assert_eq!(symbol(&idx, "a.inner").kind, SymbolKind::Module);
+        symbol(&idx, "a.inner.S.go");
+        assert_eq!(symbol(&idx, "a.inner.free").kind, SymbolKind::Function);
+        assert!(!idx.symbols.iter().any(|s| s.name == "declared_elsewhere"));
+    }
+
+    fn test_chunks(idx: &FileIndex) -> Vec<String> {
+        idx.chunks
+            .iter()
+            .filter(|c| c.is_test)
+            .map(|c| idx.symbols[c.symbol.unwrap()].name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn helpers_and_every_item_in_a_test_module_are_test_code() {
+        let idx = parsed(
+            "a.rs",
+            "fn real() {}\n\n#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    use super::*;\n\n    fn helper() {}\n\n    struct Fixture;\n    impl Fixture {\n        fn build() {}\n    }\n\n    #[test]\n    fn checks() {}\n}\n",
+        );
+
+        let mut names = test_chunks(&idx);
+        names.sort();
+        assert_eq!(names, ["Fixture", "build", "checks", "helper", "tests"]);
+    }
+
+    #[test]
+    fn test_attributes_are_recognised_under_any_runner() {
+        for attribute in [
+            "#[test]",
+            "#[tokio::test]",
+            "#[tokio::test(flavor = \"multi_thread\")]",
+            "#[async_std::test]",
+            "#[rstest]",
+            "#[test_case(1)]",
+            "#[wasm_bindgen_test]",
+            "#[cfg(test)]",
+            "#[cfg(all(test, unix))]",
+        ] {
+            let idx = parsed("a.rs", &format!("{attribute}\nfn f() {{}}\n"));
+            assert_eq!(test_chunks(&idx), ["f"], "{attribute}");
+        }
+    }
+
+    #[test]
+    fn a_test_attribute_above_a_doc_comment_counts() {
+        let idx = parsed("a.rs", "#[test]\n// Explains.\nfn f() {}\n");
+        assert_eq!(test_chunks(&idx), ["f"]);
+    }
+
+    #[test]
+    fn production_attributes_are_not_test_code() {
+        for attribute in [
+            "#[cfg(not(test))]",
+            "#[cfg(feature = \"test-utils\")]",
+            "#[inline]",
+            "#[derive(Debug)]",
+            "#[attest]",
+        ] {
+            let idx = parsed("a.rs", &format!("{attribute}\nfn f() {{}}\n"));
+            assert!(test_chunks(&idx).is_empty(), "{attribute}");
+        }
+    }
+
+    #[test]
+    fn a_cfg_test_impl_flags_its_methods() {
+        let idx = parsed(
+            "a.rs",
+            "struct A;\n\n#[cfg(test)]\nimpl A {\n    fn only_in_tests() {}\n}\n",
+        );
+        assert_eq!(test_chunks(&idx), ["only_in_tests"]);
+    }
+
+    #[test]
+    fn other_languages_are_never_flagged() {
+        let idx = parsed("a.py", "@test\ndef f():\n    pass\n");
+        assert!(test_chunks(&idx).is_empty());
+    }
 }

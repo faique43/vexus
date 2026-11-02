@@ -178,11 +178,11 @@ impl Store {
 
     /// Multiply each candidate chunk's fused score by the structural
     /// penalties it earns (see `priors.rs` for the rationale and
-    /// magnitudes): test code — by path convention, or by a Rust
-    /// `#[cfg(test)]`/`#[test]` content sniff since inline test modules
-    /// live on production paths — module-level preamble (the chunk's owning
-    /// symbol is the file's module), and sub-floor tiny fragments. The test
-    /// penalty is suspended entirely when the query itself asks about tests.
+    /// magnitudes): test code — by path convention, or flagged at index time
+    /// since inline test modules live on production paths — module-level
+    /// preamble (the chunk's owning symbol is the file's module), and
+    /// sub-floor tiny fragments. The test penalty is suspended entirely when
+    /// the query itself asks about tests.
     ///
     /// One point lookup per candidate (≤ 2×CANDIDATES rows, same
     /// prepared-statement pattern as `hydrate_hits`) — sub-millisecond
@@ -199,9 +199,7 @@ impl Store {
             return Ok(());
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT c.token_count, f.path, s.kind,
-                    (f.lang = 'rust' AND (instr(c.content, '#[cfg(test)]') > 0
-                                          OR instr(c.content, '#[test]') > 0))
+            "SELECT c.token_count, f.path, s.kind, c.is_test
              FROM chunks c JOIN files f ON f.id = c.file_id
              LEFT JOIN symbols s ON s.id = c.symbol_id WHERE c.id = ?1",
         )?;
@@ -211,10 +209,10 @@ impl Store {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .optional()?;
-            let Some((token_count, path, kind, rust_test_sniff)) = row else {
+            let Some((token_count, path, kind, is_test)) = row else {
                 continue; // chunk deleted between rank and lookup
             };
-            if !skip_test_penalty && (crate::priors::is_test_path(&path) || rust_test_sniff) {
+            if !skip_test_penalty && (crate::priors::is_test_path(&path) || is_test) {
                 *score *= priors.test;
             }
             if kind.as_deref() == Some("module") {
@@ -227,19 +225,15 @@ impl Store {
         Ok(())
     }
 
-    /// Whether a symbol is test code: by path convention, or by the Rust
-    /// content sniff `apply_ranking_priors` uses, since inline tests live on
-    /// production paths.
+    /// Whether a symbol is test code: by path convention, or by the index-time
+    /// flag `apply_ranking_priors` uses, since inline tests live on production
+    /// paths.
     pub fn is_test_symbol(&self, symbol_id: i64, path: &str) -> Result<bool> {
         if crate::priors::is_test_path(path) {
             return Ok(true);
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT EXISTS(
-                 SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id
-                 WHERE c.symbol_id = ?1 AND f.lang = 'rust'
-                   AND (instr(c.content, '#[cfg(test)]') > 0
-                        OR instr(c.content, '#[test]') > 0))",
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE symbol_id = ?1 AND is_test = 1)",
         )?;
         Ok(stmt.query_row([symbol_id], |r| r.get(0))?)
     }
@@ -300,6 +294,7 @@ mod tests {
             }],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: 1,
                 end_line: 4,
@@ -343,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_cfg_test_sniff_demotes_inline_tests_on_a_production_path() {
+    fn flagged_test_chunk_ranks_below_an_identical_production_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         store
@@ -354,21 +349,23 @@ mod tests {
                 &one_fn_file("src.billing.charge", "frobnicate"),
             )
             .unwrap();
-        let mut sniffed = one_fn_file("src.orders.charge_twice", "frobnicate");
-        sniffed.chunks[0].content = format!("#[cfg(test)]\n{}", sniffed.chunks[0].content);
+        let mut flagged = one_fn_file("src.orders.tests.charge_twice", "frobnicate");
+        flagged.chunks[0].is_test = true;
         store
-            .replace_file("src/orders.rs", "rust", &[2u8; 32], &sniffed)
+            .replace_file("src/orders.rs", "rust", &[2u8; 32], &flagged)
             .unwrap();
 
         let (hits, _) = store
             .search_hybrid_scored("frobnicate", None, None, 10)
             .unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(
-            hits[0].path, "src/billing.rs",
-            "the #[cfg(test)]-sniffed chunk must rank below the clean one \
-             despite both living on production paths"
-        );
+        assert_eq!(hits[0].path, "src/billing.rs");
+        assert!(store
+            .is_test_symbol(hits[1].symbol_id.unwrap(), &hits[1].path)
+            .unwrap());
+        assert!(!store
+            .is_test_symbol(hits[0].symbol_id.unwrap(), &hits[0].path)
+            .unwrap());
     }
 
     #[test]
@@ -435,12 +432,14 @@ mod tests {
                 // Module-preamble chunk: owned by the module symbol, and
                 // tiny — an import line. Earns both penalties.
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "from frobnicate import frobnicate\n".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(1),
                     start_line: 10,
                     end_line: 14,
@@ -482,6 +481,7 @@ mod tests {
         };
         let mut symbols = vec![module];
         let mut chunks = vec![NewChunk {
+            is_test: false,
             symbol: Some(0),
             start_line: 1,
             end_line: 5,
@@ -499,6 +499,7 @@ mod tests {
                 arity: Some(0),
             });
             chunks.push(NewChunk {
+                is_test: false,
                 symbol: Some(i as usize + 1),
                 start_line: 10 + i * 5,
                 end_line: 12 + i * 5,
@@ -569,6 +570,7 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 3,
@@ -576,6 +578,7 @@ mod tests {
                         .into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: None,
                     start_line: 5,
                     end_line: 6,
@@ -620,18 +623,21 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "keyword banana split".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 3,
                     end_line: 3,
                     content: "vector only content".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 5,
                     end_line: 5,
@@ -706,12 +712,14 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "alpha near".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 3,
                     end_line: 3,
@@ -792,12 +800,14 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "banana one".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 2,
                     end_line: 2,

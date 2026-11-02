@@ -401,6 +401,23 @@ mod tests {
     }
 
     #[test]
+    fn open_type_dot_method_picks_the_rust_impl_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "lib.rs",
+            "struct Store;\nimpl Store {\n    fn open() -> u8 { 1 }\n}\nstruct Index;\nimpl Index {\n    fn open() -> u8 { 2 }\n}\n",
+        );
+
+        let state = indexed_state(root);
+        let out = open_text(&state, "Store.open", None);
+
+        assert!(out.contains("lib.rs:3-3"), "got: {out:?}");
+        assert!(out.contains("{ 1 }"), "got: {out:?}");
+    }
+
+    #[test]
     fn open_ambiguous_name_returns_candidates_and_narrow_hint() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

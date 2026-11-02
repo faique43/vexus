@@ -43,7 +43,7 @@
 /// in production; tests build custom values directly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Priors {
-    /// Applied when the chunk is test code (path pattern or content sniff).
+    /// Applied when the chunk is test code (path pattern or index-time flag).
     pub test: f64,
     /// Applied when the chunk belongs to a module symbol — i.e. it is
     /// module-level preamble (imports, constants between definitions), not
@@ -94,8 +94,8 @@ impl Priors {
 /// Whether `path` (repo-relative, `/`-separated) is test code by naming
 /// convention: a test directory component or a test-suffixed/prefixed
 /// filename. Deliberately conservative — a false positive penalizes real
-/// code, a false negative just leaves one test chunk unpenalized (the
-/// content sniff still catches Rust's in-file `#[cfg(test)]` case).
+/// code, a false negative just leaves one test chunk unpenalized (Rust's
+/// in-file tests are flagged at index time instead).
 pub fn is_test_path(path: &str) -> bool {
     for component in path.split('/') {
         let c = component.to_ascii_lowercase();
