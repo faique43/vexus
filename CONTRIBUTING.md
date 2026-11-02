@@ -37,7 +37,7 @@ Run these before pushing. They are the same three jobs that gate a PR:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --workspace                          # ~360 tests
+cargo test --workspace                          # ~380 tests
 cargo run --release -p vexus-eval -- check      # retrieval-metric ratchet
 ```
 

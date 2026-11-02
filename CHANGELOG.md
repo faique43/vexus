@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — explore returns a map
+## v0.4.0 — explore returns a map
 
 Live Claude Code sessions showed `explore` costing up to 3.6× what plain
 Read/Grep/Glob did on real repos, on the same day the synthetic benchmark said
