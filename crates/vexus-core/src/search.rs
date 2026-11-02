@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
@@ -23,19 +25,77 @@ pub struct SearchHit {
     pub content: String,
 }
 
-/// Turn arbitrary user text into a safe FTS5 query: each alphanumeric term
-/// double-quoted, OR-joined. Empty input → None.
-fn sanitize_fts(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
+/// Words a code search learns nothing from in any query: English function
+/// words and the verbs questions are phrased with. Nearly every chunk has
+/// them, so searching them ranks chunks by how much prose they hold and makes
+/// any question look matched. Sorted, for `binary_search`.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "above", "after", "again", "all", "also", "am", "an", "and", "any", "are", "as",
+    "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+    "can", "could", "did", "do", "does", "doing", "done", "down", "during", "each", "even",
+    "every", "few", "for", "from", "further", "had", "happen", "happens", "has", "have", "having",
+    "he", "her", "here", "hers", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its",
+    "itself", "just", "may", "me", "might", "more", "most", "must", "my", "no", "nor", "not",
+    "now", "of", "off", "on", "once", "one", "only", "or", "other", "our", "out", "over", "own",
+    "s", "same", "she", "should", "so", "some", "still", "such", "t", "than", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "those", "through", "to", "too",
+    "under", "until", "up", "us", "very", "was", "we", "were", "what", "when", "where", "which",
+    "while", "who", "whom", "whose", "why", "will", "with", "work", "works", "would", "you",
+    "your",
+];
+
+/// Whether `word`, already lowercase, is a stopword.
+pub(crate) fn is_stopword(word: &str) -> bool {
+    STOPWORDS.binary_search(&word).is_ok()
+}
+
+fn query_terms(query: &str) -> impl Iterator<Item = &str> {
+    query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
-        .collect();
+}
+
+fn content_terms(query: &str) -> Vec<&str> {
+    query_terms(query)
+        .filter(|t| !is_stopword(&t.to_lowercase()))
+        .collect()
+}
+
+/// Turn arbitrary user text into a safe FTS5 query: each alphanumeric term
+/// double-quoted, OR-joined, without stopwords. A query of nothing but
+/// stopwords keeps them, since `once` and `from` can also be names. Empty
+/// input → None.
+fn sanitize_fts(query: &str) -> Option<String> {
+    let mut terms = content_terms(query);
     if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" OR "))
+        terms = query_terms(query).collect();
     }
+    if terms.is_empty() {
+        return None;
+    }
+    let quoted: Vec<String> = terms.iter().map(|t| format!("\"{t}\"")).collect();
+    Some(quoted.join(" OR "))
+}
+
+/// Whether `content` holds at least half of `terms`. A keyword hit needs that
+/// to count as evidence of a match, because any question has some generic word
+/// the corpus also has: `configure` is no sign a web framework knows about
+/// "configure kubernetes pod autoscaling".
+fn covers_terms(content: &str, terms: &[&str]) -> bool {
+    let is_word_break = |c: char| !c.is_alphanumeric();
+    let words: HashSet<String> = content
+        .split(is_word_break)
+        .map(str::to_lowercase)
+        .collect();
+    // FTS breaks `alpha_process` at the underscore, so a term matches the same way.
+    let matched = terms
+        .iter()
+        .filter(|term| {
+            let mut parts = term.split(is_word_break).filter(|p| !p.is_empty());
+            parts.all(|part| words.contains(&part.to_lowercase()))
+        })
+        .count();
+    matched > 0 && matched * 2 >= terms.len()
 }
 
 const RRF_K: f64 = 60.0;
@@ -47,10 +107,11 @@ const CANDIDATES: u32 = 50;
 /// for this; membership can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchOutcome {
-    /// At least one keyword hit, or at least one KNN candidate under the
-    /// distance floor (or no floor to judge by) — the hits mean something.
+    /// A keyword hit holding at least half the query's terms, or at least one
+    /// KNN candidate under the distance floor (or no floor to judge by) — the
+    /// hits mean something.
     Strong,
-    /// Keyword search found nothing and every KNN candidate sat above the
+    /// No keyword hit covers the query and every KNN candidate sat above the
     /// distance floor: the hits are merely the corpus's nearest neighbors
     /// to a query nothing indexed actually matches. Callers should say so
     /// (and suggest grep) instead of presenting them as an answer.
@@ -113,8 +174,9 @@ impl Store {
     /// `search_hybrid` plus a KNN distance floor and an honesty signal.
     ///
     /// KNN candidates at distance ≤ `knn_floor` fuse with keyword hits as
-    /// usual. When keyword search finds nothing AND no KNN candidate clears
-    /// the floor, the above-floor candidates are ranked anyway — a non-empty
+    /// usual. When no keyword hit covers the query (see `covers_terms`) AND no
+    /// KNN candidate clears the floor, the above-floor candidates are ranked
+    /// anyway alongside whatever keywords did hit — a non-empty
     /// corpus should still show its nearest neighbors — but the outcome says
     /// `WeakVectorOnly` so the caller can present them as guesses, not
     /// answers. `knn_floor: None` (no embedder-specific floor, or the mock
@@ -130,13 +192,12 @@ impl Store {
         use std::collections::HashMap;
         let mut scores: HashMap<i64, f64> = HashMap::new();
 
-        let mut keyword_hit = false;
-        for (rank, hit) in self
-            .search_keyword(query_text, CANDIDATES)?
+        let keyword_hits = self.search_keyword(query_text, CANDIDATES)?;
+        let terms = content_terms(query_text);
+        let keyword_hit = keyword_hits
             .iter()
-            .enumerate()
-        {
-            keyword_hit = true;
+            .any(|hit| covers_terms(&hit.content, &terms));
+        for (rank, hit) in keyword_hits.iter().enumerate() {
             *scores.entry(hit.chunk_id).or_default() += 1.0 / (RRF_K + rank as f64);
         }
 
@@ -288,6 +349,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::SearchOutcome;
     use crate::model::*;
     use crate::Store;
 
@@ -592,6 +654,109 @@ mod tests {
             .apply_ranking_priors("frobnicate", &mut scores, &off)
             .unwrap();
         assert_eq!(scores, expected, "all-1.0 coefficients must be a no-op");
+    }
+
+    /// Search-side fixture: one chunk about `words`, plus a far vector, so
+    /// only keyword evidence can make the outcome strong.
+    fn store_with_chunks(chunks: &[&str]) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        for (i, words) in chunks.iter().enumerate() {
+            let path = format!("f{i}.py");
+            let qualname = format!("f{i}.f");
+            let mut idx = one_fn_file(&qualname, words);
+            idx.chunks[0].content = format!("def f():\n    # {words}\n");
+            store
+                .replace_file(&path, "python", &[i as u8; 32], &idx)
+                .unwrap();
+        }
+        (dir, store)
+    }
+
+    #[test]
+    fn stopwords_stay_sorted_for_binary_search() {
+        assert!(super::STOPWORDS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn stopwords_do_not_decide_the_ranking() {
+        let (_d, store) = store_with_chunks(&[
+            "how does this work and what does it do with all of the things",
+            "frobnicate the widget",
+        ]);
+
+        let hits = store
+            .search_keyword("how does frobnicate work", 10)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].path, "f1.py");
+    }
+
+    #[test]
+    fn code_vocabulary_is_not_a_stopword() {
+        let (_d, store) = store_with_chunks(&["class method function value", "other words"]);
+
+        let hits = store.search_keyword("the class", 10).unwrap();
+
+        assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    /// `once` and `from` are also method names, and a query of nothing else
+    /// has told us what it wants.
+    #[test]
+    fn a_query_of_only_stopwords_still_searches_what_was_typed() {
+        let (_d, store) = store_with_chunks(&["emitter once listener"]);
+
+        let hits = store.search_keyword("once", 10).unwrap();
+
+        assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    /// No KNN candidate is near, as with an unrelated question on a real
+    /// embedder, so the outcome rests on keyword evidence alone.
+    fn outcome(store: &Store, query: &str) -> SearchOutcome {
+        store.search_hybrid_scored(query, None, None, 10).unwrap().1
+    }
+
+    #[test]
+    fn stopword_hits_are_not_evidence_of_a_match() {
+        let (_d, store) = store_with_chunks(&["how does this work and what does it do"]);
+
+        assert_eq!(
+            outcome(&store, "how does this work"),
+            SearchOutcome::WeakVectorOnly
+        );
+    }
+
+    /// "how do I configure kubernetes pod autoscaling" on a web framework: a
+    /// generic word matches somewhere, and the subject matches nowhere.
+    #[test]
+    fn one_generic_word_is_not_evidence_for_a_longer_question() {
+        let (_d, store) = store_with_chunks(&["configure the server", "autoscale nothing here"]);
+
+        assert_eq!(
+            outcome(&store, "how do I configure kubernetes pod autoscaling"),
+            SearchOutcome::WeakVectorOnly
+        );
+    }
+
+    #[test]
+    fn a_chunk_holding_half_the_terms_is_evidence() {
+        let (_d, store) = store_with_chunks(&["configure the kubernetes client"]);
+
+        assert_eq!(
+            outcome(&store, "configure kubernetes pod autoscaling"),
+            SearchOutcome::Strong
+        );
+    }
+
+    #[test]
+    fn a_term_split_across_separators_still_counts_as_matched() {
+        let (_d, store) = store_with_chunks(&["alpha_process runs"]);
+
+        assert_eq!(outcome(&store, "alpha process"), SearchOutcome::Strong);
+        assert_eq!(outcome(&store, "alpha_process"), SearchOutcome::Strong);
     }
 
     #[test]

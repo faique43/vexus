@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use crate::priors::{is_non_core_path, is_non_core_word, is_test_path};
+use crate::search::is_stopword;
 use crate::Store;
 
 /// Long prompts wander, so only their earliest terms get searched: reports
@@ -22,116 +23,53 @@ const MAX_NAMED_MATCHES: usize = 2;
 const SEARCH_CANDIDATES: u32 = 40;
 const MIN_TERM_CHARS: usize = 3;
 
-/// Words a code search learns nothing from: English, plus the vocabulary of
-/// issue templates and of any bug report.
-const NOISE_WORDS: &[&str] = &[
-    "about",
-    "above",
+/// The vocabulary of issue templates and of any bug report, which a code search
+/// learns nothing from on top of `is_stopword`'s words. Search can't share this
+/// one: outside a report, `class` and `function` say what's being looked for.
+const REPORT_WORDS: &[&str] = &[
     "actual",
     "add",
     "added",
     "adding",
-    "after",
-    "again",
-    "all",
     "already",
-    "also",
     "always",
-    "and",
-    "any",
-    "are",
-    "because",
-    "been",
-    "before",
     "behavior",
     "behaviour",
-    "being",
-    "below",
-    "between",
-    "both",
     "bug",
-    "but",
     "call",
     "called",
     "calling",
     "calls",
-    "can",
     "change",
     "changed",
     "changing",
     "class",
     "code",
-    "could",
     "current",
-    "did",
-    "does",
-    "doing",
-    "done",
-    "down",
-    "during",
-    "each",
     "environment",
-    "even",
-    "every",
     "existing",
     "expected",
-    "few",
     "fix",
     "fixed",
     "fixes",
-    "for",
-    "from",
     "function",
-    "further",
     "get",
     "gets",
     "got",
-    "had",
-    "happen",
-    "happens",
-    "has",
-    "have",
-    "having",
-    "her",
-    "here",
-    "him",
-    "his",
-    "how",
     "instead",
-    "into",
     "issue",
     "issues",
-    "its",
-    "itself",
-    "just",
     "like",
     "made",
     "make",
     "makes",
-    "may",
     "method",
-    "might",
     "minimum",
-    "more",
-    "most",
-    "must",
     "need",
     "needs",
     "never",
     "new",
     "node",
-    "nor",
-    "not",
-    "now",
-    "off",
-    "once",
-    "one",
-    "only",
-    "other",
-    "our",
-    "out",
-    "over",
-    "own",
     "package",
     "packages",
     "please",
@@ -144,31 +82,10 @@ const NOISE_WORDS: &[&str] = &[
     "return",
     "returned",
     "returns",
-    "same",
     "search",
-    "she",
-    "should",
-    "some",
     "steps",
-    "still",
-    "such",
-    "than",
     "thanks",
-    "that",
-    "the",
-    "their",
-    "them",
-    "then",
-    "there",
-    "these",
-    "they",
-    "this",
-    "those",
-    "through",
-    "too",
     "typescript",
-    "under",
-    "until",
     "use",
     "used",
     "uses",
@@ -177,22 +94,7 @@ const NOISE_WORDS: &[&str] = &[
     "values",
     "version",
     "versions",
-    "very",
     "want",
-    "was",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "while",
-    "who",
-    "why",
-    "will",
-    "with",
-    "would",
-    "you",
-    "your",
 ];
 
 /// A symbol worth looking at for a prompt.
@@ -265,7 +167,8 @@ pub fn focus_query(prompt: &str) -> String {
         for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
             let lower = word.to_ascii_lowercase();
             if word.chars().count() >= MIN_TERM_CHARS
-                && NOISE_WORDS.binary_search(&lower.as_str()).is_err()
+                && !is_stopword(&lower)
+                && REPORT_WORDS.binary_search(&lower.as_str()).is_err()
                 && !is_non_core_word(&lower)
                 && seen.insert(lower)
             {
@@ -453,6 +356,12 @@ mod tests {
             let hints = store.locate(prompt, None, None, 5).unwrap();
             assert_eq!(hints[0].path, "src/b.py", "{prompt}: {hints:?}");
         }
+    }
+
+    #[test]
+    fn report_words_stay_sorted_and_apart_from_stopwords() {
+        assert!(REPORT_WORDS.windows(2).all(|w| w[0] < w[1]));
+        assert!(!REPORT_WORDS.iter().any(|w| is_stopword(w)));
     }
 
     #[test]

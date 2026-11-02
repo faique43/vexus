@@ -10,7 +10,7 @@
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
 //!    → entry chunks, trimmed by `RELEVANCE_FLOOR`. `entry_limit` and the
 //!    limits below scale with the corpus tier — see `params_for`. A
-//!    `WeakVectorOnly` outcome (no keyword hit, nothing under the KNN floor)
+//!    `WeakVectorOnly` outcome (no real keyword hit, nothing under the KNN floor)
 //!    renders under a "weak match" note and skips step 2.
 //! 2. One hop of callees and callers from the first `max_entry_symbols`
 //!    distinct entry symbols adds neighbors, up to `max_neighbor_ids`, along
