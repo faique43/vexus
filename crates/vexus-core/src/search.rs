@@ -181,8 +181,9 @@ impl Store {
     /// magnitudes): test code — by path convention, or by a Rust
     /// `#[cfg(test)]`/`#[test]` content sniff since inline test modules
     /// live on production paths — module-level preamble (the chunk's owning
-    /// symbol is the file's module), and sub-floor tiny fragments. The test
-    /// penalty is suspended entirely when the query itself asks about tests.
+    /// symbol is the file's module), sub-floor tiny fragments, and non-core
+    /// directories. The test and non-core penalties are suspended entirely
+    /// when the query itself asks about that code.
     ///
     /// One point lookup per candidate (≤ 2×CANDIDATES rows, same
     /// prepared-statement pattern as `hydrate_hits`) — sub-millisecond
@@ -194,7 +195,12 @@ impl Store {
         priors: &crate::priors::Priors,
     ) -> Result<()> {
         let skip_test_penalty = priors.test == 1.0 || crate::priors::query_seeks_tests(query_text);
-        let all_disabled = skip_test_penalty && priors.preamble == 1.0 && priors.tiny == 1.0;
+        let skip_non_core_penalty =
+            priors.non_core == 1.0 || crate::priors::query_seeks_non_core(query_text);
+        let all_disabled = skip_test_penalty
+            && skip_non_core_penalty
+            && priors.preamble == 1.0
+            && priors.tiny == 1.0;
         if all_disabled {
             return Ok(());
         }
@@ -216,6 +222,9 @@ impl Store {
             };
             if !skip_test_penalty && (crate::priors::is_test_path(&path) || rust_test_sniff) {
                 *score *= priors.test;
+            }
+            if !skip_non_core_penalty && crate::priors::is_non_core_path(&path) {
+                *score *= priors.non_core;
             }
             if kind.as_deref() == Some("module") {
                 *score *= priors.preamble;
@@ -403,6 +412,39 @@ mod tests {
     }
 
     #[test]
+    fn a_sample_copy_ranks_below_the_project_code_it_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        // The copy mentions the keyword more, so relevance alone puts it first.
+        let mut copy = one_fn_file("sample.pipes.parse_int", "frobnicate");
+        copy.chunks[0].content.push_str("frobnicate frobnicate\n");
+        store
+            .replace_file("sample/01/pipes.py", "python", &[1u8; 32], &copy)
+            .unwrap();
+        store
+            .replace_file(
+                "packages/common/pipes.py",
+                "python",
+                &[2u8; 32],
+                &one_fn_file("packages.common.pipes.parse_int", "frobnicate"),
+            )
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(hits[0].path, "packages/common/pipes.py");
+
+        let (hits, _) = store
+            .search_hybrid_scored("sample of frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(
+            hits[0].path, "sample/01/pipes.py",
+            "a query asking for samples must not have them penalized"
+        );
+    }
+
+    #[test]
     fn module_preamble_and_tiny_chunks_are_demoted() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
@@ -543,6 +585,7 @@ mod tests {
             test: 1.0,
             preamble: 1.0,
             tiny: 1.0,
+            non_core: 1.0,
             tiny_floor: 32,
         };
         store

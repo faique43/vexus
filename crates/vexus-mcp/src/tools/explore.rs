@@ -14,8 +14,8 @@
 //!    renders under a "weak match" note and skips step 2.
 //! 2. One hop of callees and callers from the first `max_entry_symbols`
 //!    distinct entry symbols adds neighbors, up to `max_neighbor_ids`, along
-//!    with what the top hit's callers also call. Test code is skipped unless
-//!    the question asks about tests.
+//!    with what the top hit's callers also call. Test and non-core code are
+//!    skipped unless the question asks about them.
 //! 3. Rows render best first, grouped by file, until the budget runs out. The
 //!    top `LINKED_ROWS` rows also show their call links, which is what the
 //!    index knows that grep doesn't.
@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use vexus_watch::pipeline;
 
 use vexus_core::model::estimate_tokens;
-use vexus_core::priors::query_seeks_tests;
+use vexus_core::priors::{is_non_core_path, query_seeks_non_core, query_seeks_tests};
 use vexus_core::query::{EdgeHit, Resolution, SymbolInfo};
 use vexus_core::search::{SearchHit, SearchOutcome};
 use vexus_core::Store;
@@ -159,33 +159,49 @@ fn is_test_code(store: &Store, info: &SymbolInfo) -> bool {
     store.is_test_symbol(info.id, &info.path).unwrap_or(false)
 }
 
+/// What a map shows besides the project's own code. Neither kind of code gets
+/// there through the call graph unasked: a test or sample is a real caller of
+/// what it exercises, so one hop would otherwise fill the map with them.
+#[derive(Clone, Copy)]
+struct Scope {
+    tests: bool,
+    non_core: bool,
+}
+
+impl Scope {
+    fn allows(self, store: &Store, info: &SymbolInfo) -> bool {
+        (self.tests || !is_test_code(store, info))
+            && (self.non_core || !is_non_core_path(&info.path))
+    }
+}
+
 /// The distinct symbols on the far end of `edges` that a map may show, up to
 /// `NEIGHBOR_LIMIT`. The store's limit can't do this: rows arrive in id order,
 /// so a cut before filtering lets repeat call sites and test code use up the
 /// slots of everything indexed after them.
-fn linked_symbols(store: &Store, edges: Vec<EdgeHit>, wants_tests: bool) -> Vec<SymbolInfo> {
+fn linked_symbols(store: &Store, edges: Vec<EdgeHit>, scope: Scope) -> Vec<SymbolInfo> {
     let mut seen = HashSet::new();
     edges
         .into_iter()
         .filter(|e| e.confidence.is_some() && seen.insert(e.symbol.id))
-        .filter(|e| wants_tests || !is_test_code(store, &e.symbol))
+        .filter(|e| scope.allows(store, &e.symbol))
         .map(|e| e.symbol)
         .take(NEIGHBOR_LIMIT)
         .collect()
 }
 
-fn callers_shown(store: &Store, symbol_id: i64, wants_tests: bool) -> Vec<SymbolInfo> {
+fn callers_shown(store: &Store, symbol_id: i64, scope: Scope) -> Vec<SymbolInfo> {
     let edges = store.callers_of(symbol_id, NEIGHBOR_DEPTH, u32::MAX);
-    linked_symbols(store, edges.unwrap_or_default(), wants_tests)
+    linked_symbols(store, edges.unwrap_or_default(), scope)
 }
 
-fn callees_shown(store: &Store, symbol_id: i64, wants_tests: bool) -> Vec<SymbolInfo> {
+fn callees_shown(store: &Store, symbol_id: i64, scope: Scope) -> Vec<SymbolInfo> {
     let edges = store.callees_of(symbol_id, NEIGHBOR_DEPTH, u32::MAX);
-    linked_symbols(store, edges.unwrap_or_default(), wants_tests)
+    linked_symbols(store, edges.unwrap_or_default(), scope)
 }
 
 /// `calls: a, b  called by: c` for a symbol, or `None` if it has no links.
-fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String> {
+fn link_line(store: &Store, symbol_id: i64, scope: Scope) -> Option<String> {
     let names = |symbols: Vec<SymbolInfo>| -> Vec<String> {
         let mut seen = HashSet::new();
         symbols
@@ -195,8 +211,8 @@ fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String>
             .take(MAX_LINKS)
             .collect()
     };
-    let callees = names(callees_shown(store, symbol_id, wants_tests));
-    let callers = names(callers_shown(store, symbol_id, wants_tests));
+    let callees = names(callees_shown(store, symbol_id, scope));
+    let callers = names(callers_shown(store, symbol_id, scope));
     let mut parts = Vec::new();
     if !callees.is_empty() {
         parts.push(format!("calls: {}", callees.join(", ")));
@@ -208,7 +224,7 @@ fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String>
 }
 
 /// Groups rows by file, best file first, spending at most `budget_tokens`.
-fn render_map(store: &Store, rows: &[Row], wants_tests: bool, budget_tokens: u32) -> String {
+fn render_map(store: &Store, rows: &[Row], scope: Scope, budget_tokens: u32) -> String {
     let mut paths: Vec<&str> = Vec::new();
     for row in rows {
         if !paths.contains(&row.path.as_str()) {
@@ -232,7 +248,7 @@ fn render_map(store: &Store, rows: &[Row], wants_tests: bool, budget_tokens: u32
             if let Some(links) = row
                 .symbol_id
                 .filter(|id| linked.contains(id))
-                .and_then(|id| link_line(store, id, wants_tests))
+                .and_then(|id| link_line(store, id, scope))
             {
                 line.push_str(&format!("  {links}\n"));
             }
@@ -292,7 +308,11 @@ fn render_named(store: &Store, info: &SymbolInfo) -> Option<String> {
         info.end_line,
         truncated(info.sig.as_deref().unwrap_or(&info.qualname))
     );
-    if let Some(links) = link_line(store, info.id, false) {
+    let scope = Scope {
+        tests: false,
+        non_core: is_non_core_path(&info.path),
+    };
+    if let Some(links) = link_line(store, info.id, scope) {
         out.push_str(&format!("  {links}\n"));
     }
     out.push_str(&format!("```\n{source}```\n"));
@@ -336,7 +356,6 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
     let weak = outcome == SearchOutcome::WeakVectorOnly;
-    let wants_tests = query_seeks_tests(question);
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: HashSet<i64> = HashSet::new();
@@ -363,6 +382,13 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         }
     }
 
+    // A best match in non-core code means the question is about that code.
+    let scope = Scope {
+        tests: query_seeks_tests(question),
+        non_core: query_seeks_non_core(question)
+            || rows.first().is_some_and(|r| is_non_core_path(&r.path)),
+    };
+
     if !weak {
         let mut neighbors: Vec<SymbolInfo> = Vec::new();
         for (rank, id) in entry_symbols
@@ -370,8 +396,8 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .take(params.max_entry_symbols)
             .enumerate()
         {
-            let callers = callers_shown(&store, *id, wants_tests);
-            let callees = callees_shown(&store, *id, wants_tests);
+            let callers = callers_shown(&store, *id, scope);
+            let callees = callees_shown(&store, *id, scope);
             // Siblings of the best match: the other steps its callers take
             // are usually the rest of the flow being asked about.
             let siblings: Vec<SymbolInfo> = if rank == 0 {
@@ -379,7 +405,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
                     .iter()
                     .filter(|caller| caller.kind != "module")
                     .take(SIBLING_CALLERS)
-                    .flat_map(|caller| callees_shown(&store, caller.id, wants_tests))
+                    .flat_map(|caller| callees_shown(&store, caller.id, scope))
                     .collect()
             } else {
                 Vec::new()
@@ -395,7 +421,7 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
     }
 
     let note = if weak { WEAK_MATCH_TEXT } else { MAP_NOTE };
-    let map = render_map(&store, &rows, wants_tests, budget_tokens);
+    let map = render_map(&store, &rows, scope, budget_tokens);
     drop(store);
     apply_header(fresh_header, format!("{question_header}{note}\n\n{map}"))
 }
@@ -780,6 +806,57 @@ mod tests {
         assert_eq!(preamble_label("# Only a comment.\n"), "# Only a comment.");
         assert_eq!(preamble_label("/**\n * Only docs.\n */\n"), "* Only docs.");
         assert_eq!(preamble_label("})\n"), "})");
+    }
+
+    /// Examples call a library's public functions all day, so one hop from
+    /// a core function lands in them: 13 of 24 rows on an Express question.
+    #[test]
+    fn graph_expansion_skips_examples_unless_the_question_asks_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "lib/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        write(
+            root,
+            "lib/job.py",
+            "from lib.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
+        );
+        write(
+            root,
+            "examples/demo.py",
+            "from lib.core import settle\n\n\ndef show_it_off():\n    return settle(2)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+        assert!(out.contains("def run_job"), "{out}");
+        assert!(!out.contains("show_it_off"), "{out}");
+
+        let out = explore_text(&state, "reticulates splines examples", None);
+        assert!(out.contains("def show_it_off"), "{out}");
+    }
+
+    /// When the best match is itself in a sample, the question is about that
+    /// sample, and its neighbours are the rest of the answer.
+    #[test]
+    fn a_question_answered_by_a_sample_keeps_the_samples_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "sample/cats.py",
+            "def adopt(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return helper(x)\n\n\ndef helper(x):\n    return x\n",
+        );
+        write(root, "lib/core.py", "def settle(x):\n    return x\n");
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("def adopt"), "{out}");
+        assert!(out.contains("def helper"), "{out}");
     }
 
     /// An unresolved `x.drain_queue()` names no target, so it can't be shown
