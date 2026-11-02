@@ -11,7 +11,8 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::priors::is_test_path;
+use crate::priors::{is_non_core_path, is_non_core_word, is_test_path};
+use crate::search::is_stopword;
 use crate::Store;
 
 /// Long prompts wander, so only their earliest terms get searched: reports
@@ -20,121 +21,55 @@ const MAX_QUERY_TERMS: usize = 20;
 /// A name with more definitions than this says little about which one's meant.
 const MAX_NAMED_MATCHES: usize = 2;
 const SEARCH_CANDIDATES: u32 = 40;
-/// Samples and integration apps repeat the project's own names, so they match
-/// as well as the code they copy. This keeps them from outranking it.
-const NON_CORE_WEIGHT: f64 = 0.3;
 const MIN_TERM_CHARS: usize = 3;
 
-/// Words a code search learns nothing from: English, plus the vocabulary of
-/// issue templates and of any bug report.
-const NOISE_WORDS: &[&str] = &[
-    "about",
-    "above",
+/// The vocabulary of issue templates and of any bug report, which a code search
+/// learns nothing from on top of `is_stopword`'s words. Search can't share this
+/// one: outside a report, `class` and `function` say what's being looked for.
+const REPORT_WORDS: &[&str] = &[
     "actual",
     "add",
     "added",
     "adding",
-    "after",
-    "again",
-    "all",
     "already",
-    "also",
     "always",
-    "and",
-    "any",
-    "are",
-    "because",
-    "been",
-    "before",
     "behavior",
     "behaviour",
-    "being",
-    "below",
-    "between",
-    "both",
     "bug",
-    "but",
     "call",
     "called",
     "calling",
     "calls",
-    "can",
     "change",
     "changed",
     "changing",
     "class",
     "code",
-    "could",
     "current",
-    "did",
-    "does",
-    "doing",
-    "done",
-    "down",
-    "during",
-    "each",
     "environment",
-    "even",
-    "every",
     "existing",
     "expected",
-    "few",
     "fix",
     "fixed",
     "fixes",
-    "for",
-    "from",
     "function",
-    "further",
     "get",
     "gets",
     "got",
-    "had",
-    "happen",
-    "happens",
-    "has",
-    "have",
-    "having",
-    "her",
-    "here",
-    "him",
-    "his",
-    "how",
     "instead",
-    "into",
     "issue",
     "issues",
-    "its",
-    "itself",
-    "just",
     "like",
     "made",
     "make",
     "makes",
-    "may",
     "method",
-    "might",
     "minimum",
-    "more",
-    "most",
-    "must",
     "need",
     "needs",
     "never",
     "new",
     "node",
-    "nor",
-    "not",
-    "now",
-    "off",
-    "once",
-    "one",
-    "only",
-    "other",
-    "our",
-    "out",
-    "over",
-    "own",
     "package",
     "packages",
     "please",
@@ -147,31 +82,10 @@ const NOISE_WORDS: &[&str] = &[
     "return",
     "returned",
     "returns",
-    "same",
     "search",
-    "she",
-    "should",
-    "some",
     "steps",
-    "still",
-    "such",
-    "than",
     "thanks",
-    "that",
-    "the",
-    "their",
-    "them",
-    "then",
-    "there",
-    "these",
-    "they",
-    "this",
-    "those",
-    "through",
-    "too",
     "typescript",
-    "under",
-    "until",
     "use",
     "used",
     "uses",
@@ -180,29 +94,8 @@ const NOISE_WORDS: &[&str] = &[
     "values",
     "version",
     "versions",
-    "very",
     "want",
-    "was",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "while",
-    "who",
-    "why",
-    "will",
-    "with",
-    "would",
-    "you",
-    "your",
 ];
-
-/// A hybrid-search hit's fused score after path weighting, with what a hint needs.
-struct Candidate {
-    hint: Hint,
-    score: f64,
-}
 
 /// A symbol worth looking at for a prompt.
 #[derive(Debug, Clone, PartialEq)]
@@ -256,7 +149,9 @@ pub fn code_terms(prompt: &str) -> Vec<String> {
 }
 
 /// The prompt reduced to the words worth searching for: no fenced code, noise
-/// words or repeats, and only the earliest terms of a long prompt.
+/// words or repeats, and only the earliest terms of a long prompt. The names
+/// of non-core directories go too: reports use them in passing, and search
+/// would take them as asking for that code.
 pub fn focus_query(prompt: &str) -> String {
     let mut in_fence = false;
     let mut seen = HashSet::new();
@@ -272,7 +167,9 @@ pub fn focus_query(prompt: &str) -> String {
         for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
             let lower = word.to_ascii_lowercase();
             if word.chars().count() >= MIN_TERM_CHARS
-                && NOISE_WORDS.binary_search(&lower.as_str()).is_err()
+                && !is_stopword(&lower)
+                && REPORT_WORDS.binary_search(&lower.as_str()).is_err()
+                && !is_non_core_word(&lower)
                 && seen.insert(lower)
             {
                 terms.push(word);
@@ -281,34 +178,6 @@ pub fn focus_query(prompt: &str) -> String {
     }
     terms.truncate(MAX_QUERY_TERMS);
     terms.join(" ")
-}
-
-/// Whether `path` sits in a directory of code that illustrates or exercises
-/// the project rather than being the project.
-pub fn is_non_core_path(path: &str) -> bool {
-    let mut components: Vec<&str> = path.split('/').collect();
-    components.pop();
-    components.iter().any(|dir| {
-        matches!(
-            dir.to_ascii_lowercase().as_str(),
-            "benchmark"
-                | "benchmarks"
-                | "demo"
-                | "demos"
-                | "doc"
-                | "docs"
-                | "e2e"
-                | "example"
-                | "examples"
-                | "fixture"
-                | "fixtures"
-                | "integration"
-                | "sample"
-                | "samples"
-                | "third_party"
-                | "vendor"
-        )
-    })
 }
 
 impl Store {
@@ -373,7 +242,7 @@ impl Store {
             knn_floor,
             SEARCH_CANDIDATES,
         )?;
-        let mut candidates: Vec<Candidate> = hits
+        Ok(hits
             .into_iter()
             .filter_map(|hit| {
                 let qualname = hit.qualname?;
@@ -381,26 +250,16 @@ impl Store {
                     .symbol_id
                     .and_then(|id| self.definition(id))
                     .unwrap_or((hit.start_line, hit.end_line, None));
-                let weight = if is_non_core_path(&hit.path) {
-                    NON_CORE_WEIGHT
-                } else {
-                    1.0
-                };
-                Some(Candidate {
-                    score: hit.score * weight,
-                    hint: Hint {
-                        path: hit.path,
-                        qualname,
-                        sig,
-                        start_line,
-                        end_line,
-                        named: false,
-                    },
+                Some(Hint {
+                    path: hit.path,
+                    qualname,
+                    sig,
+                    start_line,
+                    end_line,
+                    named: false,
                 })
             })
-            .collect();
-        candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
-        Ok(candidates.into_iter().map(|c| c.hint).collect())
+            .collect())
     }
 
     /// The best locations for `prompt`, symbols it names first. `query_vec`
@@ -481,6 +340,30 @@ mod tests {
         assert_eq!(q, "Kafka client hang");
     }
 
+    /// Search suspends its non-core penalty for these words, and in a report
+    /// they're how people talk, not a request to look at the samples.
+    #[test]
+    fn a_report_saying_for_example_still_ranks_samples_last() {
+        let (_d, store) = store_with(&[
+            (
+                "sample/a.py",
+                "sample.a.widget",
+                "frobnicate frobnicate frobnicate",
+            ),
+            ("src/b.py", "src.b.widget", "frobnicate"),
+        ]);
+        for prompt in ["frobnicate, for example", "frobnicate in the integration"] {
+            let hints = store.locate(prompt, None, None, 5).unwrap();
+            assert_eq!(hints[0].path, "src/b.py", "{prompt}: {hints:?}");
+        }
+    }
+
+    #[test]
+    fn report_words_stay_sorted_and_apart_from_stopwords() {
+        assert!(REPORT_WORDS.windows(2).all(|w| w[0] < w[1]));
+        assert!(!REPORT_WORDS.iter().any(|w| is_stopword(w)));
+    }
+
     #[test]
     fn focus_query_keeps_the_earliest_terms_of_a_long_prompt() {
         let prompt = (0..50)
@@ -490,15 +373,6 @@ mod tests {
         let q = focus_query(&prompt);
         assert_eq!(q.split(' ').count(), 20);
         assert!(q.starts_with("term0 term1"));
-    }
-
-    #[test]
-    fn non_core_goes_by_directory_not_file_name() {
-        assert!(is_non_core_path("sample/01-cats/cats.ts"));
-        assert!(is_non_core_path("packages/x/examples/demo.py"));
-        assert!(is_non_core_path("integration/app.ts"));
-        assert!(!is_non_core_path("packages/core/router.ts"));
-        assert!(!is_non_core_path("src/examples.ts"));
     }
 
     #[test]
