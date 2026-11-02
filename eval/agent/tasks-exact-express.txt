@@ -1,0 +1,5 @@
+what does res.sendFile do | res.sendFile, send
+how does app.listen work | app.listen, createServer
+what does res.json do | res.json, stringify
+how is req.fresh computed | req.fresh, fresh
+what does app.param do | app.param

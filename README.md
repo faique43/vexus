@@ -209,10 +209,9 @@ tool definitions. Reproduce it with
 | NestJS (2,205 files) | **29% less** ($0.72 → $0.51) | 26% fewer | 12% less | 41 → 39 of 51 |
 | Express (142 files) | **17% less** ($0.56 → $0.46) | 24% fewer | same | 42 → 42 of 42 |
 
-Vexus was cheaper in all six rounds. The savings grow with the repo, and it
-still loses on a question that names exactly what to find: "how does app.use
-register middleware" cost plain tools half as much every time. On a few dozen
-files grep is cheaper, and vexus is not worth installing.
+Vexus was cheaper in all six rounds. It was cheaper on 32- and 44-file fixture repos too. It can still lose on
+well-known libraries: Claude answers questions about Express from memory, so
+any tool call there is an extra cost.
 
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has a synthetic table too, but it
 counts only the `explore` call and not the reads that follow, so use it for

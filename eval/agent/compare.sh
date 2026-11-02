@@ -72,6 +72,11 @@ measure() { # transcript, comma-separated names -> "calls context cost covered"
   ' "$1"
 }
 
+# Warm both arms' prompt caches first, or whichever arm runs cold pays to write
+# its whole prompt on the first question and looks worse for it.
+session 'reply ok' '{"mcpServers":{}}' "$results/warm-plain.jsonl"
+session 'reply ok' "$workdir/vexus.json" "$results/warm-vexus.jsonl" --allowedTools 'mcp__vexus__*'
+
 printf '%-44s %9s %15s %13s %11s\n' question calls 'final context' cost covered
 plain_total=0
 vexus_total=0

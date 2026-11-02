@@ -4,7 +4,8 @@
 //! narrow ranges. Returning source here would charge full price for every
 //! guess before the model could reject one, so `explore` stays on the pointer
 //! side of that split: one line per symbol, and the model calls `open` for
-//! what it wants. Pipeline:
+//! what it wants. A question naming exactly one symbol skips all of this and
+//! gets that symbol's source and links. Pipeline:
 //!
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
 //!    → entry chunks, trimmed by `RELEVANCE_FLOOR`. `entry_limit` and the
@@ -26,7 +27,7 @@ use vexus_watch::pipeline;
 
 use vexus_core::model::estimate_tokens;
 use vexus_core::priors::query_seeks_tests;
-use vexus_core::query::SymbolInfo;
+use vexus_core::query::{Resolution, SymbolInfo};
 use vexus_core::Store;
 
 use crate::state::{freshness_header, AppState};
@@ -41,6 +42,9 @@ const MAX_LINKS: usize = 4;
 /// Callers of the top hit whose other callees join the map.
 const SIBLING_CALLERS: usize = 2;
 const MAX_LABEL_CHARS: usize = 100;
+/// The largest named symbol returned whole, in real tokens. Bigger ones fall
+/// back to the map, where the model can open the part it wants.
+const NAMED_SOURCE_TOKENS: u32 = 1200;
 
 /// Search hits scoring under this fraction of the best hit are dropped, so a
 /// map ends where relevance does. A hit in one search list scores about half
@@ -207,6 +211,50 @@ fn render_map(store: &Store, rows: &[Row], wants_tests: bool, budget_tokens: u32
     output
 }
 
+fn looks_like_code(word: &str) -> bool {
+    word.contains('.')
+        || word.contains("::")
+        || word.contains('_')
+        || word.chars().skip(1).any(char::is_uppercase)
+}
+
+/// The one symbol a question names, if it names exactly one.
+fn named_symbol(store: &Store, question: &str) -> Option<SymbolInfo> {
+    let mut named = question
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+        .filter(|w| looks_like_code(w))
+        .filter_map(|w| match store.resolve_symbol(w) {
+            Ok(Resolution::Exact(info)) if info.kind != "module" => Some(info),
+            _ => None,
+        });
+    let first = named.next()?;
+    named.all(|other| other.id == first.id).then_some(first)
+}
+
+/// A named symbol's location, links and source. Source comes along here
+/// because this guess is nearly certain, which is the case a map exists to
+/// avoid paying for.
+fn render_named(store: &Store, info: &SymbolInfo) -> Option<String> {
+    let chunks = store.symbol_source(info.id).ok()?;
+    let source: String = chunks.into_iter().map(|c| c.3).collect();
+    if estimate_tokens(&source) > clamp_budget(Some(NAMED_SOURCE_TOKENS), NAMED_SOURCE_TOKENS) {
+        return None;
+    }
+    let mut out = format!(
+        "## {}\n{}-{} {}\n",
+        info.path,
+        info.start_line,
+        info.end_line,
+        truncated(info.sig.as_deref().unwrap_or(&info.qualname))
+    );
+    if let Some(links) = link_line(store, info.id, false) {
+        out.push_str(&format!("  {links}\n"));
+    }
+    out.push_str(&format!("```\n{source}```\n"));
+    Some(out)
+}
+
 /// Pure inner implementation of the `explore` tool.
 pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>) -> String {
     let question_header = format!("explore: \"{question}\"\n\n");
@@ -227,6 +275,9 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .unwrap_or(vexus_core::model::CorpusTier::Medium),
     );
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
+    if let Some(named) = named_symbol(&store, question).and_then(|i| render_named(&store, &i)) {
+        return apply_header(fresh_header, format!("{question_header}{named}"));
+    }
     let (hits, outcome) = match store.search_hybrid_scored(
         question,
         query_vec.as_deref(),
@@ -494,6 +545,38 @@ mod tests {
         assert!(out.contains("called by: run_job"), "{out}");
     }
 
+    /// Naming a symbol leaves nothing to rank. Grep answers that in a line,
+    /// so a full map here cost more than the question was worth.
+    #[test]
+    fn a_question_naming_one_symbol_gets_that_symbol_and_not_a_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/ledger.py",
+            "class Ledger:\n    def settle(self, x):\n        body_marker = helper_step(x)\n        return body_marker\n\n    def audit(self, x):\n        return x\n\n\ndef helper_step(x):\n    return x\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "what does Ledger.settle do", None);
+
+        assert!(out.contains("body_marker"), "the source: {out}");
+        assert!(out.contains("calls: helper_step"), "the links: {out}");
+        assert!(!out.contains("def audit"), "no other rows: {out}");
+    }
+
+    #[test]
+    fn an_ordinary_question_still_gets_the_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        chain_repo(root);
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "how does the process work", None);
+
+        assert!(!out.contains("```"), "{out}");
+    }
+
     /// A step in a flow is often a sibling of the match, not a neighbor:
     /// `place_order` doesn't call `quote_total`, the handler calling it does.
     #[test]
@@ -593,10 +676,10 @@ mod tests {
         chain_repo(root);
         let state = keyword_only_state(root);
 
-        let out = explore_text(&state, "alpha_process", None);
+        let out = explore_text(&state, "alpha process", None);
 
         assert!(
-            out.starts_with("explore: \"alpha_process\"\n\n"),
+            out.starts_with("explore: \"alpha process\"\n\n"),
             "got: {out:?}"
         );
         assert!(
@@ -621,7 +704,7 @@ mod tests {
         chain_repo(root);
         let state = keyword_only_state(root);
 
-        let out = explore_text(&state, "alpha_process", Some(30));
+        let out = explore_text(&state, "alpha process", Some(30));
 
         assert!(
             out.contains("def alpha_process():"),
