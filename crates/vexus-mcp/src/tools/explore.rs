@@ -17,9 +17,9 @@
 //!    distinct entry symbols adds neighbors, up to `max_neighbor_ids`, along
 //!    with what the top hit's callers also call. Test and non-core code are
 //!    skipped unless the question asks about them.
-//! 3. Rows render best first, grouped by file, until the budget runs out. The
-//!    top `LINKED_ROWS` rows also show their call links, which is what the
-//!    index knows that grep doesn't.
+//! 3. Rows are picked best first until the budget runs out, then grouped by
+//!    file. The top `LINKED_ROWS` rows also show their call links, which is
+//!    what the index knows that grep doesn't.
 
 use std::collections::HashSet;
 
@@ -122,7 +122,7 @@ const NO_MATCH_TEXT: &str = "nothing indexed matches that question — try disti
 
 const WEAK_MATCH_TEXT: &str = "weak match — nothing indexed clearly matches this question; the rows below are only the nearest neighbors. For exact strings or comments, grep is the better tool here.";
 
-const MAP_NOTE: &str = "Best match first. These are locations, not source: `open` \"path:start-end\" for what you need.";
+const MAP_NOTE: &str = "Grouped by file, best first. These are locations, not source: `open` \"path:start-end\" for what you need.";
 
 /// One map line: a location, and a label to judge it by.
 struct Row {
@@ -249,47 +249,45 @@ fn link_line(store: &Store, symbol_id: i64, scope: Scope) -> Option<String> {
 }
 
 /// Groups rows by file, best file first, spending at most `budget_tokens`.
+/// Rows are chosen in rank order and only then grouped, so a weak row in the
+/// best file can't cost a strong row in the next one.
 fn render_map(store: &Store, rows: &[Row], scope: Scope, budget_tokens: u32) -> String {
-    let mut paths: Vec<&str> = Vec::new();
-    for row in rows {
-        if !paths.contains(&row.path.as_str()) {
-            paths.push(&row.path);
-        }
-    }
-
     let linked: Vec<i64> = rows
         .iter()
         .filter_map(|r| r.symbol_id)
         .take(LINKED_ROWS)
         .collect();
-    let mut output = String::new();
+    let mut groups: Vec<(&str, String)> = Vec::new();
     let mut used = 0;
     let mut omitted = 0;
-    for path in paths {
-        let mut group = format!("## {path}\n");
-        let mut listed = false;
-        for row in rows.iter().filter(|r| r.path == path) {
-            let mut line = format!("{}-{} {}\n", row.start_line, row.end_line, row.label);
-            if let Some(links) = row
-                .symbol_id
-                .filter(|id| linked.contains(id))
-                .and_then(|id| link_line(store, id, scope))
-            {
-                line.push_str(&format!("  {links}\n"));
-            }
-            let cost = estimate_tokens(&line) + if listed { 0 } else { estimate_tokens(&group) };
-            if used + cost > budget_tokens {
-                omitted += 1;
-                continue;
-            }
-            used += cost;
-            group.push_str(&line);
-            listed = true;
+    for row in rows {
+        let mut line = format!("{}-{} {}\n", row.start_line, row.end_line, row.label);
+        if let Some(links) = row
+            .symbol_id
+            .filter(|id| linked.contains(id))
+            .and_then(|id| link_line(store, id, scope))
+        {
+            line.push_str(&format!("  {links}\n"));
         }
-        if listed {
-            output.push_str(&group);
+        let header = format!("## {}\n", row.path);
+        let group = groups.iter().position(|(path, _)| *path == row.path);
+        let cost = estimate_tokens(&line)
+            + if group.is_some() {
+                0
+            } else {
+                estimate_tokens(&header)
+            };
+        if used + cost > budget_tokens {
+            omitted += 1;
+            continue;
+        }
+        used += cost;
+        match group {
+            Some(i) => groups[i].1.push_str(&line),
+            None => groups.push((&row.path, header + &line)),
         }
     }
+    let mut output: String = groups.into_iter().map(|(_, text)| text).collect();
     if omitted > 0 {
         output.push_str(&format!("{omitted} more not shown.\n"));
     }
@@ -1013,7 +1011,11 @@ mod tests {
             "pkg/core.py",
             "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
         );
-        write(root, "pkg/testkit.py", "def make_fixture_data():\n    return 1\n");
+        write(
+            root,
+            "pkg/testkit.py",
+            "def make_fixture_data():\n    return 1\n",
+        );
         write(
             root,
             "tests/test_core.py",
@@ -1150,6 +1152,40 @@ mod tests {
         assert!(
             out.contains("1 more not shown."),
             "dropped rows must be counted: {out:?}"
+        );
+    }
+
+    /// Rows render grouped by file, but a budget has to go on the best rows,
+    /// or the callees of the top hit crowd out the second-best hit next door.
+    #[test]
+    fn a_tight_budget_goes_to_the_best_rows_not_the_first_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let callees: String = (0..8)
+            .map(|i| format!("    step_number_{i}(x)\n"))
+            .collect();
+        let bodies: String = (0..8)
+            .map(|i| format!("\n\ndef step_number_{i}(x):\n    return x\n"))
+            .collect();
+        write(
+            root,
+            "pkg/first.py",
+            &format!("def top_match(x):\n    \"\"\"Reticulates splines, reticulates splines.\"\"\"\n{callees}{bodies}"),
+        );
+        write(
+            root,
+            "pkg/second.py",
+            "def second_match(x):\n    \"\"\"Reticulates splines.\"\"\"\n    return x\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", Some(100));
+
+        assert!(out.contains("def top_match"), "{out}");
+        assert!(out.contains("def second_match"), "{out}");
+        assert!(
+            out.contains("more not shown"),
+            "the budget must bite: {out}"
         );
     }
 
