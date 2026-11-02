@@ -14,6 +14,7 @@ mod corpus;
 mod metrics;
 mod padding;
 mod perf;
+mod prompts;
 mod queries;
 mod tokenbench;
 
@@ -82,6 +83,14 @@ enum Cmd {
         /// mock never embeds anything, so a default run's embed/search
         /// numbers describe a pipeline with the model taken out — use
         /// this for any figure quoted as vexus's performance.
+        #[arg(long)]
+        real: bool,
+    },
+    /// Run the real-prompt set (eval/queries/prompts.yaml) through
+    /// `Store::locate` and print how often the right file is near the top.
+    /// Advisory: there's no baseline and it never exits 1 on a score.
+    Prompts {
+        /// Add the real ONNX embedder instead of running keyword-only.
         #[arg(long)]
         real: bool,
     },
@@ -512,8 +521,16 @@ fn main() -> Result<()> {
         Cmd::Check { real } => check(real),
         Cmd::Bless { real } => bless(real),
         Cmd::Perf { enforce, real } => perf::run(enforce, real),
+        Cmd::Prompts { real } => prompts_report(real),
         Cmd::TokenBench { real } => token_bench(real),
     }
+}
+
+fn prompts_report(real: bool) -> Result<()> {
+    let embedder = scoring_embedder(real)?;
+    let report = prompts::score_prompts(&eval_root()?, embedder.as_ref())?;
+    prompts::print_report(if real { "real" } else { "keyword" }, &report);
+    Ok(())
 }
 
 /// Run the token-efficiency benchmark and rewrite docs/BENCHMARKS.md. The

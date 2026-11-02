@@ -57,6 +57,17 @@ jobs:
       # overall. Never runs --real (no model downloads in PR CI) — see
       # eval/README.md for the pre-release --real --check workflow.
       - run: cargo run --release -p vexus-eval -- check
+      # Advisory: how raw prompts fare through Store::locate. It has no
+      # baseline, so this only ever informs a reviewer.
+      - name: Real-prompt report (advisory)
+        continue-on-error: true
+        run: |
+          {
+            echo '## vexus-eval prompts (advisory — never blocks merge)'
+            echo '```'
+            cargo run --release -p vexus-eval -- prompts
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   perf:
     name: perf (advisory)

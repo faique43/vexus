@@ -12,6 +12,7 @@ gated** measurement instead of only ad-hoc manual spot-checks.
 eval/
   corpora/{pyapp,polyglot}/   hand-authored fixture repos (never real vendored code)
   queries/{pyapp,polyglot}.yaml   >=25 graded/ungraded queries per corpus
+  queries/prompts.yaml        change requests and bug reports as agents receive them
   edges/{pyapp,polyglot}.yaml     >=40 labeled caller/callee pairs per corpus
   baseline-mock.json          committed ratchet baseline (keyword-only; the name predates that)
   baseline-real.json          local/nightly baseline (real ONNX embedder) — not committed by CI
@@ -128,6 +129,20 @@ because a container's chunk is its signature and its children's signatures. All
 24 score 0 keyword-only, which is the state they exist to record. `expect` names
 the container, the symbol a member's text would land on. On the real model a few
 pass on the container's name and doc comment alone, so read the keyword numbers.
+
+### Real prompts: `prompts`
+
+```bash
+cargo run -p vexus-eval -- prompts [--real]
+```
+
+`queries/prompts.yaml` holds change requests and vague bug reports for the
+fixture corpora, and each one names the files the work belongs in. This runs
+them through `Store::locate`, the code behind the prompt hook, with the hook's
+own limits, and prints how often one of those files lands in the top 1, 3 and 5
+distinct files, plus every miss. It's advisory: there's no baseline, and CI only
+prints it. Read it with the size of the fixtures in mind, since on a few dozen
+files the top 5 is a good share of the repository.
 
 ### Pre-release: `--real --check`
 
