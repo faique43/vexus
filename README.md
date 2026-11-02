@@ -237,10 +237,14 @@ what you would actually feel using it:
 
 | | |
 | --- | ---: |
-| First index (cold, includes embedding all 2,000 chunks) | 9.6 s |
+| First index (cold, includes embedding all 2,000 chunks) | 17 s |
 | Save → searchable again (includes the 500 ms debounce) | ~565 ms |
 | `search` p99 | 8 ms |
 | `explore` p99 | 9 ms |
+
+Real repos have longer chunks, so they cost more per chunk: a first `vexus index`
+of NestJS (2,205 files, 14,806 chunks) takes 171 s at 1.4 GB of memory on an
+18-core machine, once the model is downloaded.
 
 Queries stay in single-digit milliseconds because embedding one short question
 is cheap; the model cost is paid at index time, in a background thread, off

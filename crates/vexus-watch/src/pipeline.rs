@@ -276,25 +276,27 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
         if missing.is_empty() {
             break;
         }
-        let mut ready: Vec<(i64, Vec<f32>)> = Vec::new();
-        let to_embed: Vec<(i64, String, Vec<u8>)> = missing;
-        for batch in to_embed.chunks(32) {
-            let texts: Vec<&str> = batch.iter().map(|(_, c, _)| c.as_str()).collect();
-            let vecs = embedder.embed(&texts)?;
-            // `Embedder::embed` promises one vector per input text; a
-            // misbehaving implementation returning fewer would otherwise have
-            // `zip` silently drop the untranslated tail of the batch instead
-            // of failing loudly.
-            if vecs.len() != batch.len() {
-                bail!(
-                    "embedder {} batch length mismatch: returned {} vectors for {} texts",
-                    embedder.id(),
-                    vecs.len(),
-                    batch.len()
-                );
-            }
-            for ((id, _, _hash), v) in batch.iter().zip(vecs) {
-                ready.push((*id, v));
+        // The store returns identical chunks side by side, so each set is
+        // embedded once and shares the vector. 16% of NestJS's chunks repeat.
+        let unique: Vec<_> = missing.chunk_by(|a, b| a.2 == b.2).collect();
+        let texts: Vec<&str> = unique.iter().map(|same| same[0].1.as_str()).collect();
+        let vecs = embedder.embed(&texts)?;
+        // `Embedder::embed` promises one vector per input text; a
+        // misbehaving implementation returning fewer would otherwise have
+        // `zip` silently drop the untranslated tail of the batch instead
+        // of failing loudly.
+        if vecs.len() != texts.len() {
+            bail!(
+                "embedder {} batch length mismatch: returned {} vectors for {} texts",
+                embedder.id(),
+                vecs.len(),
+                texts.len()
+            );
+        }
+        let mut ready: Vec<(i64, Vec<f32>)> = Vec::with_capacity(missing.len());
+        for (same, v) in unique.iter().zip(vecs) {
+            for (id, _, _) in *same {
+                ready.push((*id, v.clone()));
                 report.embedded += 1;
             }
         }
@@ -631,6 +633,47 @@ mod tests {
                 .map(|_| vec![1.0, 0.0, 0.0, 0.0])
                 .collect()) // one short
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingEmbedder {
+        batches: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+    impl vexus_embed::Embedder for RecordingEmbedder {
+        fn id(&self) -> &str {
+            "recording"
+        }
+        fn dim(&self) -> usize {
+            4
+        }
+        fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.batches
+                .lock()
+                .unwrap()
+                .push(texts.iter().map(|t| t.to_string()).collect());
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        }
+    }
+
+    #[test]
+    fn embed_pending_embeds_identical_chunks_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let same = "def same():\n    return 'the same body everywhere'\n";
+        let other = "\n\ndef other():\n    return 'a different body in between'\n";
+        write(root, "a.py", &format!("{same}{other}"));
+        write(root, "b.py", same);
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        index_repo(root, &mut store).unwrap();
+        store.set_model("recording", 4).unwrap();
+
+        let embedder = RecordingEmbedder::default();
+        let report = embed_pending(&mut store, &embedder).unwrap();
+
+        let sent = embedder.batches.lock().unwrap().concat();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(report.embedded, 3);
+        assert_eq!(store.embed_backlog().unwrap(), 0);
     }
 
     #[test]

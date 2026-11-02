@@ -254,7 +254,7 @@ impl Store {
     }
 
     /// `(chunk_id, content, content_hash)` for chunks with no `vec_chunks`
-    /// row yet. Empty when vec is unavailable.
+    /// row yet, identical chunks adjacent. Empty when vec is unavailable.
     pub fn chunks_missing_embedding(&self, limit: u32) -> Result<Vec<(i64, String, Vec<u8>)>> {
         if !self.vec_available {
             return Ok(vec![]);
@@ -265,7 +265,9 @@ impl Store {
         // `put_embeddings` (the only writer of the flag) has run.
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.content, c.content_hash FROM chunks c
-             WHERE c.embedded = 0 LIMIT ?1",
+             WHERE c.embedded = 0
+             ORDER BY c.content_hash
+             LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
             Ok((
