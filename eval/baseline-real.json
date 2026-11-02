@@ -4,34 +4,34 @@
     "polyglot": {
       "recall@5": 0.9429,
       "recall@10": 0.9857,
-      "mrr": 0.7993,
-      "ndcg@10": 0.7438,
+      "mrr": 0.7898,
+      "ndcg@10": 0.727,
       "clean@5": 1.0,
       "answer_in_bundle": 1.0,
-      "bundle_clean": 0.5,
+      "bundle_clean": 1.0,
       "edge_precision": 0.918,
       "edge_recall": 0.9333
     },
     "pyapp": {
       "recall@5": 0.8417,
-      "recall@10": 0.925,
-      "mrr": 0.7708,
-      "ndcg@10": 0.6105,
+      "recall@10": 0.975,
+      "mrr": 0.7722,
+      "ndcg@10": 0.6518,
       "clean@5": 1.0,
       "answer_in_bundle": 1.0,
-      "bundle_clean": 0.0,
+      "bundle_clean": 1.0,
       "edge_precision": 0.9,
       "edge_recall": 0.9474
     }
   },
   "overall": {
     "recall@5": 0.9061,
-    "recall@10": 0.9636,
-    "mrr": 0.789,
-    "ndcg@10": 0.7191,
+    "recall@10": 0.9818,
+    "mrr": 0.7834,
+    "ndcg@10": 0.7131,
     "clean@5": 1.0,
     "answer_in_bundle": 1.0,
-    "bundle_clean": 0.25,
+    "bundle_clean": 1.0,
     "edge_precision": 0.9091,
     "edge_recall": 0.9402
   }

@@ -1,0 +1,5 @@
+how does the view engine render a template | app.render, View, res.render
+how does app.use register middleware | app.use, router.use, mounted
+what happens to a request between arriving and reaching a route handler | app.handle, router, finalhandler
+how are errors handled when a route throws | finalhandler, next, err
+why would a response get sent twice and what stops that | headersSent, res.send

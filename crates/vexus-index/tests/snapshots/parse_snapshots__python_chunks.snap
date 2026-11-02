@@ -2,8 +2,7 @@
 source: crates/vexus-index/tests/parse_snapshots.rs
 expression: "chunk_lines(&parse_fixture(\"python/sample.py\"))"
 ---
-- "sym=Some(0) [1-2] tokens~10 :: import os⏎from utils.text import slugify⏎"
-- "sym=Some(0) [5-5] tokens~3 :: TIMEOUT = 30⏎"
+- "sym=Some(0) [1-5] tokens~14 :: import os⏎from utils.text import slugify⏎⏎⏎TIMEOUT = 30⏎"
 - "sym=Some(1) [8-11] tokens~20 :: # Doubles then adds.⏎def top_level(a, b):⏎    \"\"\"Adds.\"\"\"⏎    return helper(a) +"
 - "sym=Some(2) [14-15] tokens~9 :: def helper(x):⏎    return slugify(x)⏎"
 - "sym=Some(3) [18-23] tokens~18 :: class Greeter:⏎    def __init__(self, name):⏎    def greet(self, punct):⏎"

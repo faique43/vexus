@@ -52,11 +52,10 @@ impl Embedder for MockEmbedder {
                 let mut bytes = vec![0u8; MOCK_DIM * 4];
                 xof.fill(&mut bytes);
                 let mut v: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|b| {
-                        let u = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                        (u as f32 / u32::MAX as f32) * 2.0 - 1.0
-                    })
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| (u32::from_le_bytes(*b) as f32 / u32::MAX as f32) * 2.0 - 1.0)
                     .collect();
                 l2_normalize(&mut v);
                 v

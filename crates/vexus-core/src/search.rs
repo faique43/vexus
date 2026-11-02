@@ -227,6 +227,23 @@ impl Store {
         Ok(())
     }
 
+    /// Whether a symbol is test code: by path convention, or by the Rust
+    /// content sniff `apply_ranking_priors` uses, since inline tests live on
+    /// production paths.
+    pub fn is_test_symbol(&self, symbol_id: i64, path: &str) -> Result<bool> {
+        if crate::priors::is_test_path(path) {
+            return Ok(true);
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT EXISTS(
+                 SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id
+                 WHERE c.symbol_id = ?1 AND f.lang = 'rust'
+                   AND (instr(c.content, '#[cfg(test)]') > 0
+                        OR instr(c.content, '#[test]') > 0))",
+        )?;
+        Ok(stmt.query_row([symbol_id], |r| r.get(0))?)
+    }
+
     fn hydrate_hits(&self, ranked: &[(i64, f64)]) -> Result<Vec<SearchHit>> {
         let mut out = Vec::with_capacity(ranked.len());
         let mut stmt = self.conn.prepare_cached(
@@ -444,6 +461,68 @@ mod tests {
             Some("m.work"),
             "the function body must outrank the import-preamble fragment: {hits:?}"
         );
+    }
+
+    /// Merged preambles are long enough to escape the tiny penalty, so the
+    /// preamble penalty alone has to keep module-level code under definitions.
+    #[test]
+    fn a_long_preamble_ranks_below_definitions_that_matched_equally() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let filler = "the quick brown fox jumps over the lazy dog and keeps on running ";
+        let module = NewSymbol {
+            name: "m".into(),
+            qualname: "m".into(),
+            kind: SymbolKind::Module,
+            sig: None,
+            start_line: 1,
+            end_line: 500,
+            parent: None,
+            arity: None,
+        };
+        let mut symbols = vec![module];
+        let mut chunks = vec![NewChunk {
+            symbol: Some(0),
+            start_line: 1,
+            end_line: 5,
+            content: format!("frobnicate frobnicate frobnicate\n{filler}{filler}\n"),
+        }];
+        for i in 0..40u32 {
+            symbols.push(NewSymbol {
+                name: format!("work_{i}"),
+                qualname: format!("m.work_{i}"),
+                kind: SymbolKind::Function,
+                sig: None,
+                start_line: 10 + i * 5,
+                end_line: 12 + i * 5,
+                parent: Some(0),
+                arity: Some(0),
+            });
+            chunks.push(NewChunk {
+                symbol: Some(i as usize + 1),
+                start_line: 10 + i * 5,
+                end_line: 12 + i * 5,
+                content: format!("def work_{i}():\n    # frobnicate\n    {filler}{filler}\n"),
+            });
+        }
+        let idx = FileIndex {
+            symbols,
+            edges: vec![],
+            chunks,
+        };
+        store
+            .replace_file("m.py", "python", &[1u8; 32], &idx)
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", None, None, 50)
+            .unwrap();
+
+        let preamble_rank = hits
+            .iter()
+            .position(|h| h.qualname.as_deref() == Some("m"))
+            .expect("the preamble must still be retrievable");
+        assert_eq!(preamble_rank, 40, "{hits:?}");
     }
 
     #[test]

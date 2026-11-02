@@ -102,6 +102,17 @@ impl Store {
             }
         }
 
+        let by_suffix = self.symbols_by_qualname_suffix(target, NAME_MATCH_LIMIT)?;
+        match by_suffix.len() {
+            0 => {}
+            1 => return Ok(Resolution::Exact(by_suffix.into_iter().next().unwrap())),
+            _ => {
+                let mut candidates = by_suffix;
+                candidates.truncate(10);
+                return Ok(Resolution::Candidates(candidates));
+            }
+        }
+
         let seg = last_segment(target);
         let mut suggestions = self.suggest_by_name_like(seg)?;
         if suggestions.is_empty() {
@@ -432,6 +443,20 @@ impl Store {
         Ok(rows)
     }
 
+    /// Symbols whose qualname ends in `target` at a separator, so an agent
+    /// can say `Class.method` without spelling out the module path.
+    fn symbols_by_qualname_suffix(&self, target: &str, limit: i64) -> Result<Vec<SymbolInfo>> {
+        let sql = format!(
+            "{SYMBOL_INFO_SELECT} WHERE {} ORDER BY s.qualname LIMIT ?2",
+            suffix_match_sql("s.qualname", "?1")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![target, limit], symbol_info_from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     fn suggest_by_name_like(&self, pattern: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT qualname FROM symbols WHERE name LIKE '%' || ?1 || '%'
@@ -531,6 +556,51 @@ mod tests {
                 assert_eq!(info.qualname, "web.Handler");
                 assert_eq!(info.kind, "class");
                 assert_eq!(info.path, "b.py");
+            }
+            other => panic!("expected Exact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qualified_suffix_resolves_exact() {
+        let store = fixture_store();
+        match store.resolve_symbol("app.util.slug").unwrap() {
+            Resolution::Exact(_) => {}
+            other => panic!("expected Exact, got {other:?}"),
+        }
+        match store.resolve_symbol("util.slug").unwrap() {
+            Resolution::Candidates(cands) => assert_eq!(cands.len(), 2),
+            other => panic!("expected Candidates for an ambiguous suffix, got {other:?}"),
+        }
+        match store.resolve_symbol("web.Handler").unwrap() {
+            Resolution::Exact(info) => assert_eq!(info.qualname, "web.Handler"),
+            other => panic!("expected Exact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn class_dot_method_suffix_resolves_without_the_module_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let file = FileIndex {
+            symbols: vec![sym(
+                "lookupComponent",
+                "packages.core.injector.Injector.lookupComponent",
+                SymbolKind::Method,
+            )],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("injector.ts", "typescript", &[3u8; 32], &file)
+            .unwrap();
+
+        match store.resolve_symbol("Injector.lookupComponent").unwrap() {
+            Resolution::Exact(info) => {
+                assert_eq!(
+                    info.qualname,
+                    "packages.core.injector.Injector.lookupComponent"
+                );
             }
             other => panic!("expected Exact, got {other:?}"),
         }

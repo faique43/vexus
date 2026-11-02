@@ -101,7 +101,7 @@ for i in "${!tasks[@]}"; do
       --output-format stream-json --verbose \
       --mcp-config .mcp.json \
       "${model_args[@]}" \
-      --allowedTools "mcp__vexus__explore,mcp__vexus__search,mcp__vexus__open,mcp__vexus__callers,mcp__vexus__callees,mcp__vexus__impact,mcp__vexus__status,Grep,Glob,Read" \
+      --allowedTools "mcp__vexus__explore,mcp__vexus__open,mcp__vexus__trace,mcp__vexus__status,Grep,Glob,Read" \
       > "$out") || {
     echo "  session failed; see $out" >&2
     if [ "$i" -eq 0 ]; then

@@ -9,16 +9,11 @@ This repo's code is indexed (semantic vectors + call graph). Pick by question sh
 
 | Question | Tool |
 |---|---|
-| How does X work / where is X handled / what happens when Y | `explore` (one call, returns budgeted verbatim source) |
-| Find a symbol/snippet by meaning or words | `search` |
+| How does X work / where is X handled / what happens when Y | `explore`, then `open` what you need |
 | Show me this exact symbol / file range | `open` |
-| Who calls this / what does it call | `callers` / `callees` |
-| What breaks if I change this | `impact` |
-| Results look wrong or stale | `status` (index freshness + coverage) |
+| Who calls this / what does it call / what breaks if I change it | `trace` with `direction: callers`, `callees` or `impact` |
+| Results look wrong or stale | `status` |
 
-Param names: `explore(question: "…")`, `search(query: "…")`,
-`open(target: "qualname or path:start-end")`, `callers`/`callees`/`impact(symbol: "…")`.
-All accept an optional `budget_tokens`.
-
-Raise `budget_tokens` when a bundle gets truncated. Use grep only for exact
+`explore` returns a ranked map of locations and call links, not source. Open
+narrow ranges from it rather than whole files. Use grep only for exact
 string/regex hunts, comments, config values, or generated files.

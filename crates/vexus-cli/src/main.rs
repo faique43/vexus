@@ -11,7 +11,7 @@ use vexus_watch::pipeline;
 /// worth comparing between their old and new build.
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    "\nindex schema: 3",
+    "\nindex schema: 4",
     "\nembedding model: jina-code-v2-q",
 );
 
@@ -19,7 +19,7 @@ const LONG_VERSION: &str = concat!(
 // written out rather than interpolated — which would let it drift silently
 // the next time the schema changes. This fails the build instead.
 const _: () = assert!(
-    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'3' && vexus_core::SCHEMA_VERSION.len() == 1,
+    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'4' && vexus_core::SCHEMA_VERSION.len() == 1,
     "LONG_VERSION's hardcoded schema version no longer matches vexus_core::SCHEMA_VERSION"
 );
 
@@ -199,7 +199,7 @@ fn register_mcp_server(root: &Path, force: bool) -> Result<()> {
 /// The one-line JSON payload the nudge hook prints — additionalContext
 /// steering the agent toward the vexus tools instead of grep. Byte-for-byte
 /// what the old nudge-grep.sh emitted.
-const NUDGE_GREP_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"This repo has a vexus code index. For finding/understanding code, the vexus MCP tools are faster and cheaper than grep: `explore` answers how/where questions in one call with verbatim source; `search` finds symbols by meaning. Grep remains right for exact strings, comments, and config values."}}"#;
+const NUDGE_GREP_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"This repo has a vexus code index. To find or understand code, `explore` returns a ranked map of locations and call links, and `open` reads exact ranges. Keep grep for exact strings."}}"#;
 
 /// `vexus hook nudge-grep`: nudge once per agent session toward the vexus
 /// tools; never block, never fail. Session identity comes from the hook
@@ -247,11 +247,9 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
     match agent {
         "claude-code" => {
             // `.claude/plugins/vexus` is never scanned by Claude Code — only
-            // `.claude/skills/<name>/` is auto-discovered per session. A
-            // full plugin bundle (`.claude-plugin/plugin.json`, `hooks/`,
-            // `skills/`) dropped there still loads correctly, as a
-            // skills-directory plugin, so the internal layout below is
-            // unchanged — only the root it's written under moves.
+            // `.claude/skills/<name>/SKILL.md` is auto-discovered per session,
+            // so SKILL.md sits at the root of the directory. A nested
+            // `skills/vexus/SKILL.md` is silently never loaded.
             let plugin_root = root.join(".claude/skills/vexus");
 
             let plugin_json_content =
@@ -273,11 +271,7 @@ fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
             let nudge_script = plugin_root.join("hooks/nudge-grep.sh");
             write_pack_file(&nudge_script, nudge_sh_content, force)?;
             set_executable(&nudge_script)?;
-            write_pack_file(
-                &plugin_root.join("skills/vexus/SKILL.md"),
-                skill_md_content,
-                force,
-            )?;
+            write_pack_file(&plugin_root.join("SKILL.md"), skill_md_content, force)?;
 
             register_mcp_server(root, force)?;
 

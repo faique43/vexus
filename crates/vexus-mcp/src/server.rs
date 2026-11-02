@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::state::AppState;
-use crate::tools::{explore, graph, open, search};
+use crate::tools::{explore, graph, open};
 
 // Serde `alias` attributes below accept the wrong-but-predictable param
 // names agents actually send (field report: a first session called `explore`
@@ -28,50 +28,36 @@ use crate::tools::{explore, graph, open, search};
 // good). Aliases are deserialize-only — the published JSON schema still
 // names exactly one canonical field per param.
 
-/// Params for the `search` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct SearchParams {
-    /// Free-text query — words, a symbol name, or a short question.
-    #[serde(alias = "question", alias = "q")]
-    query: String,
-    /// Max results to return (default 10, max 100).
-    #[schemars(description = "Max results to return (default 10, max 100).")]
-    limit: Option<u32>,
-    /// Token budget for the rendered result list (default 4000, capped at 20000).
-    #[schemars(
-        description = "Token budget for the rendered result list (default 4000, capped at 20000)."
-    )]
-    #[serde(alias = "budget")]
-    budget_tokens: Option<u32>,
-}
-
 /// Params for the `open` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct OpenParams {
-    /// A symbol qualname/name (e.g. `app.util.slug`) or a `path:start-end` line range (e.g. `src/app.py:10-40`).
+    /// A symbol name or `path:start-end`.
     #[serde(alias = "symbol", alias = "path")]
     target: String,
-    /// Token budget for the rendered source (default 6000, capped at 20000).
-    #[schemars(
-        description = "Token budget for the rendered source (default 6000, capped at 20000)."
-    )]
+    /// Default 6000.
     #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
 
-/// Params for the `callers`/`callees` tools.
 #[derive(Debug, Deserialize, JsonSchema)]
-struct CallGraphParams {
-    /// A symbol qualname/name (e.g. `app.util.slug`).
+#[serde(rename_all = "lowercase")]
+enum TraceDirection {
+    Callers,
+    Callees,
+    Impact,
+}
+
+/// Params for the `trace` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TraceParams {
+    /// A symbol name.
     #[serde(alias = "target", alias = "name")]
     symbol: String,
-    /// Traversal depth (default 1, max 3).
-    #[schemars(description = "Traversal depth (default 1, max 3).")]
+    direction: TraceDirection,
+    /// Default 1 for callers and callees, 5 for impact.
+    #[serde(alias = "max_depth")]
     depth: Option<u32>,
-    /// Token budget for the rendered edge tree (default 4000, capped at 20000).
-    #[schemars(
-        description = "Token budget for the rendered edge tree (default 4000, capped at 20000)."
-    )]
+    #[schemars(skip)]
     #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
@@ -79,49 +65,16 @@ struct CallGraphParams {
 /// Params for the `explore` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ExploreParams {
-    /// A natural-language question or a bag of symbol names.
+    /// A question, or symbol names.
     #[serde(alias = "query", alias = "q")]
     question: String,
-    /// Token budget for the rendered bundle (default 8000, capped at 20000).
-    #[schemars(
-        description = "Token budget for the rendered bundle (default 8000, capped at 20000)."
-    )]
-    #[serde(alias = "budget")]
-    budget_tokens: Option<u32>,
-}
-
-/// Params for the `impact` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ImpactParams {
-    /// A symbol qualname/name (e.g. `app.util.slug`).
-    #[serde(alias = "target", alias = "name")]
-    symbol: String,
-    /// Traversal depth (default 5, max 5).
-    #[schemars(description = "Traversal depth (default 5, max 5).")]
-    max_depth: Option<u32>,
-    /// Token budget for the rendered impact report (default 4000, capped at 20000).
-    #[schemars(
-        description = "Token budget for the rendered impact report (default 4000, capped at 20000)."
-    )]
+    #[schemars(skip)]
     #[serde(alias = "budget")]
     budget_tokens: Option<u32>,
 }
 
 /// Steering layer 1: the `instructions` text served on `initialize`.
-const INSTRUCTIONS: &str =
-    "Vexus is a pre-built semantic + structural index of this repository. Reads are
-milliseconds. Consult it BEFORE grep/find/read when looking for code.
-
-- Any question about the code (\"how does X work\", \"where is X\", \"what is the flow
-  from A to B\") → `explore` — ONE call returns the relevant verbatim source, token-
-  budgeted and grouped by file. It is usually the only call you need.
-- Find a symbol/snippet by words → `search`. Fetch a known symbol/file range → `open`.
-- Trace relationships → `callers` / `callees` / `impact`.
-- Results wrong or missing? → `status` shows index freshness and coverage.
-
-Use grep only for what an index can't answer: exact string/regex hunts, comments,
-config values, generated files. The index is a static snapshot until you
-re-run 'vexus index' — check 'status' if results look stale.";
+const INSTRUCTIONS: &str = "This repo is indexed. For questions about the code, `explore` for a ranked map, then `open` only the ranges you need. `trace` follows calls. Use grep for exact strings, comments and config.";
 
 #[derive(Clone)]
 pub struct VexusServer {
@@ -146,9 +99,7 @@ impl VexusServer {
 
 #[tool_router]
 impl VexusServer {
-    #[tool(
-        description = "Shows index freshness and coverage: file/symbol/edge/chunk counts, the embedding model and its backlog, and vector-search availability. Use this when results seem wrong or missing."
-    )]
+    #[tool(description = "Index freshness and counts.")]
     async fn status(&self) -> String {
         let state = self.state.clone();
         match tokio::task::spawn_blocking(move || state.status_text()).await {
@@ -159,7 +110,7 @@ impl VexusServer {
     }
 
     #[tool(
-        description = "Answer a question about this codebase in ONE call. Give it a natural-language question or a bag of symbol names; it finds the relevant code semantically, expands one hop through the call/import graph, and returns the verbatim source of everything relevant, token-budgeted and grouped by file. Start here for any 'how does X work / where is X handled / what happens when' question — it replaces a grep-and-read session."
+        description = "Map the code behind a question: ranked locations, signatures and call links, not source. Start here, then `open` what you need."
     )]
     async fn explore(&self, Parameters(params): Parameters<ExploreParams>) -> String {
         let state = self.state.clone();
@@ -173,24 +124,7 @@ impl VexusServer {
         }
     }
 
-    #[tool(
-        description = "Hybrid semantic+keyword search over the code index. Returns ranked symbol locations with excerpts. Cheaper than explore; use explore when you want the actual source."
-    )]
-    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
-        let state = self.state.clone();
-        match tokio::task::spawn_blocking(move || {
-            search::search_text(&state, &params.query, params.limit, params.budget_tokens)
-        })
-        .await
-        {
-            Ok(text) => text,
-            Err(e) => format!("search error: tool task panicked ({e})"),
-        }
-    }
-
-    #[tool(
-        description = "Fetch the verbatim source of a symbol (by qualname or name) or an exact file line range. Replaces reading whole files."
-    )]
+    #[tool(description = "Exact source of a symbol or a `path:start-end` range.")]
     async fn open(&self, Parameters(params): Parameters<OpenParams>) -> String {
         let state = self.state.clone();
         match tokio::task::spawn_blocking(move || {
@@ -203,53 +137,24 @@ impl VexusServer {
         }
     }
 
-    #[tool(
-        description = "Who calls this symbol (transitive with depth). Confidence-annotated; 'unresolved' rows are name-only heuristic matches."
-    )]
-    async fn callers(&self, Parameters(params): Parameters<CallGraphParams>) -> String {
+    #[tool(description = "Follow a symbol's callers, callees, or what a change would impact.")]
+    async fn trace(&self, Parameters(params): Parameters<TraceParams>) -> String {
         let state = self.state.clone();
-        match tokio::task::spawn_blocking(move || {
-            graph::callers_text(&state, &params.symbol, params.depth, params.budget_tokens)
+        match tokio::task::spawn_blocking(move || match params.direction {
+            TraceDirection::Callers => {
+                graph::callers_text(&state, &params.symbol, params.depth, params.budget_tokens)
+            }
+            TraceDirection::Callees => {
+                graph::callees_text(&state, &params.symbol, params.depth, params.budget_tokens)
+            }
+            TraceDirection::Impact => {
+                graph::impact_text(&state, &params.symbol, params.depth, params.budget_tokens)
+            }
         })
         .await
         {
             Ok(text) => text,
-            Err(e) => format!("callers error: tool task panicked ({e})"),
-        }
-    }
-
-    #[tool(
-        description = "Who this symbol calls (transitive with depth). Confidence-annotated; 'unresolved' rows are name-only heuristic matches."
-    )]
-    async fn callees(&self, Parameters(params): Parameters<CallGraphParams>) -> String {
-        let state = self.state.clone();
-        match tokio::task::spawn_blocking(move || {
-            graph::callees_text(&state, &params.symbol, params.depth, params.budget_tokens)
-        })
-        .await
-        {
-            Ok(text) => text,
-            Err(e) => format!("callees error: tool task panicked ({e})"),
-        }
-    }
-
-    #[tool(
-        description = "Transitive blast radius of changing a symbol — best-effort caller chains that reach it (capped), plus direct import dependents."
-    )]
-    async fn impact(&self, Parameters(params): Parameters<ImpactParams>) -> String {
-        let state = self.state.clone();
-        match tokio::task::spawn_blocking(move || {
-            graph::impact_text(
-                &state,
-                &params.symbol,
-                params.max_depth,
-                params.budget_tokens,
-            )
-        })
-        .await
-        {
-            Ok(text) => text,
-            Err(e) => format!("impact error: tool task panicked ({e})"),
+            Err(e) => format!("trace error: tool task panicked ({e})"),
         }
     }
 }

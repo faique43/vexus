@@ -269,33 +269,50 @@ fn score_search_query(
 
 /// Scores one `tool: explore` query at the DEFAULT budget (`None` —
 /// `explore_text`'s own default), pushing `1.0`/`0.0` into
-/// `accum.answer_in_bundle`.
+/// `accum.answer_in_bundle`. `explore` returns a map, so a symbol counts as
+/// found when its location is on it.
 fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut CorpusAccum) {
-    let bundle = explore_text(state, &query.q, None);
-    let passed = metrics::answer_in_bundle(&bundle, &query.expect, |qualname| {
-        first_chunk_content(state, qualname)
+    let locations = map_locations(&explore_text(state, &query.q, None));
+    let passed = metrics::answer_in_bundle(&locations, &query.expect, |qualname| {
+        symbol_location(state, qualname)
     });
     accum.answer_in_bundle.push(if passed { 1.0 } else { 0.0 });
     if !query.expect_not.is_empty() {
         accum.bundle_clean.push(metrics::bundle_clean(
-            &bundle,
+            &locations,
             &query.expect_not,
-            |qualname| first_chunk_content(state, qualname),
+            |qualname| symbol_location(state, qualname),
         ));
     }
 }
 
-/// The first (lowest `start_line`) source chunk's content for a resolved
-/// qualname — `None` if it doesn't resolve to exactly one symbol, or
-/// resolves but owns zero chunks (see `metrics::answer_in_bundle`'s doc
-/// comment for why that's "not found", not a panic or a vacuous pass).
-fn first_chunk_content(state: &AppState, qualname: &str) -> Option<String> {
+/// One `path:start-end` line per row of a rendered `explore` map.
+fn map_locations(map: &str) -> String {
+    let mut locations = String::new();
+    let mut path = "";
+    for line in map.lines() {
+        if let Some(header) = line.strip_prefix("## ") {
+            path = header;
+        } else if let Some((range, _)) = line.split_once(' ') {
+            if range.split('-').all(|n| n.parse::<u32>().is_ok()) {
+                locations.push_str(&format!("{path}:{range}\n"));
+            }
+        }
+    }
+    locations
+}
+
+/// A symbol's `path:start-end` line, or `None` if it doesn't resolve to
+/// exactly one symbol.
+fn symbol_location(state: &AppState, qualname: &str) -> Option<String> {
     let store = state.lock_store_fresh().ok()?;
     let Resolution::Exact(info) = store.resolve_symbol(qualname).ok()? else {
         return None;
     };
-    let chunks = store.symbol_source(info.id).ok()?;
-    chunks.into_iter().next().map(|(_, _, _, content)| content)
+    Some(format!(
+        "{}:{}-{}\n",
+        info.path, info.start_line, info.end_line
+    ))
 }
 
 /// A resolved caller's full depth-1 callee qualname set — the closure

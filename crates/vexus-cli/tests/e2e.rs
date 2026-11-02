@@ -261,11 +261,16 @@ fn init_claude_code_writes_all_files() {
     let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
     let hooks_json = root.join(".claude/skills/vexus/hooks/hooks.json");
     let nudge_sh = root.join(".claude/skills/vexus/hooks/nudge-grep.sh");
-    let skill_md = root.join(".claude/skills/vexus/skills/vexus/SKILL.md");
+    let skill_md = root.join(".claude/skills/vexus/SKILL.md");
+    let nested_skill_md = root.join(".claude/skills/vexus/skills/vexus/SKILL.md");
 
     assert!(plugin_json.exists(), "plugin.json should exist");
     assert!(hooks_json.exists(), "hooks.json should exist");
     assert!(nudge_sh.exists(), "nudge-grep.sh should exist");
+    assert!(
+        !nested_skill_md.exists(),
+        "Claude Code only discovers .claude/skills/<name>/SKILL.md, not a nested skills/ dir"
+    );
     assert!(skill_md.exists(), "SKILL.md should exist");
 
     // Check hook script is executable

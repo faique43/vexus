@@ -1,0 +1,5 @@
+how does the injector resolve a provider's constructor dependencies | resolveConstructorParams, resolveSingleParam, getClassDependencies, lookupComponent
+what happens between an incoming HTTP request and a controller method running | RouterExplorer, RouterExecutionContext, RouterProxy
+how do guards, interceptors and pipes get applied to a route | GuardsConsumer, InterceptorsConsumer, PipesConsumer, RouterExecutionContext
+how do lifecycle hooks like onModuleInit get called at startup | callModuleInitHook, onModuleInit, callInitHook
+how does a request-scoped provider get a separate instance per request | contextId, loadPerContext, ContextIdFactory
