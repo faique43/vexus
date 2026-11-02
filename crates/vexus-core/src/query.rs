@@ -54,6 +54,41 @@ fn synthetic_symbol(dst_name: &str) -> SymbolInfo {
     }
 }
 
+/// Whether a name's last segment reads as a file extension, in which case
+/// `package.json` is more likely a file than a `json` on some `package`.
+fn is_file_extension(segment: &str) -> bool {
+    matches!(
+        segment,
+        "cfg"
+            | "cjs"
+            | "conf"
+            | "css"
+            | "env"
+            | "go"
+            | "html"
+            | "ini"
+            | "java"
+            | "js"
+            | "json"
+            | "jsx"
+            | "lock"
+            | "md"
+            | "mjs"
+            | "py"
+            | "rb"
+            | "rs"
+            | "sh"
+            | "sql"
+            | "toml"
+            | "ts"
+            | "tsx"
+            | "txt"
+            | "xml"
+            | "yaml"
+            | "yml"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Resolution {
     Exact(SymbolInfo),
@@ -121,11 +156,13 @@ impl Store {
         // `res.sendFile` can be assigned in a file that names it something
         // else, so the prefix isn't reliable. Its own name still is.
         if seg != target {
-            let mut by_segment = self.symbols_by_name(seg, NAME_MATCH_LIMIT)?;
+            let mut by_segment = self.symbols_by_name(seg, i64::MAX)?;
             by_segment.retain(|info| !crate::priors::is_test_path(&info.path));
             match by_segment.len() {
                 0 => {}
-                1 => return Ok(Resolution::Exact(by_segment.into_iter().next().unwrap())),
+                1 if !is_file_extension(seg) => {
+                    return Ok(Resolution::Exact(by_segment.into_iter().next().unwrap()))
+                }
                 _ => {
                     by_segment.truncate(10);
                     return Ok(Resolution::Candidates(by_segment));
@@ -658,6 +695,56 @@ mod tests {
         match store.resolve_symbol("res.sendFile").unwrap() {
             Resolution::Exact(info) => assert_eq!(info.qualname, "response.sendFile"),
             other => panic!("expected Exact, got {other:?}"),
+        }
+    }
+
+    fn with_function_at(store: &mut Store, path: &str, name: &str, qualname: &str) {
+        let idx = FileIndex {
+            symbols: vec![sym(name, qualname, SymbolKind::Function)],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let hash = blake3::hash(path.as_bytes());
+        store
+            .replace_file(path, "python", hash.as_bytes(), &idx)
+            .unwrap();
+    }
+
+    /// `package.json` is a file. A lone `def json` somewhere in the repo
+    /// shares a word with it and nothing else, so it's a suggestion at best.
+    #[test]
+    fn a_file_name_is_not_a_symbol_named_after_its_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        with_function_at(&mut store, "lib/api.py", "json", "lib.api.json");
+
+        match store.resolve_symbol("package.json").unwrap() {
+            Resolution::Candidates(found) => assert_eq!(found[0].qualname, "lib.api.json"),
+            other => panic!("expected Candidates, got {other:?}"),
+        }
+    }
+
+    /// `ModuleRef.get` with no `ModuleRef` indexed: the name is shared by
+    /// hundreds of methods, and tests sort first, so looking at only the first
+    /// few left one survivor to pass as an exact match.
+    #[test]
+    fn a_last_segment_match_looks_past_the_test_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        for i in 0..11 {
+            with_function_at(
+                &mut store,
+                &format!("a/test/t{i}.spec.py"),
+                "get",
+                &format!("a.test.t{i}.get"),
+            );
+        }
+        with_function_at(&mut store, "b/cache.py", "get", "b.cache.get");
+        with_function_at(&mut store, "c/config.py", "get", "c.config.get");
+
+        match store.resolve_symbol("ModuleRef.get").unwrap() {
+            Resolution::Candidates(found) => assert_eq!(found.len(), 2, "{found:?}"),
+            other => panic!("expected Candidates, got {other:?}"),
         }
     }
 

@@ -55,7 +55,8 @@ fn query_terms(query: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty())
 }
 
-fn content_terms(query: &str) -> Vec<&str> {
+/// The words of `query` that say what it's about, as typed.
+pub fn content_terms(query: &str) -> Vec<&str> {
     query_terms(query)
         .filter(|t| !is_stopword(&t.to_lowercase()))
         .collect()

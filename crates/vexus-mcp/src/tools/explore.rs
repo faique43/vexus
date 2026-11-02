@@ -4,11 +4,12 @@
 //! narrow ranges. Returning source here would charge full price for every
 //! guess before the model could reject one, so `explore` stays on the pointer
 //! side of that split: one line per symbol, and the model calls `open` for
-//! what it wants. A question naming exactly one symbol skips all of this and
+//! what it wants. A question that's just one symbol skips all of this and
 //! gets that symbol's source and links. Pipeline:
 //!
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
-//!    → entry chunks, trimmed by `RELEVANCE_FLOOR`. `entry_limit` and the
+//!    → entry chunks, trimmed by `RELEVANCE_FLOOR`, after any symbol the
+//!    question names. `entry_limit` and the
 //!    limits below scale with the corpus tier — see `params_for`. A
 //!    `WeakVectorOnly` outcome (no real keyword hit, nothing under the KNN floor)
 //!    renders under a "weak match" note and skips step 2.
@@ -28,7 +29,7 @@ use vexus_watch::pipeline;
 use vexus_core::model::estimate_tokens;
 use vexus_core::priors::{is_non_core_path, query_seeks_non_core, query_seeks_tests};
 use vexus_core::query::{EdgeHit, Resolution, SymbolInfo};
-use vexus_core::search::{SearchHit, SearchOutcome};
+use vexus_core::search::{content_terms, SearchHit, SearchOutcome};
 use vexus_core::Store;
 
 use crate::state::{freshness_header, AppState};
@@ -46,6 +47,30 @@ const MAX_LABEL_CHARS: usize = 100;
 /// The largest named symbol returned whole, in real tokens. Bigger ones fall
 /// back to the map, where the model can open the part it wants.
 const NAMED_SOURCE_TOKENS: u32 = 1200;
+
+/// Words that ask for a symbol rather than add to a question about it, on top
+/// of what search already ignores.
+const SYMBOL_REQUEST_WORDS: &[&str] = &[
+    "calculated",
+    "class",
+    "code",
+    "computed",
+    "defined",
+    "definition",
+    "explain",
+    "find",
+    "function",
+    "implementation",
+    "implemented",
+    "like",
+    "look",
+    "looks",
+    "method",
+    "read",
+    "see",
+    "show",
+    "source",
+];
 
 /// Search hits scoring under this fraction of the best hit are dropped, so a
 /// map ends where relevance does. A hit in one search list scores about half
@@ -278,18 +303,31 @@ fn looks_like_code(word: &str) -> bool {
         || word.chars().skip(1).any(char::is_uppercase)
 }
 
-/// The one symbol a question names, if it names exactly one.
-fn named_symbol(store: &Store, question: &str) -> Option<SymbolInfo> {
+/// The one symbol a question names, if it names exactly one, and the word
+/// that names it.
+fn named_symbol<'q>(store: &Store, question: &'q str) -> Option<(SymbolInfo, &'q str)> {
     let mut named = question
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
         .filter(|w| looks_like_code(w))
         .filter_map(|w| match store.resolve_symbol(w) {
-            Ok(Resolution::Exact(info)) if info.kind != "module" => Some(info),
+            Ok(Resolution::Exact(info)) if info.kind != "module" => Some((info, w)),
             _ => None,
         });
     let first = named.next()?;
-    named.all(|other| other.id == first.id).then_some(first)
+    named
+        .all(|(other, _)| other.id == first.0.id)
+        .then_some(first)
+}
+
+/// Whether a question wants `word`'s symbol and nothing beyond it: "what does
+/// X do" or "where is X defined", but not "how does X become a response",
+/// which that symbol's source alone can't answer.
+fn asks_only_about(question: &str, word: &str) -> bool {
+    let named = content_terms(word);
+    content_terms(question).iter().all(|term| {
+        named.contains(term) || SYMBOL_REQUEST_WORDS.contains(&term.to_lowercase().as_str())
+    })
 }
 
 /// A named symbol's location, links and source. Source comes along here
@@ -339,8 +377,13 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .unwrap_or(vexus_core::model::CorpusTier::Medium),
     );
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
-    if let Some(named) = named_symbol(&store, question).and_then(|i| render_named(&store, &i)) {
-        return apply_header(fresh_header, format!("{question_header}{named}"));
+    let named = named_symbol(&store, question);
+    let alone = named
+        .as_ref()
+        .filter(|(_, word)| asks_only_about(question, word))
+        .and_then(|(info, _)| render_named(&store, info));
+    if let Some(source) = alone {
+        return apply_header(fresh_header, format!("{question_header}{source}"));
     }
     let (hits, outcome) = match store.search_hybrid_scored(
         question,
@@ -352,14 +395,19 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         Err(e) => return apply_header(fresh_header, format!("explore error: {e:#}")),
     };
 
-    if hits.is_empty() {
+    if hits.is_empty() && named.is_none() {
         return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
-    let weak = outcome == SearchOutcome::WeakVectorOnly;
+    let weak = named.is_none() && outcome == SearchOutcome::WeakVectorOnly;
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: HashSet<i64> = HashSet::new();
     let mut entry_symbols: Vec<i64> = Vec::new();
+    if let Some((info, _)) = &named {
+        seen.insert(info.id);
+        entry_symbols.push(info.id);
+        rows.push(symbol_row(info));
+    }
     for hit in keep_strong(hits, |h| h.score) {
         let info = hit
             .symbol_id
@@ -609,6 +657,101 @@ mod tests {
         assert!(out.contains("body_marker"), "the source: {out}");
         assert!(out.contains("calls: helper_step"), "the links: {out}");
         assert!(!out.contains("def audit"), "no other rows: {out}");
+    }
+
+    fn ledger_repo(root: &std::path::Path) {
+        write(
+            root,
+            "pkg/ledger.py",
+            "class Ledger:\n    def settle(self, x):\n        body_marker = helper_step(x)\n        return body_marker\n\n    def audit(self, x):\n        return x\n\n\ndef helper_step(x):\n    return x\n",
+        );
+        write(
+            root,
+            "pkg/receipts.py",
+            "def print_receipt(x):\n    \"\"\"Turns a settlement into a receipt.\"\"\"\n    return x\n",
+        );
+    }
+
+    /// The source of the one symbol named can't say what happens to it next,
+    /// and a question about that is what a map is for.
+    #[test]
+    fn a_question_about_a_symbols_behaviour_gets_a_map_led_by_that_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ledger_repo(root);
+        let state = keyword_only_state(root);
+
+        let out = explore_text(
+            &state,
+            "how does Ledger.settle get turned into a receipt",
+            None,
+        );
+
+        assert!(!out.contains("```"), "a map, not source: {out}");
+        assert!(!out.contains("body_marker"), "{out}");
+        let (first_row, rest) = out.split_once("def settle").expect(&out);
+        assert!(!first_row.contains("def "), "named symbol first: {out}");
+        assert!(
+            rest.contains("def print_receipt"),
+            "the map's search: {out}"
+        );
+        assert!(rest.contains("calls: helper_step"), "{out}");
+    }
+
+    #[test]
+    fn a_question_that_is_just_the_symbol_gets_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ledger_repo(root);
+        let state = keyword_only_state(root);
+
+        for question in [
+            "Ledger.settle",
+            "how does Ledger.settle work",
+            "how is Ledger.settle computed",
+            "where is Ledger.settle defined",
+            "show me the code for Ledger.settle",
+        ] {
+            let out = explore_text(&state, question, None);
+            assert!(out.contains("body_marker"), "{question}: {out}");
+        }
+    }
+
+    /// Nothing resolves `package.json`, but the file's last word matches a
+    /// lone function, which is no reason to answer with that function.
+    #[test]
+    fn a_file_name_does_not_stand_in_for_a_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/api.py",
+            "def json(x):\n    body_marker = x\n    return body_marker\n",
+        );
+        write(
+            root,
+            "pkg/loader.py",
+            "def read_manifest():\n    \"\"\"Reads package.json from disk.\"\"\"\n    return 1\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "package.json", None);
+
+        assert!(!out.contains("```"), "{out}");
+        assert!(out.contains("def read_manifest"), "{out}");
+    }
+
+    #[test]
+    fn a_named_symbol_is_never_a_weak_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ledger_repo(root);
+        let state = floored_mock_state(root);
+
+        let out = explore_text(&state, "does Ledger.settle zzqqxx wibble", None);
+
+        assert!(!out.contains("weak match"), "{out}");
+        assert!(out.contains("def settle"), "{out}");
     }
 
     #[test]
