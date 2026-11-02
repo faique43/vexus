@@ -25,9 +25,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use vexus_core::model::estimate_tokens;
 use vexus_embed::Embedder;
-use vexus_mcp::tools::{
-    explore::explore_text, graph::callers_text, open::open_text, search::search_text,
-};
+use vexus_mcp::tools::{explore::explore_text, graph::callers_text, open::open_text};
 
 use crate::corpus::index_into_temp_state;
 
@@ -61,12 +59,12 @@ pub struct ReadStep {
 }
 
 /// One step of the with-index transcript, named for the MCP tool it calls.
-/// Untagged for the same reason as [`GrepStep`].
+/// Untagged for the same reason as [`GrepStep`], which also means a step
+/// naming a tool the server no longer has fails to parse.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum VexusStep {
     Explore { explore: String },
-    Search { search: String },
     Open { open: String },
     Callers { callers: String },
 }
@@ -182,7 +180,6 @@ pub fn run(eval_root: &Path, embedder: Arc<dyn Embedder>, real: bool) -> Result<
             for step in &task.vexus {
                 let response = match step {
                     VexusStep::Explore { explore } => explore_text(&state, explore, None),
-                    VexusStep::Search { search } => search_text(&state, search, None, None),
                     VexusStep::Open { open } => open_text(&state, open, None),
                     VexusStep::Callers { callers } => callers_text(&state, callers, None, None),
                 };
@@ -373,7 +370,7 @@ pub fn render_markdown(results: &[TaskResult], scaling: &[ScalingPoint], real: b
          a first pattern that is too broad, a file opened at the wrong layer — because a \
          transcript that went straight to the answer would not be an honest baseline.\n\n\
          The **vexus** column runs the same functions `vexus serve` exposes over MCP \
-         (`explore`, `search`, `open`, `callers`) at their default token budgets, and \
+         (`explore`, `open`, `callers`) at their default token budgets, and \
          counts the full response.\n\n\
          Both sides are measured with vexus's own `chars / 4` estimate, so the ratio \
          does not depend on a particular tokenizer.\n\n\

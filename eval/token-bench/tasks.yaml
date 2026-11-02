@@ -62,7 +62,7 @@
     - grep: "def validate"
     - read: { path: "utils/validation.py" }
   vexus:
-    - search: "email validation helper"
+    - explore: "email validation helper"
     - open: "utils.validation.sanitize_email"
 
 - task: "How does placing an order flow through the service?"
