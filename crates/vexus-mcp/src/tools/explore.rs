@@ -1002,6 +1002,31 @@ mod tests {
         assert!(out.contains("def helper"), "{out}");
     }
 
+    /// What a test calls is setup, not a step in the flow, so a test caller
+    /// must not count as one of the callers whose other calls join the map.
+    #[test]
+    fn sibling_expansion_does_not_follow_test_callers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        write(root, "pkg/testkit.py", "def make_fixture_data():\n    return 1\n");
+        write(
+            root,
+            "tests/test_core.py",
+            "from pkg.core import settle\nfrom pkg.testkit import make_fixture_data\n\n\ndef test_settle():\n    data = make_fixture_data()\n    assert settle(data) == 1\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("def settle"), "{out}");
+        assert!(!out.contains("make_fixture_data"), "{out}");
+    }
+
     /// An unresolved `x.drain_queue()` names no target, so it can't be shown
     /// as a fact about any one of the methods sharing that name.
     #[test]
