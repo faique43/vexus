@@ -1,6 +1,7 @@
 use vexus_core::model::{estimate_tokens, FileIndex, NewChunk, NewSymbol, SymbolKind};
 
 const MAX_TOKENS: u32 = 512;
+const MAX_CHARS: usize = MAX_TOKENS as usize * 4;
 
 /// Lines (1-based) whose trimmed text marks doc/comment/decorator/attribute content.
 fn is_annotation_line(line: &str) -> bool {
@@ -122,20 +123,6 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
     //    extending symbol (marked covered, owner set to that symbol).
     let mut ext_starts: Vec<u32> = vec![0; idx.symbols.len()];
     for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
-        if !matches!(
-            sym.kind,
-            SymbolKind::Function
-                | SymbolKind::Method
-                | SymbolKind::Const
-                | SymbolKind::Type
-                | SymbolKind::Class
-                | SymbolKind::Struct
-                | SymbolKind::Enum
-                | SymbolKind::Trait
-                | SymbolKind::Interface
-        ) {
-            continue;
-        }
         let ext_start = extend_start(i, sym.start_line, &owner, &lines, &idx.symbols);
         ext_starts[i] = ext_start;
         let start = (ext_start as usize - 1).min(covered.len());
@@ -184,7 +171,7 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
         }
     }
 
-    // 4. Symbol chunks (leaf bodies / container skeletons), using the doc-extended start.
+    // 4. Symbol chunks (leaf bodies / container outlines), using the doc-extended start.
     for (i, sym) in idx.symbols.iter().enumerate().skip(1) {
         match sym.kind {
             SymbolKind::Function | SymbolKind::Method | SymbolKind::Const | SymbolKind::Type => {
@@ -212,37 +199,147 @@ pub fn build_chunks(idx: &mut FileIndex, source: &str) {
             | SymbolKind::Struct
             | SymbolKind::Enum
             | SymbolKind::Trait
-            | SymbolKind::Interface => {
-                let ext_start = ext_starts[i];
-                // Skeleton: doc lines (if extended) + own sig + direct children sigs.
-                let mut content = String::new();
-                if ext_start < sym.start_line {
-                    content.push_str(&slice(ext_start, sym.start_line - 1));
-                }
-                if let Some(sig) = &sym.sig {
-                    content.push_str(sig);
-                    content.push('\n');
-                }
-                for child in idx.symbols.iter().filter(|c| c.parent == Some(i)) {
-                    if let Some(sig) = &child.sig {
-                        content.push_str("    ");
-                        content.push_str(sig);
-                        content.push('\n');
-                    }
-                }
-                if !content.trim().is_empty() {
-                    chunks.push(NewChunk {
-                        symbol: Some(i),
-                        start_line: ext_start,
-                        end_line: sym.end_line,
-                        content: cap_content(content),
-                    });
-                }
+            | SymbolKind::Interface
+            | SymbolKind::Module => {
+                push_container(&mut chunks, i, ext_starts[i], &owner, &lines, &idx.symbols);
             }
-            _ => {}
         }
     }
     idx.chunks = chunks;
+}
+
+/// One line of a container's outline. A child's signature is flagged because
+/// the child's own chunk has it too.
+struct OutlineLine {
+    line: u32,
+    text: String,
+    child_sig: bool,
+}
+
+/// The container in source order: the lines it owns outright (docs, fields,
+/// variants, docstrings), with each child reduced to its signature. Children
+/// defined outside its range, like Rust's `impl` methods, go last.
+fn outline(
+    sym_index: usize,
+    ext_start: u32,
+    owner: &[Option<usize>],
+    lines: &[&str],
+    symbols: &[NewSymbol],
+) -> Vec<OutlineLine> {
+    let sym = &symbols[sym_index];
+    let end = sym.end_line.min(lines.len() as u32);
+    let mut children = symbols
+        .iter()
+        .filter(|c| c.parent == Some(sym_index))
+        .peekable();
+    let child_line = |line: u32, child: &NewSymbol| {
+        child.sig.as_ref().map(|sig| OutlineLine {
+            line,
+            text: format!("    {sig}"),
+            child_sig: true,
+        })
+    };
+    let mut out = Vec::new();
+    for ln in ext_start..=end {
+        let text = lines[(ln - 1) as usize];
+        let own_sig = sym.sig.as_deref().filter(|_| ln == sym.start_line);
+        if let Some(sig) = own_sig {
+            out.push(OutlineLine {
+                line: ln,
+                text: sig.to_string(),
+                child_sig: false,
+            });
+        } else if owner[(ln - 1) as usize] == Some(sym_index) && !text.trim().is_empty() {
+            out.push(OutlineLine {
+                line: ln,
+                text: text.to_string(),
+                child_sig: false,
+            });
+        }
+        while let Some(child) = children.next_if(|c| c.start_line <= ln) {
+            out.extend(child_line(ln, child));
+        }
+    }
+    out.extend(children.filter_map(|child| child_line(end, child)));
+    out
+}
+
+/// A container's chunks. One outline chunk when it fits. Otherwise the outline
+/// splits like a long function, and only the first chunk lists children, so a
+/// class with many methods costs no more than its members need.
+fn push_container(
+    chunks: &mut Vec<NewChunk>,
+    sym_index: usize,
+    ext_start: u32,
+    owner: &[Option<usize>],
+    lines: &[&str],
+    symbols: &[NewSymbol],
+) {
+    let sym = &symbols[sym_index];
+    let outline = outline(sym_index, ext_start, owner, lines, symbols);
+    let total_chars: usize = outline.iter().map(|l| l.text.chars().count() + 1).sum();
+    if total_chars <= MAX_CHARS {
+        let content: String = outline.iter().map(|l| format!("{}\n", l.text)).collect();
+        if !content.trim().is_empty() {
+            chunks.push(NewChunk {
+                symbol: Some(sym_index),
+                start_line: ext_start,
+                end_line: sym.end_line,
+                content,
+            });
+        }
+        return;
+    }
+
+    let sig = sym.sig.as_deref().unwrap_or("");
+    let sig_chars = sig.chars().count() + 1;
+    let mut first = true;
+    let mut piece = String::new();
+    let mut piece_chars = 0;
+    let mut range = (ext_start, ext_start);
+    let mut searchable = false;
+    for entry in &outline {
+        let chars = entry.text.chars().count() + 1;
+        if piece_chars + chars > MAX_CHARS && !piece.is_empty() {
+            if first || searchable {
+                chunks.push(NewChunk {
+                    symbol: Some(sym_index),
+                    start_line: range.0,
+                    end_line: range.1,
+                    content: cap_content(std::mem::take(&mut piece)),
+                });
+            }
+            piece.clear();
+            piece_chars = 0;
+            searchable = false;
+            first = false;
+        }
+        if entry.child_sig && !first {
+            continue;
+        }
+        if piece.is_empty() {
+            range.0 = entry.line;
+            // A line too long to share with the signature gets cut on its own.
+            if !first && sig_chars + chars <= MAX_CHARS {
+                piece.push_str(sig);
+                piece.push('\n');
+                piece_chars = sig_chars;
+            }
+        }
+        piece.push_str(&entry.text);
+        piece.push('\n');
+        piece_chars += chars;
+        range.1 = entry.line;
+        searchable |= entry.text.chars().any(char::is_alphanumeric);
+    }
+    if !piece.is_empty() && (first || searchable) {
+        chunks.push(NewChunk {
+            symbol: Some(sym_index),
+            start_line: range.0,
+            end_line: range.1,
+            content: cap_content(piece),
+        });
+    }
 }
 
 fn split_oversized(
@@ -300,6 +397,176 @@ mod tests {
             parent,
             arity: None,
         }
+    }
+
+    fn parsed(rel: &str, source: &str) -> FileIndex {
+        let lang = crate::lang::for_path(std::path::Path::new(rel)).unwrap();
+        crate::parse::parse_file(lang, rel, source)
+    }
+
+    fn assert_indexed(idx: &FileIndex, wanted: &[&str]) {
+        for text in wanted {
+            assert!(
+                idx.chunks.iter().any(|c| c.content.contains(text)),
+                "{text:?} reached no chunk: {:#?}",
+                idx.chunks
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_interface_members_reach_a_chunk() {
+        let idx = parsed(
+            "opts.ts",
+            "export interface LoggerOptions {\n  /** Enabled levels. */\n  logLevels?: string[];\n  json?: boolean;\n}\n",
+        );
+        assert_indexed(
+            &idx,
+            &["Enabled levels", "logLevels?: string[]", "json?: boolean"],
+        );
+    }
+
+    #[test]
+    fn typescript_enum_members_reach_a_chunk() {
+        let idx = parsed("e.ts", "enum Color {\n  Crimson = 1,\n  Teal = 2,\n}\n");
+        assert_indexed(&idx, &["Crimson = 1", "Teal = 2"]);
+    }
+
+    #[test]
+    fn rust_struct_fields_and_enum_variants_reach_a_chunk() {
+        let idx = parsed(
+            "a.rs",
+            "/// A point.\npub struct Point {\n    /// Distance east.\n    pub east: u32,\n}\n\nenum Shade {\n    Dark,\n    Light(u8),\n}\n",
+        );
+        assert_indexed(
+            &idx,
+            &[
+                "A point",
+                "Distance east",
+                "pub east: u32",
+                "Dark,",
+                "Light(u8)",
+            ],
+        );
+    }
+
+    #[test]
+    fn python_class_docstring_and_dataclass_fields_reach_a_chunk() {
+        let idx = parsed(
+            "a.py",
+            "@dataclass\nclass Config:\n    \"\"\"Holds retry settings.\"\"\"\n    retries: int = 3\n\n    def load(self):\n        return self.retries\n",
+        );
+        assert_indexed(&idx, &["Holds retry settings", "retries: int = 3"]);
+    }
+
+    #[test]
+    fn namespace_like_bodies_reach_a_chunk() {
+        let elixir = parsed(
+            "a.ex",
+            "defmodule Shop do\n  @moduledoc \"Checkout flows.\"\n  @tax_rate 7\n\n  def total(x), do: x\nend\n",
+        );
+        assert_indexed(&elixir, &["Checkout flows", "@tax_rate 7"]);
+
+        let ruby = parsed(
+            "a.rb",
+            "module Shop\n  TAX_RATE = 7\n  def self.total(x)\n    x\n  end\nend\n",
+        );
+        assert_indexed(&ruby, &["TAX_RATE = 7"]);
+
+        let cpp = parsed(
+            "a.cpp",
+            "namespace shop {\nusing Money = long;\nint total(int x) { return x; }\n}\n",
+        );
+        assert_indexed(&cpp, &["using Money = long;"]);
+    }
+
+    #[test]
+    fn container_chunk_keeps_member_order_and_leaves_bodies_to_the_methods() {
+        let idx = parsed(
+            "a.py",
+            "class C:\n    first = 1\n\n    def a(self):\n        return 'body'\n\n    second = 2\n",
+        );
+        let skeleton = idx.chunks.iter().find(|c| c.symbol == Some(1)).unwrap();
+        assert_eq!(
+            skeleton.content,
+            "class C:\n    first = 1\n    def a(self):\n    second = 2\n"
+        );
+        assert_eq!((skeleton.start_line, skeleton.end_line), (1, 7));
+    }
+
+    /// Every line of a large enum must stay findable, in chunks that are still
+    /// small enough to embed and that name the type they came from.
+    #[test]
+    fn oversized_container_splits_on_true_ranges_without_losing_a_line() {
+        let members: String = (0..400)
+            .map(|i| format!("  Member{i:03} = {i},\n"))
+            .collect();
+        let source = format!("enum Big {{\n{members}}}\n");
+        let idx = parsed("e.rs", &source);
+
+        let pieces: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(1)).collect();
+        assert!(pieces.len() >= 2, "{pieces:#?}");
+        for piece in &pieces {
+            assert!(estimate_tokens(&piece.content) <= 512, "{piece:?}");
+            assert!(piece.content.starts_with("enum Big {"), "{piece:?}");
+            assert!(!piece.content.ends_with("… (truncated)\n"), "{piece:?}");
+        }
+        for i in 0..400 {
+            assert_indexed(&idx, &[&format!("Member{i:03} = {i},")]);
+        }
+        let first_member_of = |c: &NewChunk| {
+            c.content
+                .lines()
+                .find(|l| l.contains("Member"))
+                .map(|l| l.to_string())
+        };
+        for piece in &pieces {
+            let member = first_member_of(piece).unwrap();
+            let line = source.lines().position(|l| l == member).unwrap() as u32 + 1;
+            assert_eq!(piece.start_line.max(2), line, "{piece:?}");
+        }
+    }
+
+    /// Method signatures are already in the method chunks, so listing them
+    /// past the first chunk would only cost embeddings.
+    #[test]
+    fn method_signatures_do_not_add_chunks_to_a_large_class() {
+        let methods: String = (0..200)
+            .map(|i| {
+                format!("    def method_number_{i:03}(self, value):\n        return value\n\n")
+            })
+            .collect();
+        let idx = parsed("a.py", &format!("class C:\n{methods}"));
+
+        let pieces: Vec<_> = idx.chunks.iter().filter(|c| c.symbol == Some(1)).collect();
+        assert_eq!(pieces.len(), 1, "{pieces:#?}");
+    }
+
+    /// A member past the first chunk still has to reach one.
+    #[test]
+    fn a_member_after_many_methods_is_kept() {
+        let methods: String = (0..200)
+            .map(|i| {
+                format!("    def method_number_{i:03}(self, value):\n        return value\n\n")
+            })
+            .collect();
+        let idx = parsed("a.py", &format!("class C:\n{methods}    late_member = 1\n"));
+
+        assert_indexed(&idx, &["late_member = 1"]);
+    }
+
+    #[test]
+    fn a_huge_member_line_is_cut_without_losing_the_rest() {
+        let source = format!(
+            "enum Big {{\n  A = \"{}\",\n  Tail = 2,\n}}\n",
+            "x".repeat(5000)
+        );
+        let idx = parsed("e.rs", &source);
+
+        for chunk in &idx.chunks {
+            assert!(estimate_tokens(&chunk.content) <= 512 + 8, "{chunk:?}");
+        }
+        assert_indexed(&idx, &["A = \"xxx", "Tail = 2"]);
     }
 
     #[test]

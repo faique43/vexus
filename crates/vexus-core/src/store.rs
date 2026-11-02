@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use rusqlite::{Connection, OpenFlags};
 
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 const SCHEMA: &str = include_str!("schema.sql");
 
 static VEC_INIT: std::sync::Once = std::sync::Once::new();
