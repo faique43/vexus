@@ -27,14 +27,14 @@ use vexus_watch::pipeline;
 
 use vexus_core::model::estimate_tokens;
 use vexus_core::priors::query_seeks_tests;
-use vexus_core::query::{Resolution, SymbolInfo};
+use vexus_core::query::{EdgeHit, Resolution, SymbolInfo};
 use vexus_core::Store;
 
 use crate::state::{freshness_header, AppState};
 use crate::tools::{apply_header, clamp_budget, embed_query};
 
 const NEIGHBOR_DEPTH: u32 = 1;
-const NEIGHBOR_LIMIT: u32 = 10;
+const NEIGHBOR_LIMIT: usize = 10;
 
 /// Rows that get a `calls:` / `called by:` line.
 const LINKED_ROWS: usize = 3;
@@ -130,29 +130,44 @@ fn is_test_code(store: &Store, info: &SymbolInfo) -> bool {
     store.is_test_symbol(info.id, &info.path).unwrap_or(false)
 }
 
+/// The distinct symbols on the far end of `edges` that a map may show, up to
+/// `NEIGHBOR_LIMIT`. The store's limit can't do this: rows arrive in id order,
+/// so a cut before filtering lets repeat call sites and test code use up the
+/// slots of everything indexed after them.
+fn linked_symbols(store: &Store, edges: Vec<EdgeHit>, wants_tests: bool) -> Vec<SymbolInfo> {
+    let mut seen = HashSet::new();
+    edges
+        .into_iter()
+        .filter(|e| e.symbol.id != -1 && seen.insert(e.symbol.id))
+        .filter(|e| wants_tests || !is_test_code(store, &e.symbol))
+        .map(|e| e.symbol)
+        .take(NEIGHBOR_LIMIT)
+        .collect()
+}
+
+fn callers_shown(store: &Store, symbol_id: i64, wants_tests: bool) -> Vec<SymbolInfo> {
+    let edges = store.callers_of(symbol_id, NEIGHBOR_DEPTH, u32::MAX);
+    linked_symbols(store, edges.unwrap_or_default(), wants_tests)
+}
+
+fn callees_shown(store: &Store, symbol_id: i64, wants_tests: bool) -> Vec<SymbolInfo> {
+    let edges = store.callees_of(symbol_id, NEIGHBOR_DEPTH, u32::MAX);
+    linked_symbols(store, edges.unwrap_or_default(), wants_tests)
+}
+
 /// `calls: a, b  called by: c` for a symbol, or `None` if it has no links.
 fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String> {
-    let names = |edges: Vec<vexus_core::query::EdgeHit>| -> Vec<String> {
+    let names = |symbols: Vec<SymbolInfo>| -> Vec<String> {
         let mut seen = HashSet::new();
-        edges
+        symbols
             .into_iter()
-            .filter(|e| e.symbol.id != -1)
-            .filter(|e| wants_tests || !is_test_code(store, &e.symbol))
-            .map(|e| e.symbol.name)
+            .map(|s| s.name)
             .filter(|name| seen.insert(name.clone()))
             .take(MAX_LINKS)
             .collect()
     };
-    let callees = names(
-        store
-            .callees_of(symbol_id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-            .unwrap_or_default(),
-    );
-    let callers = names(
-        store
-            .callers_of(symbol_id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-            .unwrap_or_default(),
-    );
+    let callees = names(callees_shown(store, symbol_id, wants_tests));
+    let callers = names(callers_shown(store, symbol_id, wants_tests));
     let mut parts = Vec::new();
     if !callees.is_empty() {
         parts.push(format!("calls: {}", callees.join(", ")));
@@ -326,52 +341,25 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .take(params.max_entry_symbols)
             .enumerate()
         {
-            let callers = store
-                .callers_of(*id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-                .unwrap_or_default();
-            let callees = store
-                .callees_of(*id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-                .unwrap_or_default();
+            let callers = callers_shown(&store, *id, wants_tests);
+            let callees = callees_shown(&store, *id, wants_tests);
             // Siblings of the best match: the other steps its callers take
             // are usually the rest of the flow being asked about.
-            let siblings = if rank == 0 {
+            let siblings: Vec<SymbolInfo> = if rank == 0 {
                 callers
                     .iter()
-                    .filter(|e| e.symbol.id != -1)
                     .take(SIBLING_CALLERS)
-                    .flat_map(|e| {
-                        store
-                            .callees_of(e.symbol.id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-                            .unwrap_or_default()
-                    })
+                    .flat_map(|caller| callees_shown(&store, caller.id, wants_tests))
                     .collect()
             } else {
                 Vec::new()
             };
             // Callees first: a question about how something works is
             // answered by what it does, more than by who reaches it.
-            neighbors.extend(
-                callees
-                    .into_iter()
-                    .chain(callers)
-                    .chain(siblings)
-                    .map(|e| e.symbol),
-            );
+            neighbors.extend(callees.into_iter().chain(callers).chain(siblings));
         }
-        let mut added = 0;
-        for symbol in neighbors {
-            if added >= params.max_neighbor_ids {
-                break;
-            }
-            if symbol.id == -1 || !seen.insert(symbol.id) {
-                continue;
-            }
-            if !wants_tests && is_test_code(&store, &symbol) {
-                continue;
-            }
-            rows.push(symbol_row(&symbol));
-            added += 1;
-        }
+        let unseen = neighbors.iter().filter(|s| seen.insert(s.id));
+        rows.extend(unseen.take(params.max_neighbor_ids).map(symbol_row));
     }
 
     let note = if weak { WEAK_MATCH_TEXT } else { MAP_NOTE };
@@ -653,6 +641,39 @@ mod tests {
             out.contains("def test_settle"),
             "a question about tests must still reach them: {out}"
         );
+    }
+
+    /// Rows arrive in id order, so a file indexed late sits behind every
+    /// test that calls the same function. Cutting before filtering emptied
+    /// the slots and hid the one caller the question could use.
+    #[test]
+    fn test_callers_do_not_use_up_the_slots_of_a_production_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        let tests: String = (0..12)
+            .map(|i| format!("def test_settle_{i}():\n    assert settle({i})\n\n\n"))
+            .collect();
+        write(
+            root,
+            "tests/test_core.py",
+            &format!("from pkg.core import settle\n\n\n{tests}"),
+        );
+        write(
+            root,
+            "zz/job.py",
+            "from pkg.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("called by: run_job"), "{out}");
+        assert!(out.contains("def run_job"), "{out}");
     }
 
     /// `alpha_process` calls `unique_marker_beta`. The query text
