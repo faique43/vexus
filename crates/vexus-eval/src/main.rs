@@ -2,9 +2,9 @@
 //! corpora under `eval/`. Indexes each corpus into a fresh
 //! temp-directory index, runs every applicable query through the same code
 //! paths the MCP tools use, computes `recall@5`/`recall@10`/`mrr`/`ndcg@10`/
-//! `answer_in_bundle`/`edge_precision`/`edge_recall` (see `metrics.rs` for
-//! the exact formulas and `corpus.rs` for how each is fed), prints a table,
-//! and writes `eval/last-run.json`.
+//! `answer_in_bundle`/`map_ndcg@10`/`edge_precision`/`edge_recall` (see
+//! `metrics.rs` for the exact formulas and `corpus.rs` for how each is fed),
+//! prints a table, and writes `eval/last-run.json`.
 //!
 //! Two modes: keyword-only by default (no vectors at all, so the numbers come
 //! from the index's own structure and text), and `--real`, which adds the
@@ -187,6 +187,7 @@ fn print_metric_set(label: &str, m: &metrics::MetricSet) {
     println!("  ndcg@10           {:.4}", m.ndcg_at_10);
     println!("  clean@5           {:.4}", m.clean_at_5);
     println!("  answer_in_bundle  {:.4}", m.answer_in_bundle);
+    println!("  map_ndcg@10       {:.4}", m.map_ndcg_at_10);
     println!("  bundle_clean      {:.4}", m.bundle_clean);
     println!("  edge_precision    {:.4}", m.edge_precision);
     println!("  edge_recall       {:.4}", m.edge_recall);
@@ -242,12 +243,12 @@ impl MetricDelta {
     }
 }
 
-/// The 9 named metrics paired up
+/// The 10 named metrics paired up
 /// between `base` and `cur` for one scope (a corpus name, or "overall").
 fn metric_pairs(
     base: &metrics::MetricSet,
     cur: &metrics::MetricSet,
-) -> [(&'static str, f64, f64); 9] {
+) -> [(&'static str, f64, f64); 10] {
     [
         ("recall@5", base.recall_at_5, cur.recall_at_5),
         ("recall@10", base.recall_at_10, cur.recall_at_10),
@@ -259,6 +260,7 @@ fn metric_pairs(
             base.answer_in_bundle,
             cur.answer_in_bundle,
         ),
+        ("map_ndcg@10", base.map_ndcg_at_10, cur.map_ndcg_at_10),
         ("bundle_clean", base.bundle_clean, cur.bundle_clean),
         ("edge_precision", base.edge_precision, cur.edge_precision),
         ("edge_recall", base.edge_recall, cur.edge_recall),
@@ -527,6 +529,7 @@ mod tests {
             ndcg_at_10: v,
             clean_at_5: v,
             answer_in_bundle: v,
+            map_ndcg_at_10: v,
             bundle_clean: v,
             edge_precision: v,
             edge_recall: v,
@@ -549,15 +552,15 @@ mod tests {
 
     #[test]
     fn diff_reports_flags_a_drop_over_the_threshold_as_a_regression() {
-        // Every one of the 9 metrics drops by 0.03 (> 0.02) in both the
-        // corpus scope and "overall" -> 18 regressions total, 0 improvements.
+        // Every one of the 10 metrics drops by 0.03 (> 0.02) in both the
+        // corpus scope and "overall" -> 20 regressions total, 0 improvements.
         let baseline = report_with(&[("pyapp", metric_set(0.50))], metric_set(0.50));
         let current = report_with(&[("pyapp", metric_set(0.47))], metric_set(0.47));
 
         let (regressions, improvements) = diff_reports(&baseline, &current);
 
         assert!(improvements.is_empty(), "{improvements:?}");
-        assert_eq!(regressions.len(), 18, "{regressions:?}");
+        assert_eq!(regressions.len(), 20, "{regressions:?}");
         assert!(regressions.iter().any(|m| m.label == "pyapp.recall@5"));
         assert!(regressions.iter().any(|m| m.label == "overall.mrr"));
         for m in &regressions {

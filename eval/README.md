@@ -81,12 +81,21 @@ without it, and a change could pass or fail on how hashes happened to fall.
 That is why the committed numbers jumped when the gate moved to keyword-only.
 Nothing got better; the gate stopped measuring noise.
 
-Rule: **any** of the 9 metrics
+Rule: **any** of the 10 metrics
 (`recall@5`, `recall@10`, `mrr`, `ndcg@10`, `clean@5`, `answer_in_bundle`,
-`bundle_clean`, `edge_precision`, `edge_recall`), in any corpus or in the pooled
-"overall" row, dropping by **more than 0.02 absolute** against the baseline
-fails the gate (`exit 1`, every regressed metric named with its before/after
-values). A baseline from a different mode is refused rather than compared.
+`map_ndcg@10`, `bundle_clean`, `edge_precision`, `edge_recall`), in any corpus
+or in the pooled "overall" row, dropping by **more than 0.02 absolute** against
+the baseline fails the gate (`exit 1`, every regressed metric named with its
+before/after values). A baseline from a different mode is refused rather than
+compared.
+
+`answer_in_bundle` only asks whether the answer is on `explore`'s map, so it
+passes row 40 as readily as row 1 and can only rise as a map grows.
+`map_ndcg@10` grades the rendered row order instead: `graded` qualnames gain
+their grade, other `expect` qualnames gain 1, and rows past the tenth score
+nothing. A metric missing from a baseline reads as 0.0 and shows up as an
+improvement on every `check`, so `map_ndcg@10` can't fail the gate until the
+next deliberate `bless` records it.
 Improvements are printed too, but never fail the gate. A missing baseline
 file fails with a message telling you to run `bless` first (and to commit
 the result) rather than a generic file-not-found error.

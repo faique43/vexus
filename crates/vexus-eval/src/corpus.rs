@@ -73,6 +73,7 @@ pub struct CorpusAccum {
     pub ndcg_at_10: Accum,
     pub clean_at_5: Accum,
     pub answer_in_bundle: Accum,
+    pub map_ndcg_at_10: Accum,
     pub bundle_clean: Accum,
     pub edges: EdgeCounts,
 }
@@ -86,6 +87,7 @@ impl CorpusAccum {
             ndcg_at_10: self.ndcg_at_10.combine(other.ndcg_at_10),
             clean_at_5: self.clean_at_5.combine(other.clean_at_5),
             answer_in_bundle: self.answer_in_bundle.combine(other.answer_in_bundle),
+            map_ndcg_at_10: self.map_ndcg_at_10.combine(other.map_ndcg_at_10),
             bundle_clean: self.bundle_clean.combine(other.bundle_clean),
             edges: self.edges.combine(other.edges),
         }
@@ -100,6 +102,7 @@ impl CorpusAccum {
             ndcg_at_10: metrics::round4(self.ndcg_at_10.mean()),
             clean_at_5: metrics::round4(self.clean_at_5.mean()),
             answer_in_bundle: metrics::round4(self.answer_in_bundle.mean()),
+            map_ndcg_at_10: metrics::round4(self.map_ndcg_at_10.mean()),
             bundle_clean: metrics::round4(self.bundle_clean.mean()),
             edge_precision: metrics::round4(self.edges.precision()),
             edge_recall: metrics::round4(self.edges.recall()),
@@ -279,13 +282,21 @@ fn score_search_query(
 /// Scores one `tool: explore` query at the DEFAULT budget (`None` —
 /// `explore_text`'s own default), pushing `1.0`/`0.0` into
 /// `accum.answer_in_bundle`. `explore` returns a map, so a symbol counts as
-/// found when its location is on it.
+/// found when its location is on it. `accum.map_ndcg_at_10` gets the same map
+/// graded by where on it that location is.
 fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut CorpusAccum) {
-    let locations = map_locations(&explore_text(state, &query.q, None));
+    let rows = map_rows(&explore_text(state, &query.q, None));
+    let locations: String = rows.iter().map(|row| format!("{row}\n")).collect();
     let passed = metrics::answer_in_bundle(&locations, &query.expect, |qualname| {
         symbol_location(state, qualname)
     });
     accum.answer_in_bundle.push(if passed { 1.0 } else { 0.0 });
+    accum.map_ndcg_at_10.push(metrics::map_ndcg_at_10(
+        &rows,
+        &query.expect,
+        &query.graded,
+        |qualname| symbol_location(state, qualname).map(|l| l.trim_end().to_string()),
+    ));
     if !query.expect_not.is_empty() {
         accum.bundle_clean.push(metrics::bundle_clean(
             &locations,
@@ -295,20 +306,23 @@ fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut Cor
     }
 }
 
-/// One `path:start-end` line per row of a rendered `explore` map.
-fn map_locations(map: &str) -> String {
-    let mut locations = String::new();
+/// `path:start-end` for each row of a rendered `explore` map, top to bottom.
+fn map_rows(map: &str) -> Vec<String> {
+    let mut rows = Vec::new();
     let mut path = "";
     for line in map.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             path = header;
         } else if let Some((range, _)) = line.split_once(' ') {
-            if range.split('-').all(|n| n.parse::<u32>().is_ok()) {
-                locations.push_str(&format!("{path}:{range}\n"));
+            let is_range = range
+                .split_once('-')
+                .is_some_and(|(a, b)| a.parse::<u32>().is_ok() && b.parse::<u32>().is_ok());
+            if is_range {
+                rows.push(format!("{path}:{range}"));
             }
         }
     }
-    locations
+    rows
 }
 
 /// A symbol's `path:start-end` line, or `None` if it doesn't resolve to
@@ -422,6 +436,14 @@ mod tests {
         assert!(m.mrr > 0.0, "{m:?}");
         assert!(m.answer_in_bundle > 0.0, "{m:?}");
         assert_eq!(accum.edges.labeled, 57, "eval/edges/pyapp.yaml row count");
+    }
+
+    #[test]
+    fn map_rows_follow_the_rendered_order_and_skip_everything_else() {
+        let map = "explore: \"q\"\n\nBest match first.\n\n\
+                   ## b.py\n10-20 def b():\n  calls: x  called by: y\n30-35 def c():\n\
+                   ## a.py\n1-2 def a():\n3 more not shown.\n";
+        assert_eq!(map_rows(map), ["b.py:10-20", "b.py:30-35", "a.py:1-2"]);
     }
 
     /// The gate's whole point: with no embedder, nothing can reach the

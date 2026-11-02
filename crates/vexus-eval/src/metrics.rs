@@ -15,8 +15,8 @@
 //! queries contributes proportionally more to the overall figure, exactly as
 //! it would if all corpora's queries had been one big corpus.
 //!
-//! - `recall@5`, `recall@10`, `mrr`, `ndcg@10`, `answer_in_bundle` are each a
-//!   mean of one score per applicable query. [`Accum`] tracks `(sum, count)`;
+//! - `recall@5`, `recall@10`, `mrr`, `ndcg@10`, `answer_in_bundle`,
+//!   `map_ndcg@10` are each a mean of one score per applicable query. [`Accum`] tracks `(sum, count)`;
 //!   its `combine` is plain addition of both fields, so
 //!   `overall = corpus_a.combine(corpus_b).mean()` is exactly "pool every
 //!   query from every corpus, then average" — never `mean(mean_a, mean_b)`.
@@ -159,6 +159,32 @@ pub fn answer_in_bundle(
     expect
         .iter()
         .all(|qualname| first_chunk_content(qualname).is_some_and(|c| bundle_text.contains(&c)))
+}
+
+/// How well one `explore` map's order serves its answer: [`ndcg_at_10`] over
+/// the map's rows as rendered, so an agent reading from the top gets the
+/// credit. `expect` symbols gain 1 unless `graded` says otherwise, and `graded`
+/// symbols outside `expect` count too.
+///
+/// [`answer_in_bundle`] can't see either thing this is for. It passes an answer
+/// on row 40 as readily as one on row 1, and it can only rise as a map grows.
+/// Here nothing past row 10 scores, so a longer map can't buy a better number.
+/// A symbol that doesn't resolve stays in the ideal, so losing one costs score
+/// rather than shrinking the denominator.
+pub fn map_ndcg_at_10(
+    rows: &[String],
+    expect: &[String],
+    graded: &HashMap<String, u8>,
+    mut location: impl FnMut(&str) -> Option<String>,
+) -> f64 {
+    let mut gains: HashMap<String, u8> = HashMap::new();
+    let expected = expect.iter().map(|q| (q, 1));
+    let labelled = expected.chain(graded.iter().map(|(q, g)| (q, *g)));
+    for (qualname, default_gain) in labelled {
+        let gain = graded.get(qualname).copied().unwrap_or(default_gain);
+        gains.insert(location(qualname).unwrap_or_else(|| qualname.clone()), gain);
+    }
+    ndcg_at_10(rows, &gains)
 }
 
 /// clean@k for one `search` query: the fraction of `expect_not` qualnames
@@ -311,17 +337,17 @@ pub fn edge_counts(
     }
 }
 
-/// The exact nine metrics reported: `recall@5`, `recall@10`, `mrr`,
-/// `ndcg@10`, `clean@5` (search); `answer_in_bundle`, `bundle_clean`
-/// (explore); `edge_precision`, `edge_recall` (callers/callees vs labeled
-/// ground truth). Each is
+/// The exact ten metrics reported: `recall@5`, `recall@10`, `mrr`,
+/// `ndcg@10`, `clean@5` (search); `answer_in_bundle`, `map_ndcg@10`,
+/// `bundle_clean` (explore); `edge_precision`, `edge_recall`
+/// (callers/callees vs labeled ground truth). Each is
 /// already rounded to 4 decimal
 /// places via [`round4`] — the shape written to `eval/last-run.json`, both
 /// per corpus and for "overall". Field names are renamed on serialization to
 /// match the literal metric names (`@` is a valid JSON string-key
-/// character). `clean@5` and `bundle_clean` carry `#[serde(default)]` so a
-/// baseline JSON blessed before they existed still parses (reading as 0.0,
-/// which can only ever ratchet upward).
+/// character). `clean@5`, `map_ndcg@10` and `bundle_clean` carry
+/// `#[serde(default)]` so a baseline JSON blessed before they existed still
+/// parses (reading as 0.0, which can only ever ratchet upward).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MetricSet {
     #[serde(rename = "recall@5")]
@@ -334,6 +360,8 @@ pub struct MetricSet {
     #[serde(rename = "clean@5", default)]
     pub clean_at_5: f64,
     pub answer_in_bundle: f64,
+    #[serde(rename = "map_ndcg@10", default)]
+    pub map_ndcg_at_10: f64,
     #[serde(default)]
     pub bundle_clean: f64,
     pub edge_precision: f64,
@@ -701,6 +729,90 @@ mod tests {
         assert_eq!(counts.precision(), 0.0);
     }
 
+    // ---- map_ndcg_at_10 -------------------------------------------------------
+
+    fn grades(items: &[(&str, u8)]) -> HashMap<String, u8> {
+        items.iter().map(|(q, g)| (q.to_string(), *g)).collect()
+    }
+
+    /// Every location is the qualname with a prefix, so a test can spell a
+    /// map in qualnames.
+    fn loc(qualname: &str) -> Option<String> {
+        Some(format!("at:{qualname}"))
+    }
+
+    fn map(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|r| format!("at:{r}")).collect()
+    }
+
+    #[test]
+    fn map_ndcg_is_perfect_when_the_answers_lead_the_map() {
+        let score = map_ndcg_at_10(
+            &map(&["a", "b", "x"]),
+            &strings(&["a", "b"]),
+            &grades(&[]),
+            loc,
+        );
+        assert_eq!(score, 1.0);
+    }
+
+    #[test]
+    fn map_ndcg_scores_an_answer_higher_the_earlier_it_appears() {
+        let expect = strings(&["a"]);
+        let first = map_ndcg_at_10(&map(&["a", "x", "y"]), &expect, &grades(&[]), loc);
+        let second = map_ndcg_at_10(&map(&["x", "a", "y"]), &expect, &grades(&[]), loc);
+        let third = map_ndcg_at_10(&map(&["x", "y", "a"]), &expect, &grades(&[]), loc);
+        assert!(first > second && second > third, "{first} {second} {third}");
+        assert!((second - 1.0 / 3f64.log2()).abs() < 1e-12, "{second}");
+    }
+
+    #[test]
+    fn map_ndcg_gives_nothing_for_an_answer_only_a_huge_map_reaches() {
+        let mut huge: Vec<&str> = vec!["junk"; 30];
+        huge[25] = "a";
+        let expect = strings(&["a"]);
+        assert_eq!(map_ndcg_at_10(&map(&huge), &expect, &grades(&[]), loc), 0.0);
+        // answer_in_bundle can't tell this map from a one-row one.
+        assert!(answer_in_bundle(&map(&huge).join("\n"), &expect, loc));
+    }
+
+    #[test]
+    fn map_ndcg_does_not_rise_when_a_map_grows_past_the_cutoff() {
+        let expect = strings(&["a", "b"]);
+        let mut rows: Vec<&str> = vec!["a"];
+        rows.extend(["x"; 9]);
+        let short = map_ndcg_at_10(&map(&rows), &expect, &grades(&[]), loc);
+        rows.extend(["b", "y", "z"]);
+        let long = map_ndcg_at_10(&map(&rows), &expect, &grades(&[]), loc);
+        assert_eq!(short, long);
+        assert!(short < 1.0, "b is missing from the part that counts");
+    }
+
+    #[test]
+    fn map_ndcg_uses_grades_where_given_and_one_elsewhere() {
+        // Grade 3 at rank 2 and grade 1 at rank 1, against the ideal order.
+        let expect = strings(&["a", "b"]);
+        let graded = grades(&[("a", 3)]);
+        let score = map_ndcg_at_10(&map(&["b", "a"]), &expect, &graded, loc);
+        let dcg = 1.0 + 3.0 / 3f64.log2();
+        let ideal = 3.0 + 1.0 / 3f64.log2();
+        assert!((score - dcg / ideal).abs() < 1e-12, "{score}");
+    }
+
+    #[test]
+    fn map_ndcg_counts_a_graded_symbol_outside_expect() {
+        let score = map_ndcg_at_10(&map(&["a"]), &strings(&["a"]), &grades(&[("b", 1)]), loc);
+        assert!(score < 1.0, "{score}");
+    }
+
+    #[test]
+    fn map_ndcg_keeps_an_unresolved_answer_in_the_ideal() {
+        let score = map_ndcg_at_10(&map(&["a"]), &strings(&["a", "gone"]), &grades(&[]), |q| {
+            (q != "gone").then(|| format!("at:{q}"))
+        });
+        assert!(score < 1.0, "{score}");
+    }
+
     // ---- MetricSet ------------------------------------------------------------
 
     #[test]
@@ -712,6 +824,7 @@ mod tests {
             ndcg_at_10: 0.6667,
             clean_at_5: 0.7,
             answer_in_bundle: 0.5,
+            map_ndcg_at_10: 0.4,
             bundle_clean: 0.6,
             edge_precision: 0.95,
             edge_recall: 0.85,
@@ -723,6 +836,7 @@ mod tests {
         assert_eq!(json["ndcg@10"], 0.6667);
         assert_eq!(json["clean@5"], 0.7);
         assert_eq!(json["answer_in_bundle"], 0.5);
+        assert_eq!(json["map_ndcg@10"], 0.4);
         assert_eq!(json["bundle_clean"], 0.6);
         assert_eq!(json["edge_precision"], 0.95);
         assert_eq!(json["edge_recall"], 0.85);
@@ -739,6 +853,7 @@ mod tests {
         let set: MetricSet = serde_json::from_str(json).unwrap();
         assert_eq!(set.clean_at_5, 0.0);
         assert_eq!(set.bundle_clean, 0.0);
+        assert_eq!(set.map_ndcg_at_10, 0.0);
         assert_eq!(set.recall_at_5, 0.2);
     }
 
