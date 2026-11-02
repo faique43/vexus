@@ -246,117 +246,161 @@ fn init_cursor_writes_mdc_file() {
     );
 }
 
-#[test]
-fn init_claude_code_writes_all_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-
+fn init_claude_code(root: &std::path::Path, extra: &[&str]) -> assert_cmd::assert::Assert {
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .args(["init", "--agent", "claude-code"])
+        .args(extra)
+        .arg(root.to_str().unwrap())
         .assert()
-        .success();
+}
 
-    // Check all expected files exist
-    let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
-    let hooks_json = root.join(".claude/skills/vexus/hooks/hooks.json");
-    let nudge_sh = root.join(".claude/skills/vexus/hooks/nudge-grep.sh");
-    let skill_md = root.join(".claude/skills/vexus/SKILL.md");
-    let nested_skill_md = root.join(".claude/skills/vexus/skills/vexus/SKILL.md");
-
-    assert!(plugin_json.exists(), "plugin.json should exist");
-    assert!(hooks_json.exists(), "hooks.json should exist");
-    assert!(nudge_sh.exists(), "nudge-grep.sh should exist");
-    assert!(
-        !nested_skill_md.exists(),
-        "Claude Code only discovers .claude/skills/<name>/SKILL.md, not a nested skills/ dir"
-    );
-    assert!(skill_md.exists(), "SKILL.md should exist");
-
-    // Check hook script is executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::metadata(&nudge_sh).unwrap().permissions();
-        assert!(
-            perms.mode() & 0o111 != 0,
-            "nudge-grep.sh should have execute bit set"
-        );
-    }
+fn claude_settings(root: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(root.join(".claude/settings.json")).unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 #[test]
-fn init_claude_code_without_force_skips_existing() {
+fn init_claude_code_installs_a_prompt_hook_claude_code_will_load() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    // First run
+    init_claude_code(root, &[]).success();
+
+    let settings = claude_settings(root);
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        "vexus hook prompt"
+    );
+}
+
+#[test]
+fn init_claude_code_adds_no_tools_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    init_claude_code(root, &[]).success();
+
+    assert!(
+        !root.join(".mcp.json").exists(),
+        "tool definitions cost every session, used or not"
+    );
+    assert!(!root.join(".claude/skills").exists());
+}
+
+#[test]
+fn init_claude_code_keeps_existing_settings_and_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        ".claude/settings.json",
+        r#"{"model": "x", "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "mine"}]}]}}"#,
+    );
+
+    init_claude_code(root, &[]).success();
+
+    let settings = claude_settings(root);
+    assert_eq!(settings["model"], "x");
+    let entries = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["hooks"][0]["command"], "mine");
+}
+
+#[test]
+fn init_claude_code_twice_adds_the_hook_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    init_claude_code(root, &[]).success();
+    let first = std::fs::read_to_string(root.join(".claude/settings.json")).unwrap();
+    init_claude_code(root, &[])
+        .success()
+        .stdout(predicate::str::contains("skip"));
+
+    assert_eq!(
+        std::fs::read_to_string(root.join(".claude/settings.json")).unwrap(),
+        first
+    );
+}
+
+#[test]
+fn init_claude_code_leaves_malformed_settings_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".claude/settings.json", "{not json");
+
+    init_claude_code(root, &[])
+        .success()
+        .stdout(predicate::str::contains("vexus hook prompt"));
+
+    assert_eq!(
+        std::fs::read_to_string(root.join(".claude/settings.json")).unwrap(),
+        "{not json"
+    );
+}
+
+fn run_prompt_hook(root: &std::path::Path, prompt: &str) -> assert_cmd::assert::Assert {
+    let payload = serde_json::json!({
+        "prompt": prompt,
+        "cwd": root.to_str().unwrap(),
+        "session_id": "s",
+    });
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["hook", "prompt"])
+        .write_stdin(payload.to_string())
+        .assert()
+}
+
+#[test]
+fn prompt_hook_points_at_the_code_a_prompt_is_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "app.py",
+        "def compute_backoff(delay):\n    return delay * 2\n",
+    );
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "mock")
+        .args(["index", root.to_str().unwrap()])
         .assert()
         .success();
 
-    let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
-    let original_content = std::fs::read_to_string(&plugin_json).unwrap();
+    let out = run_prompt_hook(root, "retries wait too long in compute_backoff")
+        .success()
+        .get_output()
+        .stdout
+        .clone();
 
-    // Second run without --force should skip
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let context = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("app.py:1-2 compute_backoff"), "{context}");
+}
+
+#[test]
+fn prompt_hook_stays_silent_without_an_index() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_prompt_hook(dir.path(), "retries wait too long in compute_backoff")
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn prompt_hook_survives_a_bad_payload() {
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .args(["hook", "prompt"])
+        .write_stdin("not json")
         .assert()
         .success()
-        .stdout(predicate::str::contains("skip").or(predicate::str::contains("Skip")));
-
-    // Content should be unchanged
-    let current_content = std::fs::read_to_string(&plugin_json).unwrap();
-    assert_eq!(
-        original_content, current_content,
-        "file should not be overwritten without --force"
-    );
-}
-
-#[test]
-fn init_claude_code_with_force_overwrites() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-
-    // First run
-    Command::cargo_bin("vexus")
-        .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
-        .assert()
-        .success();
-
-    let plugin_json = root.join(".claude/skills/vexus/.claude-plugin/plugin.json");
-
-    // Modify the file
-    std::fs::write(&plugin_json, "modified content").unwrap();
-    let modified_content = std::fs::read_to_string(&plugin_json).unwrap();
-    assert_eq!(modified_content, "modified content");
-
-    // Second run with --force should overwrite
-    Command::cargo_bin("vexus")
-        .unwrap()
-        .args([
-            "init",
-            "--agent",
-            "claude-code",
-            "--force",
-            root.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    let current_content = std::fs::read_to_string(&plugin_json).unwrap();
-    assert_ne!(
-        current_content, "modified content",
-        "file should be overwritten with --force"
-    );
-    assert!(
-        current_content.contains("vexus"),
-        "file should contain original content"
-    );
+        .stdout("");
 }
 
 #[test]
@@ -378,7 +422,13 @@ fn init_claude_code_writes_mcp_json() {
 
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .args([
+            "init",
+            "--agent",
+            "claude-code",
+            "--mcp",
+            root.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
@@ -403,7 +453,13 @@ fn init_claude_code_merges_into_existing_mcp_json() {
 
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .args([
+            "init",
+            "--agent",
+            "claude-code",
+            "--mcp",
+            root.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
@@ -426,7 +482,13 @@ fn init_claude_code_keeps_customized_vexus_entry_without_force() {
 
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .args([
+            "init",
+            "--agent",
+            "claude-code",
+            "--mcp",
+            root.to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("--force"));
@@ -444,11 +506,17 @@ fn init_claude_code_leaves_malformed_mcp_json_alone() {
     let root = dir.path();
     std::fs::write(root.join(".mcp.json"), "{not json").unwrap();
 
-    // init must still succeed (pack files matter more) and must not
+    // init must still succeed (the hooks matter more) and must not
     // destroy the user's file, however broken it is
     Command::cargo_bin("vexus")
         .unwrap()
-        .args(["init", "--agent", "claude-code", root.to_str().unwrap()])
+        .args([
+            "init",
+            "--agent",
+            "claude-code",
+            "--mcp",
+            root.to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("mcpServers"));

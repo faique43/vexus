@@ -1,3 +1,4 @@
+pub mod locate;
 pub mod model;
 pub mod priors;
 pub mod query;

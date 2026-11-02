@@ -72,9 +72,7 @@ try {
     Write-Host ""
     Write-Host "next, inside the repo you want indexed:"
     Write-Host "  vexus index .                    # build the index (first run downloads a ~160 MB model; large repos take minutes)"
-    Write-Host "  vexus init --agent claude-code   # install the steering pack + register the MCP server in .mcp.json"
-    Write-Host ""
-    Write-Host "no need to run 'vexus serve' yourself - your agent launches it via .mcp.json"
+    Write-Host "  vexus init --agent claude-code   # add the prompt hook to .claude/settings.json"
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Re-run `vexus init --agent claude-code` to get the hook. Older installs can
+delete `.claude/skills/vexus`, which never ran.
+
+### Changed
+
+- **`vexus init --agent claude-code` now installs a prompt hook, and that's
+  what saves tokens.** Each prompt arrives with a few likely locations, found
+  locally for about 100 tokens. Across 288 live sessions on 48 change requests
+  that cost 10% less (95% interval 4 to 17) with 16% fewer tool calls and the
+  same pass rate. Short requests saved 21%, read-only questions 13%, and
+  seven-prompt sessions 9%.
+- **The MCP server is now opt-in, with `--mcp`.** Agents ignored it on about
+  half of change requests while paying for its definitions, and it saved
+  nothing measurable there. On read-only questions it cost 31% less but
+  answered less completely.
+- **The hook stays silent when a prompt doesn't need it:** on replies, and on
+  long reports that already name the code, where even exact hints raised cost
+  and lowered the pass rate.
+
+### Fixed
+
+- **`init --agent claude-code` installed nothing that ran.** Neither the skill
+  nor its nudge hook fired once in 28 sessions. Hooks now go in
+  `.claude/settings.json`, and the pack is gone.
+
+### Docs
+
+- Replaced the 29% and 17% savings claims. They came from read-only questions
+  on the MCP server, and part of that saving was less complete answers.
+
 ## v0.4.1 — exact symbols, faster index
 
 ### Changed
