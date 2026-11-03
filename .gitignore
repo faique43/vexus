@@ -21,3 +21,4 @@ eval/agent/results/
 # Agent-local settings and steering-pack files that `vexus init` (and agent
 # CLIs themselves) create in a checkout — per-machine, never shared.
 .claude/
+__pycache__/

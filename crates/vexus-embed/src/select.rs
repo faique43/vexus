@@ -61,6 +61,26 @@ fn real_embedder_with_sessions(sessions: usize) -> anyhow::Result<Box<dyn Embedd
     Ok(Box::new(embedder))
 }
 
+/// [`make_embedder`] for a caller that can't wait: `None` unless the model is
+/// already on disk, so it never downloads. A prompt hook must not start a
+/// 160 MB fetch, or block a prompt on one.
+pub fn cached_embedder() -> Option<Box<dyn Embedder>> {
+    match std::env::var("VEXUS_EMBEDDER").as_deref() {
+        Ok("mock") => Some(Box::new(MockEmbedder)),
+        Ok("none") => None,
+        #[cfg(feature = "onnx")]
+        _ => {
+            let models = home_dir()?.join(".vexus/models");
+            let dir = crate::download::cached_model(&crate::JINA_CODE_V2, &models)?;
+            let embedder =
+                crate::OnnxEmbedder::load_sessions(&dir, &crate::JINA_CODE_V2, 1).ok()?;
+            Some(Box::new(embedder))
+        }
+        #[cfg(not(feature = "onnx"))]
+        _ => None,
+    }
+}
+
 /// Selects the embedder for this run from `VEXUS_EMBEDDER`:
 /// - `mock` → deterministic `MockEmbedder` (tests/CI, no model download)
 /// - `none` → structural-only, no embeddings

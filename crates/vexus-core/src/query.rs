@@ -54,6 +54,41 @@ fn synthetic_symbol(dst_name: &str) -> SymbolInfo {
     }
 }
 
+/// Whether a name's last segment reads as a file extension, in which case
+/// `package.json` is more likely a file than a `json` on some `package`.
+fn is_file_extension(segment: &str) -> bool {
+    matches!(
+        segment,
+        "cfg"
+            | "cjs"
+            | "conf"
+            | "css"
+            | "env"
+            | "go"
+            | "html"
+            | "ini"
+            | "java"
+            | "js"
+            | "json"
+            | "jsx"
+            | "lock"
+            | "md"
+            | "mjs"
+            | "py"
+            | "rb"
+            | "rs"
+            | "sh"
+            | "sql"
+            | "toml"
+            | "ts"
+            | "tsx"
+            | "txt"
+            | "xml"
+            | "yaml"
+            | "yml"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Resolution {
     Exact(SymbolInfo),
@@ -121,11 +156,13 @@ impl Store {
         // `res.sendFile` can be assigned in a file that names it something
         // else, so the prefix isn't reliable. Its own name still is.
         if seg != target {
-            let mut by_segment = self.symbols_by_name(seg, NAME_MATCH_LIMIT)?;
+            let mut by_segment = self.symbols_by_name(seg, i64::MAX)?;
             by_segment.retain(|info| !crate::priors::is_test_path(&info.path));
             match by_segment.len() {
                 0 => {}
-                1 => return Ok(Resolution::Exact(by_segment.into_iter().next().unwrap())),
+                1 if !is_file_extension(seg) => {
+                    return Ok(Resolution::Exact(by_segment.into_iter().next().unwrap()))
+                }
                 _ => {
                     by_segment.truncate(10);
                     return Ok(Resolution::Candidates(by_segment));
@@ -171,7 +208,9 @@ impl Store {
 
     /// Direct callers of `symbol_id` (edges kind='calls' with dst_id =
     /// symbol_id), plus name-only matches (dst_id NULL AND dst_name
-    /// suffix-matches the symbol's name) reported with confidence None.
+    /// suffix-matches the symbol's name) reported with confidence None. The
+    /// resolver only leaves such an edge unresolved when the name fits several
+    /// symbols, so each of them reports it: it's a guess, to label or skip.
     /// `depth` walks callers-of-callers over resolved edges only.
     pub fn callers_of(&self, symbol_id: i64, depth: u32, limit: u32) -> Result<Vec<EdgeHit>> {
         let Some(info) = self.symbol_info(symbol_id)? else {
@@ -216,7 +255,7 @@ impl Store {
             LEFT JOIN symbols s ON s.id = e.dst_id
             LEFT JOIN files f ON f.id = s.file_id
             WHERE r.depth < ?2
-            ORDER BY r.depth + 1 ASC, e.dst_id ASC
+            ORDER BY r.depth + 1 ASC, e.dst_id IS NULL, e.dst_id ASC
             LIMIT ?3";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt
@@ -373,9 +412,10 @@ impl Store {
     ///
     /// `via_name`/`confidence` aren't part of `reach` (they're per-edge, not
     /// per-node); the outer `SELECT` re-joins the edge(s) that could have
-    /// produced each `(node, depth)` pair and picks the one with the
-    /// smallest edge id, purely for a deterministic single answer — any one
-    /// of them is an equally valid "how did we get here".
+    /// produced each `(node, depth)` pair and picks one: a resolved edge over
+    /// a name match, since `confidence` says whether the caller is known, then
+    /// the smallest edge id for a deterministic answer. Name matches sort after
+    /// resolved callers at each depth so `row_cap` can't cost a known caller.
     fn walk_callers(
         &self,
         symbol_id: i64,
@@ -406,7 +446,7 @@ impl Store {
             JOIN symbols s ON s.id = reach.id
             JOIN files f ON f.id = s.file_id
             JOIN edges e ON e.id = (
-                SELECT MIN(e2.id)
+                SELECT e2.id
                 FROM edges e2
                 WHERE e2.src_id = reach.id
                   AND e2.kind = 'calls'
@@ -417,8 +457,10 @@ impl Store {
                         SELECT r2.id FROM reach r2 WHERE r2.depth = reach.depth - 1
                     ))
                   )
+                ORDER BY e2.dst_id IS NULL, e2.id
+                LIMIT 1
             )
-            ORDER BY reach.depth ASC, s.id ASC
+            ORDER BY reach.depth ASC, e.dst_id IS NULL, s.id ASC
             LIMIT ?4"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -516,6 +558,7 @@ mod tests {
             symbols: vec![sym("slug", "app.util.slug", SymbolKind::Function)],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: 1,
                 end_line: 2,
@@ -653,6 +696,56 @@ mod tests {
         match store.resolve_symbol("res.sendFile").unwrap() {
             Resolution::Exact(info) => assert_eq!(info.qualname, "response.sendFile"),
             other => panic!("expected Exact, got {other:?}"),
+        }
+    }
+
+    fn with_function_at(store: &mut Store, path: &str, name: &str, qualname: &str) {
+        let idx = FileIndex {
+            symbols: vec![sym(name, qualname, SymbolKind::Function)],
+            edges: vec![],
+            chunks: vec![],
+        };
+        let hash = blake3::hash(path.as_bytes());
+        store
+            .replace_file(path, "python", hash.as_bytes(), &idx)
+            .unwrap();
+    }
+
+    /// `package.json` is a file. A lone `def json` somewhere in the repo
+    /// shares a word with it and nothing else, so it's a suggestion at best.
+    #[test]
+    fn a_file_name_is_not_a_symbol_named_after_its_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        with_function_at(&mut store, "lib/api.py", "json", "lib.api.json");
+
+        match store.resolve_symbol("package.json").unwrap() {
+            Resolution::Candidates(found) => assert_eq!(found[0].qualname, "lib.api.json"),
+            other => panic!("expected Candidates, got {other:?}"),
+        }
+    }
+
+    /// `ModuleRef.get` with no `ModuleRef` indexed: the name is shared by
+    /// hundreds of methods, and tests sort first, so looking at only the first
+    /// few left one survivor to pass as an exact match.
+    #[test]
+    fn a_last_segment_match_looks_past_the_test_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        for i in 0..11 {
+            with_function_at(
+                &mut store,
+                &format!("a/test/t{i}.spec.py"),
+                "get",
+                &format!("a.test.t{i}.get"),
+            );
+        }
+        with_function_at(&mut store, "b/cache.py", "get", "b.cache.get");
+        with_function_at(&mut store, "c/config.py", "get", "c.config.get");
+
+        match store.resolve_symbol("ModuleRef.get").unwrap() {
+            Resolution::Candidates(found) => assert_eq!(found.len(), 2, "{found:?}"),
+            other => panic!("expected Candidates, got {other:?}"),
         }
     }
 
@@ -848,6 +941,82 @@ mod tests {
         assert_eq!(main_hit.via_name, "leaf");
     }
 
+    /// Unresolved matches on a common name can run to thousands of rows, and
+    /// the limit applies after the sort.
+    #[test]
+    fn callers_of_keeps_resolved_callers_when_name_matches_fill_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = Box::leak(Box::new(dir));
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let call = |name: &str| NewEdge {
+            src: 0,
+            kind: EdgeKind::Calls,
+            dst_name: name.into(),
+            dst_arity: Some(0),
+        };
+        for i in 0..12u8 {
+            let guess = FileIndex {
+                symbols: vec![fn_sym("guess", &format!("g{i}.guess"), Some(0))],
+                edges: vec![call("target")],
+                chunks: vec![],
+            };
+            store
+                .replace_file(&format!("g{i}.py"), "python", &[i; 32], &guess)
+                .unwrap();
+        }
+        let real = FileIndex {
+            symbols: vec![fn_sym("real", "z.real", Some(0))],
+            edges: vec![call("t.target")],
+            chunks: vec![],
+        };
+        store
+            .replace_file("z.py", "python", &[20u8; 32], &real)
+            .unwrap();
+        for (path, qualname) in [("t.py", "t.target"), ("u.py", "u.target")] {
+            let target = FileIndex {
+                symbols: vec![fn_sym("target", qualname, Some(0))],
+                edges: vec![],
+                chunks: vec![],
+            };
+            store
+                .replace_file(path, "python", &[21u8; 32], &target)
+                .unwrap();
+        }
+        store.resolve_all_edges().unwrap();
+        store
+            .conn_ref_for_tests()
+            .execute(
+                "UPDATE edges SET dst_id = NULL, confidence = 'name_only' WHERE dst_name = 'target'",
+                [],
+            )
+            .unwrap();
+
+        let hits = store.callers_of(id_of(&store, "t.target"), 1, 10).unwrap();
+
+        assert_eq!(hits[0].symbol.qualname, "z.real", "{hits:?}");
+        assert!(hits[0].confidence.is_some(), "{hits:?}");
+    }
+
+    /// One caller can hold a guess and a real edge to the same symbol. It's a
+    /// known caller, whichever edge happens to have been written first.
+    #[test]
+    fn a_caller_with_a_resolved_edge_is_not_reported_as_a_name_match() {
+        let (store, main_id, _helper_id, leaf_id) = graph_fixture();
+        store
+            .conn_ref_for_tests()
+            .execute(
+                "INSERT INTO edges (src_id, dst_id, kind, dst_name, confidence)
+                 VALUES (?1, ?2, 'calls', 'c.leaf', 'exact')",
+                [main_id, leaf_id],
+            )
+            .unwrap();
+
+        let hits = store.callers_of(leaf_id, 1, 50).unwrap();
+
+        let main_hit = hits.iter().find(|h| h.symbol.id == main_id).unwrap();
+        assert!(main_hit.confidence.is_some(), "{main_hit:?}");
+    }
+
     #[test]
     fn callers_of_depth_2_walks_callers_of_callers() {
         let (store, main_id, _helper_id, leaf_id) = graph_fixture();
@@ -893,6 +1062,46 @@ mod tests {
         );
         assert_eq!(leaf_hit.symbol.qualname, "leaf");
         assert_eq!(leaf_hit.confidence, None);
+    }
+
+    /// A body full of builtin calls must not cost the callees the index
+    /// actually knows about: SQLite sorts NULL first, and the limit cuts after.
+    #[test]
+    fn callees_of_keeps_resolved_callees_when_builtins_fill_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = Box::leak(Box::new(dir));
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let call = |name: String| NewEdge {
+            src: 0,
+            kind: EdgeKind::Calls,
+            dst_name: name,
+            dst_arity: Some(0),
+        };
+        let caller = FileIndex {
+            symbols: vec![fn_sym("busy", "a.busy", Some(0))],
+            edges: (0..12)
+                .map(|i| call(format!("builtin_{i}")))
+                .chain([call("helper".into())])
+                .collect(),
+            chunks: vec![],
+        };
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &caller)
+            .unwrap();
+        let callee = FileIndex {
+            symbols: vec![fn_sym("helper", "b.helper", Some(0))],
+            edges: vec![],
+            chunks: vec![],
+        };
+        store
+            .replace_file("b.py", "python", &[2u8; 32], &callee)
+            .unwrap();
+        store.resolve_all_edges().unwrap();
+
+        let hits = store.callees_of(id_of(&store, "a.busy"), 1, 10).unwrap();
+
+        assert_eq!(hits.len(), 10);
+        assert_eq!(hits[0].symbol.qualname, "b.helper", "{hits:?}");
     }
 
     #[test]

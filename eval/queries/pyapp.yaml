@@ -310,3 +310,49 @@
 - q: "tests covering login throttling"
   expect:
     - tests.test_auth.test_authenticate_throttles_repeated_login_attempts
+
+# --- struct fields, enum variants, interface members ---------------------
+#
+# `expect` is the container because that's what a field resolves to. Words from
+# the container's name or doc comment are kept out of the questions: they'd
+# find it without ever reading a member.
+
+# struct fields
+- q: "max_login_attempts"
+  expect:
+    - config.Config
+
+- q: "where is stripe_api_key declared"
+  expect:
+    - config.Config
+
+- q: "renewed_at timestamp field"
+  expect:
+    - models.subscription.Subscription
+
+- q: "display_name and bio profile fields"
+  expect:
+    - models.user.User
+
+- q: "invoice_count and generated_at fields"
+  expect:
+    - models.report.UsageReport
+
+- q: "renewed_at"
+  tool: explore
+  expect:
+    - models.subscription.Subscription
+
+# enum variants
+- q: "WRITTEN_OFF"
+  expect:
+    - models.dunning_stage.DunningStage
+
+- q: "which variant comes after COURTESY_NUDGE"
+  expect:
+    - models.dunning_stage.DunningStage
+
+- q: "COLLECTIONS_HANDOFF"
+  tool: explore
+  expect:
+    - models.dunning_stage.DunningStage

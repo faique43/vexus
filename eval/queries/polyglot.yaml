@@ -422,7 +422,7 @@
   expect:
     - service.src.services.order_service.cancel_order
   expect_not:
-    - service.src.services.order_service.cancel_order_persists_the_cancelled_status
+    - service.src.services.order_service.tests.cancel_order_persists_the_cancelled_status
     - service.tests.integration.cancelling_an_unknown_order_still_notifies
 
 - q: "how does cancelling an order notify the customer"
@@ -431,7 +431,7 @@
     - service.src.services.order_service.cancel_order
     - service.src.services.notifications.notify_order_cancelled
   expect_not:
-    - service.src.services.order_service.cancel_order_persists_the_cancelled_status
+    - service.src.services.order_service.tests.cancel_order_persists_the_cancelled_status
     - service.tests.integration.cancelling_an_unknown_order_still_notifies
 
 - q: "how does the frontend place a new order"
@@ -447,14 +447,14 @@
     - service.src.services.order_service.place_order
     - service.src.utils.retry.retry_with_backoff
   expect_not:
-    - service.src.services.order_service.place_order_returns_a_generated_order_id
+    - service.src.services.order_service.tests.place_order_returns_a_generated_order_id
     - service.tests.integration.order_lifecycle_place_pay_cancel
 
 - q: "where do we validate a session token"
   expect:
     - service.src.services.auth.validate
   expect_not:
-    - service.src.services.auth.validate_rejects_an_empty_session_token
+    - service.src.services.auth.tests.validate_rejects_an_empty_session_token
 
 # Test-seeking queries must still find tests — pins the query-aware bypass.
 - q: "integration tests for the order lifecycle"
@@ -464,3 +464,73 @@
 - q: "unit tests for duplicate order submission"
   expect:
     - frontend.src.api.orders.test.placeOrderRejectsADuplicateSubmission
+
+# --- struct fields, enum variants, interface members ---------------------
+#
+# See the matching section of pyapp.yaml.
+
+# struct fields
+- q: "percent_off"
+  expect:
+    - service.src.services.pricing.PercentageDiscount
+
+- q: "amount_off_cents field"
+  expect:
+    - service.src.services.pricing.FlatDiscount
+
+- q: "which record stores total_cents"
+  expect:
+    - service.src.models.order.Order
+
+- q: "Sku and Count fields"
+  expect:
+    - worker.inventory.StockLine
+
+- q: "percent_off"
+  tool: explore
+  expect:
+    - service.src.services.pricing.PercentageDiscount
+
+# enum variants
+- q: "OutForDelivery"
+  expect:
+    - service.src.models.shipment_status.ShipmentStatus
+
+- q: "ReturnedToSender"
+  expect:
+    - service.src.models.shipment_status.ShipmentStatus
+
+- q: "QUOTA_EXCEEDED"
+  expect:
+    - android.SyncState.SyncState
+
+- q: "state after UPLOADING_RECEIPTS while WAITING_FOR_WIFI"
+  expect:
+    - android.SyncState.SyncState
+
+- q: "OutForDelivery"
+  tool: explore
+  expect:
+    - service.src.models.shipment_status.ShipmentStatus
+
+# interface members
+- q: "requestTimeoutMs"
+  expect:
+    - frontend.src.config.AppConfig
+
+- q: "placedAt and itemCount"
+  expect:
+    - frontend.src.views.order_summary.OrderSummaryData
+
+- q: "voidAuthorization"
+  expect:
+    - frontend.src.api.payment_gateway.PaymentGateway
+
+- q: "CancelPickup"
+  expect:
+    - worker.carrier.Carrier
+
+- q: "voidAuthorization"
+  tool: explore
+  expect:
+    - frontend.src.api.payment_gateway.PaymentGateway

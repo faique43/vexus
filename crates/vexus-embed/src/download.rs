@@ -168,7 +168,10 @@ pub fn ensure_model(manifest: &ModelManifest, models_root: &Path) -> Result<Path
             write_sentinel(&sentinel, file.sha256)?;
             continue; // present + verified
         }
-        let part = dir.join(format!("{}.part", file.name));
+        // Per process: a second downloader mustn't write into this file, and
+        // failing mustn't delete a good copy one of them just put in place.
+        let corrupt_copy = dest.exists();
+        let part = dir.join(format!("{}.{}.part", file.name, std::process::id()));
         let url = format!("{base}{}", file.url_path);
         let size = if file.size_hint.is_empty() {
             String::new()
@@ -192,12 +195,28 @@ pub fn ensure_model(manifest: &ModelManifest, models_root: &Path) -> Result<Path
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&part);
-            let _ = std::fs::remove_file(&dest); // never leave an unverified file
-            let _ = std::fs::remove_file(&sentinel);
+            if corrupt_copy {
+                let _ = std::fs::remove_file(&dest); // never leave an unverified file
+                let _ = std::fs::remove_file(&sentinel);
+            }
             return result.map(|_| unreachable!());
         }
     }
     Ok(dir)
+}
+
+/// The local model dir if every file is already there and verified. Never
+/// touches the network, for callers that can't wait on it.
+pub fn cached_model(manifest: &ModelManifest, models_root: &Path) -> Option<PathBuf> {
+    let dir = models_root.join(manifest.id);
+    manifest
+        .files
+        .iter()
+        .all(|file| {
+            dir.join(file.name).exists()
+                && sentinel_matches(&sentinel_path(&dir, file), file.sha256)
+        })
+        .then_some(dir)
 }
 
 #[cfg(test)]

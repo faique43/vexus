@@ -4,9 +4,9 @@
 
 **Stop letting your coding agent grep its way around your codebase.**
 
-Vexus indexes your repo into a semantic + call-graph index and serves it over MCP.
-Your agent asks one question and gets a ranked map of the code behind it, then
-reads only what it needs.
+Vexus indexes your repo into a semantic + call-graph index, then tells Claude Code
+where to look before it starts searching: a few locations with each prompt, no
+tools to learn and no tool definitions to pay for.
 
 Runs entirely on your machine. Indexing and embedding cost zero agent tokens.
 
@@ -39,6 +39,23 @@ is doing full-text search because that is the only tool it has.
 
 ## The fix
 
+Vexus searches before the agent does. A hook runs on each prompt, finds the
+likely code locally, and adds a few locations to what the agent sees:
+
+```text
+Likely relevant code, from the repo index. Check it fits before relying on it.
+services/invoice_service.py:13-25 create_invoice
+services/notification_service.py:20-28 notify_invoice_created
+handlers/invoices.py:14-18 InvoiceHandler.create
+services/invoice_service.py:28-30 get_invoice
+```
+
+The agent opens the right lines first, and it found them without spending a
+token. Nothing to learn, no tool to remember, and no tool definitions in every
+session.
+
+The optional MCP server lets the agent ask for more itself:
+
 ```text
 explore "how does an invoice get created"
 ```
@@ -51,18 +68,18 @@ Below is the complete, unedited response. Reproduce it by indexing
 ```text
 explore: "how does an invoice get created"
 
-Best match first. These are locations, not source: `open` "path:start-end" for what you need.
+Grouped by file, best first. These are locations, not source: `open` "path:start-end" for what you need.
 
-## services/notification_service.py
-20-28 def notify_invoice_created(invoice, notifier):
-  calls: send  called by: create_invoice
-7-9 def send(self, message):
 ## services/invoice_service.py
 13-25 def create_invoice(customer_id, amount_cents, currency="usd"):
   calls: Invoice, _default_notifier, notify_invoice_created, generate_id  called by: create
 28-30 def get_invoice(invoice_id):
-39-47 def refund_invoice(invoice_id, amount_cents=None):
 50-52 def _default_notifier():
+39-47 def refund_invoice(invoice_id, amount_cents=None):
+## services/notification_service.py
+20-28 def notify_invoice_created(invoice, notifier):
+  calls: send  called by: create_invoice
+7-9 def send(self, message):
 ## handlers/invoices.py
 14-18 def create(self, req):
   calls: get, create_invoice  called by: dispatch_create
@@ -71,6 +88,8 @@ Best match first. These are locations, not source: `open` "path:start-end" for w
 24-26 def list(self, req):
 ## jobs/invoice_reminders.py
 7-17 def send_invoice_reminders(customer_ids):
+## handlers/webhooks.py
+17-22 def _handle_charge_failed(self, req):
 ## models/invoice.py
 7-14 class Invoice:
 ## utils/ids.py
@@ -79,15 +98,11 @@ Best match first. These are locations, not source: `open` "path:start-end" for w
 20-25 def validate_amount(amount_cents):
 ## app.py
 37-46 def dispatch_create(handler, req):
-## config.py
-16-24 def load_config():
-## handlers/reports.py
-10-13 def generate_usage_report(self, req):
-## services/rate_limiter.py
-19-29 def allow(self, key):
 ## services/subscription_service.py
 10-22 def renew_subscription(subscription_id):
 25-31 def cancel_subscription(subscription_id):
+## services/user_service.py
+23-25 def get_user(user_id):
 ```
 
 The model reads the map, decides what matters, and calls `open` on exactly those
@@ -122,7 +137,7 @@ cargo install --git https://github.com/faique43/vexus vexus-cli
 **Pin a version / change the location:**
 
 ```sh
-VEXUS_VERSION=0.4.0 VEXUS_INSTALL_DIR=/usr/local/bin \
+VEXUS_VERSION=0.4.1 VEXUS_INSTALL_DIR=/usr/local/bin \
   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
 ```
 
@@ -148,13 +163,29 @@ cd your-repo
 vexus index .     # first run also fetches the embedding model (~160 MB, once)
 ```
 
-Point your MCP client at it. **Claude Code**:
+Then hook it into **Claude Code**:
 
 ```sh
-vexus init --agent claude-code   # registers the MCP server in .mcp.json + installs the steering pack
+vexus init --agent claude-code   # adds a prompt hook to .claude/settings.json
 ```
 
-Or add it by hand — `.mcp.json` in your repo:
+Each prompt now arrives with a few likely locations, about 100 tokens:
+
+```text
+Likely relevant code, from the repo index. Check it fits before relying on it.
+lib/utils.js:130-152 compileETag
+lib/request.js:449-511 lib.request
+lib/response.js:126-222 send
+lib/utils.js:249-257 createETagGenerator
+```
+
+Nothing else changes. The hook stays silent on replies and on long reports that
+already name the code, because hints there cost more than they save. It runs
+locally and spends no agent tokens. Line numbers follow a symbol through edits,
+and the index refreshes itself in the background.
+
+For more than Claude Code, or to give the agent search tools as well, use the
+MCP server. Add `--mcp` to the command above, or put this in `.mcp.json`:
 
 ```json
 {
@@ -164,6 +195,10 @@ Or add it by hand — `.mcp.json` in your repo:
 }
 ```
 
+Its tool definitions cost every session whether they're used or not, and agents
+mostly skip them on change requests, so it's opt-in. See
+[live agent runs](#live-agent-runs) for what it does and doesn't save.
+
 <details>
 <summary>Cursor, Windsurf, Cline, and other MCP clients</summary>
 
@@ -172,15 +207,17 @@ Any MCP client that can launch a stdio server works. The command is
 `.cursor/mcp.json`.
 
 Optional: `vexus init --agent cursor` writes a rules file telling the agent
-when to prefer vexus over grep. `--agent claude-code` installs a skill and a
-one-time nudge hook; `--agent generic` prints a snippet for your `AGENTS.md`.
+when to prefer vexus over grep. `--agent generic` prints a snippet for your
+`AGENTS.md`.
 
 </details>
 
 That's it. `vexus serve` runs a file watcher, so the index stays current as you
 edit — no re-indexing by hand.
 
-## What your agent gets
+## MCP tools
+
+With `--mcp`, or on any other MCP client, your agent gets:
 
 | Tool | Use it for |
 | --- | --- |
@@ -198,20 +235,29 @@ Full methodology and caveats: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ### Live agent runs
 
-The numbers that count: the same questions in real Claude Code sessions, one
-with vexus and one with only Read, Grep and Glob. Same model, three rounds of
-five questions per repo, 60 sessions in all. Final context includes vexus's
-tool definitions. Reproduce it with
-[`eval/agent/compare.sh`](eval/agent/compare.sh).
+The numbers that count: the same tasks in real Claude Code sessions, with the
+hook and without it. Sonnet 5.5, on Express (142 files) and NestJS (about 2,000
+files), with sessions shuffled together and caches warmed first.
 
-| Repo | Cost | Tool calls | Final context | Expected names in the answer |
+| Tasks | Sessions | Cost (95% interval) | Tool calls | Without vs with the hook |
 | --- | ---: | ---: | ---: | ---: |
-| NestJS (2,205 files) | **29% less** ($0.72 → $0.51) | 26% fewer | 12% less | 41 → 39 of 51 |
-| Express (142 files) | **17% less** ($0.56 → $0.46) | 24% fewer | same | 42 → 42 of 42 |
+| Short change requests | 84 | **21% less** (9 to 33) | 22% fewer | 42 vs 42 of 42 pass |
+| Real NestJS bugs, code names removed | 102 | 9% less (−2 to 20) | 19% fewer | 26 vs 27 of 51 pass |
+| Same bugs, as filed | 102 | about the same (−4 to 6) | 4% fewer | 28 vs 27 of 51 pass |
+| **All change requests** | 288 | **10% less** (4 to 17) | 16% fewer | 96 vs 96 of 144 pass |
+| Read-only questions | 120 | **13% less** (3 to 22) | 25% fewer | 144 vs 145 of 150 names |
+| Seven prompts in one session | 24 | 9% less | 11% fewer | 84 vs 84 of 84 pass |
 
-Vexus was cheaper in all six rounds. It was cheaper on 32- and 44-file fixture repos too. It can still lose on
-well-known libraries: Claude answers questions about Express from memory, so
-any tool call there is an extra cost.
+Real bugs were scored by the maintainers' own specs, which the agent never saw.
+Agents could edit but not run commands, so pass rates sit below what a full
+session reaches. Savings are smallest where the agent already knows where to
+look, which is why the hook stays silent on detailed reports.
+
+The MCP server is a different trade. On the same read-only questions it cost
+31% less (22 to 39), but its answers named fewer of the expected symbols, 136
+against 144 of 150. On change requests it saved nothing measurable: 4% less
+(−17 to 21), with agents ignoring it in about half of sessions while still
+paying for its definitions.
 
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has a synthetic table too, but it
 counts only the `explore` call and not the reads that follow, so use it for
@@ -219,16 +265,17 @@ regressions, not for comparing against grep.
 
 ### Retrieval quality
 
-Measured against hand-labelled fixture corpora — 69 graded queries, 99 labelled
-call edges — and **gated in CI**: any metric dropping more than 0.02 absolute
-fails the build.
+Measured against hand-labelled fixture corpora, 131 graded queries and 117
+labelled call edges, on the real embedding model. The same set runs keyword-only
+in CI, and any metric dropping more than 0.02 fails the build.
 
-| | |
-| --- | ---: |
-| recall@5 | 0.80 |
-| recall@10 | 0.92 |
-| answer-in-bundle (`explore` returned the source you needed) | 0.83 |
-| call-edge precision / recall | 0.88 / 0.93 |
+| | Real model | Keyword only |
+| --- | ---: | ---: |
+| recall@5 | 0.95 | 0.93 |
+| recall@10 | 0.98 | 0.96 |
+| MRR | 0.78 | 0.75 |
+| `explore` map holds the answer | 1.00 | 0.94 |
+| call-edge precision / recall | 0.91 / 0.94 | 0.91 / 0.94 |
 
 ### Speed
 
@@ -303,6 +350,10 @@ The things worth knowing before you rely on it:
 - **First run needs network.** The model is fetched from Hugging Face (pinned
   revision, checksum-verified). Without it vexus still runs keyword-and-graph
   only, and `status` tells you so.
+- **The hook is Claude Code only.** Other agents get the MCP server, which
+  saves less on change requests.
+- **Savings depend on the work.** They were measured on Express and NestJS, on
+  tasks of a few minutes each. Larger repos and long sessions are less tested.
 - **The index is a cache.** Any schema or model change rebuilds it. There is no
   migration path, on purpose — v0.4.0 bumps the schema, so upgrading to it
   re-indexes once.

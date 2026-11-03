@@ -15,11 +15,11 @@ One question — "what do the helper functions here do?" — asked of the same s
 
 | Files | grep+read | vexus | Ratio |
 | ---: | ---: | ---: | ---: |
-| 50 | 1782 | 238 | 7.5× |
-| 200 | 7032 | 313 | 22.5× |
-| 500 | 17598 | 345 | 51.0× |
+| 50 | 1782 | 313 | 5.7× |
+| 200 | 7032 | 283 | 24.8× |
+| 500 | 17598 | 320 | 55.0× |
 
-From 50 to 500 files, grep+read grew 9.9× while vexus grew 1.4×.
+From 50 to 500 files, grep+read grew 9.9× while vexus grew 1.0×.
 
 ## Per task, on the retrieval-scoring corpora
 
@@ -27,22 +27,22 @@ These two corpora are hand-authored and small (a few dozen short files) so every
 
 | Task | Corpus | grep+read | vexus | Ratio |
 | --- | --- | ---: | ---: | ---: |
-| How does placing an order flow through the service? | polyglot | 889 | 484 | 1.8× |
-| Where does the frontend talk to the orders API? | polyglot | 526 | 470 | 1.1× |
+| How does placing an order flow through the service? | polyglot | 889 | 384 | 2.3× |
+| Where does the frontend talk to the orders API? | polyglot | 526 | 306 | 1.7× |
 | What calls the pricing quote function? | polyglot | 455 | 42 | 10.8× |
-| How does an invoice get created end to end? | pyapp | 2288 | 325 | 7.0× |
-| Where is the retry/backoff logic and what uses it? | pyapp | 366 | 382 | 1.0× |
+| How does an invoice get created end to end? | pyapp | 2288 | 302 | 7.6× |
+| Where is the retry/backoff logic and what uses it? | pyapp | 366 | 282 | 1.3× |
 | What would break if charge_card changed? | pyapp | 510 | 82 | 6.2× |
-| How are repeated login attempts throttled? | pyapp | 426 | 257 | 1.7× |
-| Show me the email validation helper. | pyapp | 230 | 635 | 0.4× |
+| How are repeated login attempts throttled? | pyapp | 426 | 303 | 1.4× |
+| Show me the email validation helper. | pyapp | 230 | 484 | 0.5× |
 
 ## Method
 
-Both corpora (`eval/corpora/`) are hand-authored fixture repositories, indexed with the real ONNX model.
+Both corpora (`eval/corpora/`) are hand-authored fixture repositories, indexed with the deterministic mock embedder.
 
 The **grep+read** column is executed, not estimated. Each task in `eval/token-bench/tasks.yaml` carries an ordered transcript of the steps an agent would run without an index: every `grep` is a real regex pass over the corpus whose every matching line is counted (formatted `path:line:text`, as a real grep prints it), and every `read` really reads that file or slice and counts all of it. The transcripts include the wrong turns a real session has — a first pattern that is too broad, a file opened at the wrong layer — because a transcript that went straight to the answer would not be an honest baseline.
 
-The **vexus** column runs the same functions `vexus serve` exposes over MCP (`explore`, `search`, `open`, `callers`) at their default token budgets, and counts the full response.
+The **vexus** column runs the same functions `vexus serve` exposes over MCP (`explore`, `open`, `callers`) at their default token budgets, and counts the full response.
 
 Both sides are measured with vexus's own `chars / 4` estimate, so the ratio does not depend on a particular tokenizer.
 

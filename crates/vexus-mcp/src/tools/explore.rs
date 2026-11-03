@@ -4,21 +4,22 @@
 //! narrow ranges. Returning source here would charge full price for every
 //! guess before the model could reject one, so `explore` stays on the pointer
 //! side of that split: one line per symbol, and the model calls `open` for
-//! what it wants. A question naming exactly one symbol skips all of this and
+//! what it wants. A question that's just one symbol skips all of this and
 //! gets that symbol's source and links. Pipeline:
 //!
 //! 1. `search_hybrid_scored(question, embed(question), floor, entry_limit)`
-//!    → entry chunks, trimmed by `RELEVANCE_FLOOR`. `entry_limit` and the
-//!    limits below scale with the corpus tier — see `params_for`. A
-//!    `WeakVectorOnly` outcome (no keyword hit, nothing under the KNN floor)
+//!    → entry chunks, trimmed by `RELEVANCE_FLOOR`, after any symbol the
+//!    question names. `entry_limit` and the limits below scale with the
+//!    corpus tier — see `params_for`. A
+//!    `WeakVectorOnly` outcome (no real keyword hit, nothing under the KNN floor)
 //!    renders under a "weak match" note and skips step 2.
 //! 2. One hop of callees and callers from the first `max_entry_symbols`
 //!    distinct entry symbols adds neighbors, up to `max_neighbor_ids`, along
-//!    with what the top hit's callers also call. Test code is skipped unless
-//!    the question asks about tests.
-//! 3. Rows render best first, grouped by file, until the budget runs out. The
-//!    top `LINKED_ROWS` rows also show their call links, which is what the
-//!    index knows that grep doesn't.
+//!    with what the top hit's callers also call. Test and non-core code are
+//!    skipped unless the question asks about them.
+//! 3. Rows are picked best first until the budget runs out, then grouped by
+//!    file. The top `LINKED_ROWS` rows also show their call links, which is
+//!    what the index knows that grep doesn't.
 
 use std::collections::HashSet;
 
@@ -26,15 +27,16 @@ use std::collections::HashSet;
 use vexus_watch::pipeline;
 
 use vexus_core::model::estimate_tokens;
-use vexus_core::priors::query_seeks_tests;
-use vexus_core::query::{Resolution, SymbolInfo};
+use vexus_core::priors::{is_non_core_path, query_seeks_non_core, query_seeks_tests};
+use vexus_core::query::{EdgeHit, Resolution, SymbolInfo};
+use vexus_core::search::{content_terms, SearchHit, SearchOutcome};
 use vexus_core::Store;
 
 use crate::state::{freshness_header, AppState};
 use crate::tools::{apply_header, clamp_budget, embed_query};
 
 const NEIGHBOR_DEPTH: u32 = 1;
-const NEIGHBOR_LIMIT: u32 = 10;
+const NEIGHBOR_LIMIT: usize = 10;
 
 /// Rows that get a `calls:` / `called by:` line.
 const LINKED_ROWS: usize = 3;
@@ -46,10 +48,36 @@ const MAX_LABEL_CHARS: usize = 100;
 /// back to the map, where the model can open the part it wants.
 const NAMED_SOURCE_TOKENS: u32 = 1200;
 
-/// Search hits scoring under this fraction of the best hit are dropped, so a
-/// map ends where relevance does. A hit in one search list scores about half
-/// a hit in both, so a one-list hit survives and one carrying the 0.4 test
-/// penalty, at 0.2, doesn't.
+/// Words that ask for a symbol rather than add to a question about it, on top
+/// of what search already ignores.
+const SYMBOL_REQUEST_WORDS: &[&str] = &[
+    "calculated",
+    "class",
+    "code",
+    "computed",
+    "defined",
+    "definition",
+    "explain",
+    "find",
+    "function",
+    "implementation",
+    "implemented",
+    "like",
+    "look",
+    "looks",
+    "method",
+    "read",
+    "see",
+    "show",
+    "source",
+];
+
+/// Search hits scoring under this fraction of the best hit are dropped. A hit
+/// in one search list scores about half a hit in both, so a one-list hit
+/// survives and one carrying the 0.4 test penalty, at 0.2, doesn't. RRF scores
+/// can't say where relevance ends, so this only ever removes penalized hits,
+/// and raising it costs answers: at 0.5 the real embedder's `answer_in_bundle`
+/// falls 1.0 -> 0.9655.
 const RELEVANCE_FLOOR: f64 = 0.25;
 
 fn keep_strong<T>(items: Vec<T>, score: impl Fn(&T) -> f64) -> Vec<T> {
@@ -96,7 +124,7 @@ const NO_MATCH_TEXT: &str = "nothing indexed matches that question — try disti
 
 const WEAK_MATCH_TEXT: &str = "weak match — nothing indexed clearly matches this question; the rows below are only the nearest neighbors. For exact strings or comments, grep is the better tool here.";
 
-const MAP_NOTE: &str = "Best match first. These are locations, not source: `open` \"path:start-end\" for what you need.";
+const MAP_NOTE: &str = "Grouped by file, best first. These are locations, not source: `open` \"path:start-end\" for what you need.";
 
 /// One map line: a location, and a label to judge it by.
 struct Row {
@@ -126,33 +154,94 @@ fn symbol_row(info: &SymbolInfo) -> Row {
     }
 }
 
+/// A row for a search hit. A symbol too long for one chunk gets the chunk
+/// that matched, since `open` can stop at its budget before reaching it. A
+/// chunk that only reaches further up, over a doc comment, is the whole symbol.
+fn hit_row(hit: &SearchHit, info: &SymbolInfo) -> Row {
+    let mut row = symbol_row(info);
+    if hit.start_line > info.start_line || hit.end_line < info.end_line {
+        row.start_line = hit.start_line;
+        row.end_line = hit.end_line;
+        let whole = format!("(part of {}-{})", info.start_line, info.end_line);
+        row.label = format!("{} {whole}", row.label);
+    }
+    row
+}
+
+/// A label for a chunk outside any symbol: its first line of code, or failing
+/// that of comment. Such a chunk can open on a `/**`, a `'use strict'`, or the
+/// `})` that ends the symbol before it, and none says what's there.
+fn preamble_label(content: &str) -> String {
+    let readable = |l: &&str| l.chars().any(char::is_alphanumeric);
+    let boilerplate = |l: &&str| {
+        ["/*", "*", "//", "#"].iter().any(|m| l.starts_with(m)) || l.contains("use strict")
+    };
+    let lines = || content.lines().map(str::trim).filter(readable);
+    let label = lines()
+        .find(|l| !boilerplate(l))
+        .or_else(|| lines().next())
+        .or_else(|| content.lines().next());
+    truncated(label.unwrap_or(""))
+}
+
 fn is_test_code(store: &Store, info: &SymbolInfo) -> bool {
     store.is_test_symbol(info.id, &info.path).unwrap_or(false)
 }
 
+/// What a map shows besides the project's own code. Neither kind of code gets
+/// there through the call graph unasked: a test or sample is a real caller of
+/// what it exercises, so one hop would otherwise fill the map with them.
+#[derive(Clone, Copy)]
+struct Scope {
+    tests: bool,
+    non_core: bool,
+}
+
+impl Scope {
+    fn allows(self, store: &Store, info: &SymbolInfo) -> bool {
+        (self.tests || !is_test_code(store, info))
+            && (self.non_core || !is_non_core_path(&info.path))
+    }
+}
+
+/// The distinct symbols on the far end of `edges` that a map may show, up to
+/// `NEIGHBOR_LIMIT`. The store's limit can't do this: rows arrive in id order,
+/// so a cut before filtering lets repeat call sites and test code use up the
+/// slots of everything indexed after them.
+fn linked_symbols(store: &Store, edges: Vec<EdgeHit>, scope: Scope) -> Vec<SymbolInfo> {
+    let mut seen = HashSet::new();
+    edges
+        .into_iter()
+        .filter(|e| e.confidence.is_some() && seen.insert(e.symbol.id))
+        .filter(|e| scope.allows(store, &e.symbol))
+        .map(|e| e.symbol)
+        .take(NEIGHBOR_LIMIT)
+        .collect()
+}
+
+fn callers_shown(store: &Store, symbol_id: i64, scope: Scope) -> Vec<SymbolInfo> {
+    let edges = store.callers_of(symbol_id, NEIGHBOR_DEPTH, u32::MAX);
+    linked_symbols(store, edges.unwrap_or_default(), scope)
+}
+
+fn callees_shown(store: &Store, symbol_id: i64, scope: Scope) -> Vec<SymbolInfo> {
+    let edges = store.callees_of(symbol_id, NEIGHBOR_DEPTH, u32::MAX);
+    linked_symbols(store, edges.unwrap_or_default(), scope)
+}
+
 /// `calls: a, b  called by: c` for a symbol, or `None` if it has no links.
-fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String> {
-    let names = |edges: Vec<vexus_core::query::EdgeHit>| -> Vec<String> {
+fn link_line(store: &Store, symbol_id: i64, scope: Scope) -> Option<String> {
+    let names = |symbols: Vec<SymbolInfo>| -> Vec<String> {
         let mut seen = HashSet::new();
-        edges
+        symbols
             .into_iter()
-            .filter(|e| e.symbol.id != -1)
-            .filter(|e| wants_tests || !is_test_code(store, &e.symbol))
-            .map(|e| e.symbol.name)
+            .map(|s| s.name)
             .filter(|name| seen.insert(name.clone()))
             .take(MAX_LINKS)
             .collect()
     };
-    let callees = names(
-        store
-            .callees_of(symbol_id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-            .unwrap_or_default(),
-    );
-    let callers = names(
-        store
-            .callers_of(symbol_id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-            .unwrap_or_default(),
-    );
+    let callees = names(callees_shown(store, symbol_id, scope));
+    let callers = names(callers_shown(store, symbol_id, scope));
     let mut parts = Vec::new();
     if !callees.is_empty() {
         parts.push(format!("calls: {}", callees.join(", ")));
@@ -164,47 +253,45 @@ fn link_line(store: &Store, symbol_id: i64, wants_tests: bool) -> Option<String>
 }
 
 /// Groups rows by file, best file first, spending at most `budget_tokens`.
-fn render_map(store: &Store, rows: &[Row], wants_tests: bool, budget_tokens: u32) -> String {
-    let mut paths: Vec<&str> = Vec::new();
-    for row in rows {
-        if !paths.contains(&row.path.as_str()) {
-            paths.push(&row.path);
-        }
-    }
-
+/// Rows are chosen in rank order and only then grouped, so a weak row in the
+/// best file can't cost a strong row in the next one.
+fn render_map(store: &Store, rows: &[Row], scope: Scope, budget_tokens: u32) -> String {
     let linked: Vec<i64> = rows
         .iter()
         .filter_map(|r| r.symbol_id)
         .take(LINKED_ROWS)
         .collect();
-    let mut output = String::new();
+    let mut groups: Vec<(&str, String)> = Vec::new();
     let mut used = 0;
     let mut omitted = 0;
-    for path in paths {
-        let mut group = format!("## {path}\n");
-        let mut listed = false;
-        for row in rows.iter().filter(|r| r.path == path) {
-            let mut line = format!("{}-{} {}\n", row.start_line, row.end_line, row.label);
-            if let Some(links) = row
-                .symbol_id
-                .filter(|id| linked.contains(id))
-                .and_then(|id| link_line(store, id, wants_tests))
-            {
-                line.push_str(&format!("  {links}\n"));
-            }
-            let cost = estimate_tokens(&line) + if listed { 0 } else { estimate_tokens(&group) };
-            if used + cost > budget_tokens {
-                omitted += 1;
-                continue;
-            }
-            used += cost;
-            group.push_str(&line);
-            listed = true;
+    for row in rows {
+        let mut line = format!("{}-{} {}\n", row.start_line, row.end_line, row.label);
+        if let Some(links) = row
+            .symbol_id
+            .filter(|id| linked.contains(id))
+            .and_then(|id| link_line(store, id, scope))
+        {
+            line.push_str(&format!("  {links}\n"));
         }
-        if listed {
-            output.push_str(&group);
+        let header = format!("## {}\n", row.path);
+        let group = groups.iter().position(|(path, _)| *path == row.path);
+        let cost = estimate_tokens(&line)
+            + if group.is_some() {
+                0
+            } else {
+                estimate_tokens(&header)
+            };
+        if used + cost > budget_tokens {
+            omitted += 1;
+            continue;
+        }
+        used += cost;
+        match group {
+            Some(i) => groups[i].1.push_str(&line),
+            None => groups.push((&row.path, header + &line)),
         }
     }
+    let mut output: String = groups.into_iter().map(|(_, text)| text).collect();
     if omitted > 0 {
         output.push_str(&format!("{omitted} more not shown.\n"));
     }
@@ -218,18 +305,31 @@ fn looks_like_code(word: &str) -> bool {
         || word.chars().skip(1).any(char::is_uppercase)
 }
 
-/// The one symbol a question names, if it names exactly one.
-fn named_symbol(store: &Store, question: &str) -> Option<SymbolInfo> {
+/// The one symbol a question names, if it names exactly one, and the word
+/// that names it.
+fn named_symbol<'q>(store: &Store, question: &'q str) -> Option<(SymbolInfo, &'q str)> {
     let mut named = question
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
         .filter(|w| looks_like_code(w))
         .filter_map(|w| match store.resolve_symbol(w) {
-            Ok(Resolution::Exact(info)) if info.kind != "module" => Some(info),
+            Ok(Resolution::Exact(info)) if info.kind != "module" => Some((info, w)),
             _ => None,
         });
     let first = named.next()?;
-    named.all(|other| other.id == first.id).then_some(first)
+    named
+        .all(|(other, _)| other.id == first.0.id)
+        .then_some(first)
+}
+
+/// Whether a question wants `word`'s symbol and nothing beyond it: "what does
+/// X do" or "where is X defined", but not "how does X become a response",
+/// which that symbol's source alone can't answer.
+fn asks_only_about(question: &str, word: &str) -> bool {
+    let named = content_terms(word);
+    content_terms(question).iter().all(|term| {
+        named.contains(term) || SYMBOL_REQUEST_WORDS.contains(&term.to_lowercase().as_str())
+    })
 }
 
 /// A named symbol's location, links and source. Source comes along here
@@ -248,7 +348,11 @@ fn render_named(store: &Store, info: &SymbolInfo) -> Option<String> {
         info.end_line,
         truncated(info.sig.as_deref().unwrap_or(&info.qualname))
     );
-    if let Some(links) = link_line(store, info.id, false) {
+    let scope = Scope {
+        tests: false,
+        non_core: is_non_core_path(&info.path),
+    };
+    if let Some(links) = link_line(store, info.id, scope) {
         out.push_str(&format!("  {links}\n"));
     }
     out.push_str(&format!("```\n{source}```\n"));
@@ -275,8 +379,13 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .unwrap_or(vexus_core::model::CorpusTier::Medium),
     );
     let budget_tokens = clamp_budget(budget_tokens, DEFAULT_BUDGET_TOKENS);
-    if let Some(named) = named_symbol(&store, question).and_then(|i| render_named(&store, &i)) {
-        return apply_header(fresh_header, format!("{question_header}{named}"));
+    let named = named_symbol(&store, question);
+    let alone = named
+        .as_ref()
+        .filter(|(_, word)| asks_only_about(question, word))
+        .and_then(|(info, _)| render_named(&store, info));
+    if let Some(source) = alone {
+        return apply_header(fresh_header, format!("{question_header}{source}"));
     }
     let (hits, outcome) = match store.search_hybrid_scored(
         question,
@@ -288,15 +397,19 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
         Err(e) => return apply_header(fresh_header, format!("explore error: {e:#}")),
     };
 
-    if hits.is_empty() {
+    if hits.is_empty() && named.is_none() {
         return apply_header(fresh_header, format!("{question_header}{NO_MATCH_TEXT}"));
     }
-    let weak = outcome == vexus_core::search::SearchOutcome::WeakVectorOnly;
-    let wants_tests = query_seeks_tests(question);
+    let weak = named.is_none() && outcome == SearchOutcome::WeakVectorOnly;
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: HashSet<i64> = HashSet::new();
     let mut entry_symbols: Vec<i64> = Vec::new();
+    if let Some((info, _)) = &named {
+        seen.insert(info.id);
+        entry_symbols.push(info.id);
+        rows.push(symbol_row(info));
+    }
     for hit in keep_strong(hits, |h| h.score) {
         let info = hit
             .symbol_id
@@ -306,18 +419,25 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             Some(info) => {
                 if seen.insert(info.id) {
                     entry_symbols.push(info.id);
-                    rows.push(symbol_row(&info));
+                    rows.push(hit_row(&hit, &info));
                 }
             }
             None => rows.push(Row {
                 path: hit.path.clone(),
                 start_line: hit.start_line,
                 end_line: hit.end_line,
-                label: truncated(hit.content.lines().next().unwrap_or("")),
+                label: preamble_label(&hit.content),
                 symbol_id: None,
             }),
         }
     }
+
+    // A best match in non-core code means the question is about that code.
+    let scope = Scope {
+        tests: query_seeks_tests(question),
+        non_core: query_seeks_non_core(question)
+            || rows.first().is_some_and(|r| is_non_core_path(&r.path)),
+    };
 
     if !weak {
         let mut neighbors: Vec<SymbolInfo> = Vec::new();
@@ -326,56 +446,32 @@ pub fn explore_text(state: &AppState, question: &str, budget_tokens: Option<u32>
             .take(params.max_entry_symbols)
             .enumerate()
         {
-            let callers = store
-                .callers_of(*id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-                .unwrap_or_default();
-            let callees = store
-                .callees_of(*id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-                .unwrap_or_default();
+            let callers = callers_shown(&store, *id, scope);
+            let callees = callees_shown(&store, *id, scope);
             // Siblings of the best match: the other steps its callers take
             // are usually the rest of the flow being asked about.
-            let siblings = if rank == 0 {
+            let siblings: Vec<SymbolInfo> = if rank == 0 {
                 callers
                     .iter()
-                    .filter(|e| e.symbol.id != -1)
+                    .filter(|caller| caller.kind != "module")
                     .take(SIBLING_CALLERS)
-                    .flat_map(|e| {
-                        store
-                            .callees_of(e.symbol.id, NEIGHBOR_DEPTH, NEIGHBOR_LIMIT)
-                            .unwrap_or_default()
-                    })
+                    .flat_map(|caller| callees_shown(&store, caller.id, scope))
                     .collect()
             } else {
                 Vec::new()
             };
             // Callees first: a question about how something works is
             // answered by what it does, more than by who reaches it.
-            neighbors.extend(
-                callees
-                    .into_iter()
-                    .chain(callers)
-                    .chain(siblings)
-                    .map(|e| e.symbol),
-            );
+            neighbors.extend(callees.into_iter().chain(callers).chain(siblings));
         }
-        let mut added = 0;
-        for symbol in neighbors {
-            if added >= params.max_neighbor_ids {
-                break;
-            }
-            if symbol.id == -1 || !seen.insert(symbol.id) {
-                continue;
-            }
-            if !wants_tests && is_test_code(&store, &symbol) {
-                continue;
-            }
-            rows.push(symbol_row(&symbol));
-            added += 1;
-        }
+        let unseen = neighbors
+            .iter()
+            .filter(|s| s.kind != "module" && seen.insert(s.id));
+        rows.extend(unseen.take(params.max_neighbor_ids).map(symbol_row));
     }
 
     let note = if weak { WEAK_MATCH_TEXT } else { MAP_NOTE };
-    let map = render_map(&store, &rows, wants_tests, budget_tokens);
+    let map = render_map(&store, &rows, scope, budget_tokens);
     drop(store);
     apply_header(fresh_header, format!("{question_header}{note}\n\n{map}"))
 }
@@ -565,6 +661,101 @@ mod tests {
         assert!(!out.contains("def audit"), "no other rows: {out}");
     }
 
+    fn ledger_repo(root: &std::path::Path) {
+        write(
+            root,
+            "pkg/ledger.py",
+            "class Ledger:\n    def settle(self, x):\n        body_marker = helper_step(x)\n        return body_marker\n\n    def audit(self, x):\n        return x\n\n\ndef helper_step(x):\n    return x\n",
+        );
+        write(
+            root,
+            "pkg/receipts.py",
+            "def print_receipt(x):\n    \"\"\"Turns a settlement into a receipt.\"\"\"\n    return x\n",
+        );
+    }
+
+    /// The source of the one symbol named can't say what happens to it next,
+    /// and a question about that is what a map is for.
+    #[test]
+    fn a_question_about_a_symbols_behaviour_gets_a_map_led_by_that_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ledger_repo(root);
+        let state = keyword_only_state(root);
+
+        let out = explore_text(
+            &state,
+            "how does Ledger.settle get turned into a receipt",
+            None,
+        );
+
+        assert!(!out.contains("```"), "a map, not source: {out}");
+        assert!(!out.contains("body_marker"), "{out}");
+        let (first_row, rest) = out.split_once("def settle").expect(&out);
+        assert!(!first_row.contains("def "), "named symbol first: {out}");
+        assert!(
+            rest.contains("def print_receipt"),
+            "the map's search: {out}"
+        );
+        assert!(rest.contains("calls: helper_step"), "{out}");
+    }
+
+    #[test]
+    fn a_question_that_is_just_the_symbol_gets_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ledger_repo(root);
+        let state = keyword_only_state(root);
+
+        for question in [
+            "Ledger.settle",
+            "how does Ledger.settle work",
+            "how is Ledger.settle computed",
+            "where is Ledger.settle defined",
+            "show me the code for Ledger.settle",
+        ] {
+            let out = explore_text(&state, question, None);
+            assert!(out.contains("body_marker"), "{question}: {out}");
+        }
+    }
+
+    /// Nothing resolves `package.json`, but the file's last word matches a
+    /// lone function, which is no reason to answer with that function.
+    #[test]
+    fn a_file_name_does_not_stand_in_for_a_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/api.py",
+            "def json(x):\n    body_marker = x\n    return body_marker\n",
+        );
+        write(
+            root,
+            "pkg/loader.py",
+            "def read_manifest():\n    \"\"\"Reads package.json from disk.\"\"\"\n    return 1\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "package.json", None);
+
+        assert!(!out.contains("```"), "{out}");
+        assert!(out.contains("def read_manifest"), "{out}");
+    }
+
+    #[test]
+    fn a_named_symbol_is_never_a_weak_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ledger_repo(root);
+        let state = floored_mock_state(root);
+
+        let out = explore_text(&state, "does Ledger.settle zzqqxx wibble", None);
+
+        assert!(!out.contains("weak match"), "{out}");
+        assert!(out.contains("def settle"), "{out}");
+    }
+
     #[test]
     fn an_ordinary_question_still_gets_the_map() {
         let dir = tempfile::tempdir().unwrap();
@@ -655,6 +846,258 @@ mod tests {
         );
     }
 
+    /// `open` stops at its budget, so pointing at all of a long function can
+    /// hand back everything but the part that matched.
+    #[test]
+    fn a_match_inside_a_long_function_points_at_that_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let padding: String = (0..600)
+            .map(|i| format!("    value_{i} = compute_something({i}) + other_thing({i})\n"))
+            .collect();
+        write(
+            root,
+            "pkg/long.py",
+            &format!(
+                "def long_function(x):\n{padding}    reticulate_the_splines = x\n    return reticulate_the_splines\n"
+            ),
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulate_the_splines", None);
+
+        let row = out
+            .lines()
+            .find(|l| l.contains("def long_function"))
+            .unwrap_or_else(|| panic!("{out}"));
+        let range = row.split_once(' ').unwrap().0;
+        let (start, end) = range.split_once('-').unwrap();
+        let (start, end): (u32, u32) = (start.parse().unwrap(), end.parse().unwrap());
+        assert!(start > 1 && end == 603, "{row}");
+        assert!(row.contains("part of 1-603"), "{row}");
+    }
+
+    /// Doc comments stretch a chunk past its symbol. That isn't a partial
+    /// match, and the row should keep naming the symbol.
+    #[test]
+    fn a_doc_comment_does_not_shift_a_whole_symbols_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/lib.rs",
+            "/// Reticulates the splines.\npub fn settle(x: u32) -> u32 {\n    x\n}\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("\n2-4 pub fn settle"), "{out}");
+        assert!(!out.contains("part of"), "{out}");
+    }
+
+    /// A call at the top of a file has the file's module as its caller. A
+    /// row for that is the whole file, and what the file calls is not a step
+    /// in the flow being asked about.
+    #[test]
+    fn a_file_level_caller_is_not_a_neighbor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n\n\ndef unrelated_step():\n    return 1\n",
+        );
+        write(
+            root,
+            "pkg/boot.py",
+            "from pkg.core import settle, unrelated_step\n\nsettle(1)\nunrelated_step()\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(!out.contains("pkg/boot.py"), "{out}");
+        assert!(!out.contains("unrelated_step"), "{out}");
+    }
+
+    #[test]
+    fn a_preamble_row_is_labelled_with_what_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/app.js",
+            "/**\n * Reticulates the splines.\n */\n\nvar splines = require('splines');\n\nfunction other() {\n  return 1;\n}\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("var splines = require('splines');"), "{out}");
+        assert!(!out.contains(" /**"), "{out}");
+    }
+
+    #[test]
+    fn preamble_labels_skip_punctuation_and_comment_markers() {
+        assert_eq!(
+            preamble_label("})\n\napp.listen(3000);\n"),
+            "app.listen(3000);"
+        );
+        assert_eq!(
+            preamble_label("/**\n * Docs.\n */\nconst a = 1;\n"),
+            "const a = 1;"
+        );
+        assert_eq!(preamble_label("# Only a comment.\n"), "# Only a comment.");
+        assert_eq!(preamble_label("/**\n * Only docs.\n */\n"), "* Only docs.");
+        assert_eq!(preamble_label("})\n"), "})");
+        assert_eq!(
+            preamble_label("'use strict'\n\nvar debug = require('debug');\n"),
+            "var debug = require('debug');"
+        );
+    }
+
+    /// Examples call a library's public functions all day, so one hop from
+    /// a core function lands in them: 13 of 24 rows on an Express question.
+    #[test]
+    fn graph_expansion_skips_examples_unless_the_question_asks_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "lib/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        write(
+            root,
+            "lib/job.py",
+            "from lib.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
+        );
+        write(
+            root,
+            "examples/demo.py",
+            "from lib.core import settle\n\n\ndef show_it_off():\n    return settle(2)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+        assert!(out.contains("def run_job"), "{out}");
+        assert!(!out.contains("show_it_off"), "{out}");
+
+        let out = explore_text(&state, "reticulates splines examples", None);
+        assert!(out.contains("def show_it_off"), "{out}");
+    }
+
+    /// When the best match is itself in a sample, the question is about that
+    /// sample, and its neighbours are the rest of the answer.
+    #[test]
+    fn a_question_answered_by_a_sample_keeps_the_samples_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "sample/cats.py",
+            "def adopt(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return helper(x)\n\n\ndef helper(x):\n    return x\n",
+        );
+        write(root, "lib/core.py", "def settle(x):\n    return x\n");
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("def adopt"), "{out}");
+        assert!(out.contains("def helper"), "{out}");
+    }
+
+    /// What a test calls is setup, not a step in the flow, so a test caller
+    /// must not count as one of the callers whose other calls join the map.
+    #[test]
+    fn sibling_expansion_does_not_follow_test_callers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        write(
+            root,
+            "pkg/testkit.py",
+            "def make_fixture_data():\n    return 1\n",
+        );
+        write(
+            root,
+            "tests/test_core.py",
+            "from pkg.core import settle\nfrom pkg.testkit import make_fixture_data\n\n\ndef test_settle():\n    data = make_fixture_data()\n    assert settle(data) == 1\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("def settle"), "{out}");
+        assert!(!out.contains("make_fixture_data"), "{out}");
+    }
+
+    /// An unresolved `x.drain_queue()` names no target, so it can't be shown
+    /// as a fact about any one of the methods sharing that name.
+    #[test]
+    fn an_unresolved_call_is_not_a_caller_of_every_method_with_that_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..7 {
+            write(
+                root,
+                &format!("pkg/worker_{i}.py"),
+                &format!(
+                    "class Worker{i}:\n    def drain_queue(self, x):\n        \"\"\"Reticulates splines {i}.\"\"\"\n        return x\n\n\ndef local_caller_{i}(worker):\n    return worker.drain_queue(1)\n"
+                ),
+            );
+        }
+        write(
+            root,
+            "pkg/other.py",
+            "def totally_unrelated(thing):\n    return thing.drain_queue(1)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("called by: local_caller_0"), "{out}");
+        assert!(!out.contains("totally_unrelated"), "{out}");
+    }
+
+    /// Rows arrive in id order, so a file indexed late sits behind every
+    /// test that calls the same function. Cutting before filtering emptied
+    /// the slots and hid the one caller the question could use.
+    #[test]
+    fn test_callers_do_not_use_up_the_slots_of_a_production_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pkg/core.py",
+            "def settle(x):\n    \"\"\"Reticulates the splines.\"\"\"\n    return x\n",
+        );
+        let tests: String = (0..12)
+            .map(|i| format!("def test_settle_{i}():\n    assert settle({i})\n\n\n"))
+            .collect();
+        write(
+            root,
+            "tests/test_core.py",
+            &format!("from pkg.core import settle\n\n\n{tests}"),
+        );
+        write(
+            root,
+            "zz/job.py",
+            "from pkg.core import settle\n\n\ndef run_job():\n    return settle(1)\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", None);
+
+        assert!(out.contains("called by: run_job"), "{out}");
+        assert!(out.contains("def run_job"), "{out}");
+    }
+
     /// `alpha_process` calls `unique_marker_beta`. The query text
     /// ("alpha_process") appears in alpha's own chunk (both its `def` line
     /// and the call site) but nowhere in beta's chunk, whose only content
@@ -717,6 +1160,40 @@ mod tests {
         assert!(
             out.contains("1 more not shown."),
             "dropped rows must be counted: {out:?}"
+        );
+    }
+
+    /// Rows render grouped by file, but a budget has to go on the best rows,
+    /// or the callees of the top hit crowd out the second-best hit next door.
+    #[test]
+    fn a_tight_budget_goes_to_the_best_rows_not_the_first_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let callees: String = (0..8)
+            .map(|i| format!("    step_number_{i}(x)\n"))
+            .collect();
+        let bodies: String = (0..8)
+            .map(|i| format!("\n\ndef step_number_{i}(x):\n    return x\n"))
+            .collect();
+        write(
+            root,
+            "pkg/first.py",
+            &format!("def top_match(x):\n    \"\"\"Reticulates splines, reticulates splines.\"\"\"\n{callees}{bodies}"),
+        );
+        write(
+            root,
+            "pkg/second.py",
+            "def second_match(x):\n    \"\"\"Reticulates splines.\"\"\"\n    return x\n",
+        );
+        let state = keyword_only_state(root);
+
+        let out = explore_text(&state, "reticulates splines", Some(100));
+
+        assert!(out.contains("def top_match"), "{out}");
+        assert!(out.contains("def second_match"), "{out}");
+        assert!(
+            out.contains("more not shown"),
+            "the budget must bite: {out}"
         );
     }
 

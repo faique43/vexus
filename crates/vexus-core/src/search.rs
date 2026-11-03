@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
@@ -23,21 +25,131 @@ pub struct SearchHit {
     pub content: String,
 }
 
-/// Turn arbitrary user text into a safe FTS5 query: each alphanumeric term
-/// double-quoted, OR-joined. Empty input → None.
-fn sanitize_fts(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
-        .collect();
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" OR "))
-    }
+/// Words a code search learns nothing from in any query: English function
+/// words and the verbs questions are phrased with. Nearly every chunk has
+/// them, so searching them ranks chunks by how much prose they hold and makes
+/// any question look matched. Sorted, for `binary_search`.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "above", "after", "again", "all", "also", "am", "an", "and", "any", "are", "as",
+    "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+    "can", "could", "did", "do", "does", "doing", "done", "down", "during", "each", "even",
+    "every", "few", "for", "from", "further", "had", "happen", "happens", "has", "have", "having",
+    "he", "her", "here", "hers", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its",
+    "itself", "just", "may", "me", "might", "more", "most", "must", "my", "no", "nor", "not",
+    "now", "of", "off", "on", "once", "one", "only", "or", "other", "our", "out", "over", "own",
+    "s", "same", "she", "should", "so", "some", "still", "such", "t", "than", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "those", "through", "to", "too",
+    "under", "until", "up", "us", "very", "was", "we", "were", "what", "when", "where", "which",
+    "while", "who", "whom", "whose", "why", "will", "with", "work", "works", "would", "you",
+    "your",
+];
+
+/// Whether `word`, already lowercase, is a stopword.
+pub(crate) fn is_stopword(word: &str) -> bool {
+    STOPWORDS.binary_search(&word).is_ok()
 }
 
+fn query_terms(query: &str) -> impl Iterator<Item = &str> {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+}
+
+/// The words of `query` that say what it's about, as typed.
+pub fn content_terms(query: &str) -> Vec<&str> {
+    query_terms(query)
+        .filter(|t| !is_stopword(&t.to_lowercase()))
+        .collect()
+}
+
+/// Turn arbitrary user text into a safe FTS5 query: each alphanumeric term
+/// double-quoted, OR-joined, without stopwords. A query of nothing but
+/// stopwords keeps them, since `once` and `from` can also be names. Empty
+/// input → None.
+fn sanitize_fts(query: &str) -> Option<String> {
+    let mut terms = content_terms(query);
+    if terms.is_empty() {
+        terms = query_terms(query).collect();
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    let quoted: Vec<String> = terms.iter().map(|t| format!("\"{t}\"")).collect();
+    Some(quoted.join(" OR "))
+}
+
+/// Whether two words share a root, as the index's stemming would treat them:
+/// `user` and `users`, or `register` and `registration`, not `process` and
+/// `product`.
+fn same_root(a: &str, b: &str) -> bool {
+    let shorter = a.chars().count().min(b.chars().count());
+    if shorter < MIN_ROOT_CHARS {
+        return a == b;
+    }
+    let shared = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    shared >= MIN_SHARED_ROOT.min(shorter)
+}
+
+/// Whether `text` holds at least half of `terms`. A keyword hit needs that to
+/// count as evidence of a match, because any question has some generic word
+/// the corpus also has: `configure` is no sign a web framework knows about
+/// "configure kubernetes pod autoscaling". Words are compared the way the index
+/// reads them, inside identifiers and past their endings.
+fn covers_terms(text: &str, terms: &[&str]) -> bool {
+    let is_word_break = |c: char| !c.is_alphanumeric();
+    let split = identifier_parts(text);
+    let words: HashSet<String> = text
+        .split(is_word_break)
+        .chain(split.split(is_word_break))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    // FTS breaks `alpha_process` at the underscore, so a term matches the same way.
+    let matched = terms
+        .iter()
+        .filter(|term| {
+            let mut parts = term.split(is_word_break).filter(|p| !p.is_empty());
+            parts.all(|part| {
+                let part = part.to_lowercase();
+                words.iter().any(|word| same_root(word, &part))
+            })
+        })
+        .count();
+    matched > 0 && matched * 2 >= terms.len()
+}
+
+/// The words inside camelCase and PascalCase names, for the FTS index. Its
+/// tokenizer already splits snake_case. A name repeats its words each time it
+/// occurs, so bm25 sees how often they really appear.
+pub(crate) fn identifier_parts(text: &str) -> String {
+    let mut parts = String::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<(usize, char)> = word.char_indices().collect();
+        let mut starts = vec![0];
+        for window in chars.windows(2) {
+            let ((_, prev), (at, c)) = (window[0], window[1]);
+            let next = word[at + c.len_utf8()..].chars().next();
+            let acronym_ends = prev.is_uppercase() && next.is_some_and(char::is_lowercase);
+            if c.is_uppercase() && (prev.is_lowercase() || prev.is_numeric() || acronym_ends) {
+                starts.push(at);
+            }
+        }
+        if starts.len() < 2 {
+            continue;
+        }
+        starts.push(word.len());
+        for piece in starts.windows(2) {
+            parts.push_str(&word[piece[0]..piece[1]]);
+            parts.push(' ');
+        }
+    }
+    parts
+}
+
+/// Leading characters two words must share to count as one root.
+const MIN_SHARED_ROOT: usize = 5;
+/// Below this a word is too short to be anyone's root: `a` isn't `autoscaling`.
+const MIN_ROOT_CHARS: usize = 4;
 const RRF_K: f64 = 60.0;
 const CANDIDATES: u32 = 50;
 
@@ -47,10 +159,11 @@ const CANDIDATES: u32 = 50;
 /// for this; membership can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchOutcome {
-    /// At least one keyword hit, or at least one KNN candidate under the
-    /// distance floor (or no floor to judge by) — the hits mean something.
+    /// A keyword hit holding at least half the query's terms, or at least one
+    /// KNN candidate under the distance floor (or no floor to judge by) — the
+    /// hits mean something.
     Strong,
-    /// Keyword search found nothing and every KNN candidate sat above the
+    /// No keyword hit covers the query and every KNN candidate sat above the
     /// distance floor: the hits are merely the corpus's nearest neighbors
     /// to a query nothing indexed actually matches. Callers should say so
     /// (and suggest grep) instead of presenting them as an answer.
@@ -113,8 +226,9 @@ impl Store {
     /// `search_hybrid` plus a KNN distance floor and an honesty signal.
     ///
     /// KNN candidates at distance ≤ `knn_floor` fuse with keyword hits as
-    /// usual. When keyword search finds nothing AND no KNN candidate clears
-    /// the floor, the above-floor candidates are ranked anyway — a non-empty
+    /// usual. When no keyword hit covers the query (see `covers_terms`) AND no
+    /// KNN candidate clears the floor, the above-floor candidates are ranked
+    /// anyway alongside whatever keywords did hit — a non-empty
     /// corpus should still show its nearest neighbors — but the outcome says
     /// `WeakVectorOnly` so the caller can present them as guesses, not
     /// answers. `knn_floor: None` (no embedder-specific floor, or the mock
@@ -130,17 +244,18 @@ impl Store {
         use std::collections::HashMap;
         let mut scores: HashMap<i64, f64> = HashMap::new();
 
-        let mut keyword_hit = false;
-        for (rank, hit) in self
-            .search_keyword(query_text, CANDIDATES)?
-            .iter()
-            .enumerate()
-        {
-            keyword_hit = true;
+        let keyword_hits = self.search_keyword(query_text, CANDIDATES)?;
+        let terms = content_terms(query_text);
+        let keyword_hit = keyword_hits.iter().any(|hit| {
+            let qualname = hit.qualname.as_deref().unwrap_or_default();
+            covers_terms(&format!("{} {qualname} {}", hit.path, hit.content), &terms)
+        });
+        for (rank, hit) in keyword_hits.iter().enumerate() {
             *scores.entry(hit.chunk_id).or_default() += 1.0 / (RRF_K + rank as f64);
         }
 
         let mut near_vector_hit = false;
+        let mut vector_rank: HashMap<i64, usize> = HashMap::new();
         if let Some(qv) = query_vec {
             let knn = self.knn_chunks(qv, CANDIDATES)?;
             let near: Vec<&(i64, f64)> = match knn_floor {
@@ -157,6 +272,7 @@ impl Store {
             };
             for (rank, (chunk_id, _dist)) in ranked_list.into_iter().enumerate() {
                 *scores.entry(*chunk_id).or_default() += 1.0 / (RRF_K + rank as f64);
+                vector_rank.insert(*chunk_id, rank);
             }
         }
 
@@ -165,8 +281,16 @@ impl Store {
         // therefore explore's graph-expansion seeds), not just display order.
         self.apply_ranking_priors(query_text, &mut scores, &crate::priors::Priors::from_env())?;
 
+        // The lists tie whenever they rank two chunks in opposite orders. The
+        // vector list settles it, being the stronger of the two by far on the
+        // eval, and chunk id only keeps the order deterministic.
+        let vector_order = |id: &i64| vector_rank.get(id).copied().unwrap_or(usize::MAX);
         let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        ranked.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then(vector_order(&a.0).cmp(&vector_order(&b.0)))
+                .then(a.0.cmp(&b.0))
+        });
         ranked.truncate(limit as usize);
         let outcome = if keyword_hit || near_vector_hit || ranked.is_empty() {
             SearchOutcome::Strong
@@ -178,11 +302,12 @@ impl Store {
 
     /// Multiply each candidate chunk's fused score by the structural
     /// penalties it earns (see `priors.rs` for the rationale and
-    /// magnitudes): test code — by path convention, or by a Rust
-    /// `#[cfg(test)]`/`#[test]` content sniff since inline test modules
-    /// live on production paths — module-level preamble (the chunk's owning
-    /// symbol is the file's module), and sub-floor tiny fragments. The test
-    /// penalty is suspended entirely when the query itself asks about tests.
+    /// magnitudes): test code — by path convention, or flagged at index time
+    /// since inline test modules live on production paths — module-level
+    /// preamble (the chunk's owning symbol is the file's module), sub-floor
+    /// tiny fragments, and non-core directories. The test and non-core
+    /// penalties are suspended entirely when the query itself asks about that
+    /// code.
     ///
     /// One point lookup per candidate (≤ 2×CANDIDATES rows, same
     /// prepared-statement pattern as `hydrate_hits`) — sub-millisecond
@@ -194,14 +319,17 @@ impl Store {
         priors: &crate::priors::Priors,
     ) -> Result<()> {
         let skip_test_penalty = priors.test == 1.0 || crate::priors::query_seeks_tests(query_text);
-        let all_disabled = skip_test_penalty && priors.preamble == 1.0 && priors.tiny == 1.0;
+        let skip_non_core_penalty =
+            priors.non_core == 1.0 || crate::priors::query_seeks_non_core(query_text);
+        let all_disabled = skip_test_penalty
+            && skip_non_core_penalty
+            && priors.preamble == 1.0
+            && priors.tiny == 1.0;
         if all_disabled {
             return Ok(());
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT c.token_count, f.path, s.kind,
-                    (f.lang = 'rust' AND (instr(c.content, '#[cfg(test)]') > 0
-                                          OR instr(c.content, '#[test]') > 0))
+            "SELECT c.token_count, f.path, s.kind, c.is_test
              FROM chunks c JOIN files f ON f.id = c.file_id
              LEFT JOIN symbols s ON s.id = c.symbol_id WHERE c.id = ?1",
         )?;
@@ -211,11 +339,14 @@ impl Store {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .optional()?;
-            let Some((token_count, path, kind, rust_test_sniff)) = row else {
+            let Some((token_count, path, kind, is_test)) = row else {
                 continue; // chunk deleted between rank and lookup
             };
-            if !skip_test_penalty && (crate::priors::is_test_path(&path) || rust_test_sniff) {
+            if !skip_test_penalty && (crate::priors::is_test_path(&path) || is_test) {
                 *score *= priors.test;
+            }
+            if !skip_non_core_penalty && crate::priors::is_non_core_path(&path) {
+                *score *= priors.non_core;
             }
             if kind.as_deref() == Some("module") {
                 *score *= priors.preamble;
@@ -227,19 +358,15 @@ impl Store {
         Ok(())
     }
 
-    /// Whether a symbol is test code: by path convention, or by the Rust
-    /// content sniff `apply_ranking_priors` uses, since inline tests live on
-    /// production paths.
+    /// Whether a symbol is test code: by path convention, or by the index-time
+    /// flag `apply_ranking_priors` uses, since inline tests live on production
+    /// paths.
     pub fn is_test_symbol(&self, symbol_id: i64, path: &str) -> Result<bool> {
         if crate::priors::is_test_path(path) {
             return Ok(true);
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT EXISTS(
-                 SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id
-                 WHERE c.symbol_id = ?1 AND f.lang = 'rust'
-                   AND (instr(c.content, '#[cfg(test)]') > 0
-                        OR instr(c.content, '#[test]') > 0))",
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE symbol_id = ?1 AND is_test = 1)",
         )?;
         Ok(stmt.query_row([symbol_id], |r| r.get(0))?)
     }
@@ -279,6 +406,8 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::covers_terms;
+    use super::SearchOutcome;
     use crate::model::*;
     use crate::Store;
 
@@ -300,6 +429,7 @@ mod tests {
             }],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(0),
                 start_line: 1,
                 end_line: 4,
@@ -343,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_cfg_test_sniff_demotes_inline_tests_on_a_production_path() {
+    fn flagged_test_chunk_ranks_below_an_identical_production_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         store
@@ -354,21 +484,23 @@ mod tests {
                 &one_fn_file("src.billing.charge", "frobnicate"),
             )
             .unwrap();
-        let mut sniffed = one_fn_file("src.orders.charge_twice", "frobnicate");
-        sniffed.chunks[0].content = format!("#[cfg(test)]\n{}", sniffed.chunks[0].content);
+        let mut flagged = one_fn_file("src.orders.tests.charge_twice", "frobnicate");
+        flagged.chunks[0].is_test = true;
         store
-            .replace_file("src/orders.rs", "rust", &[2u8; 32], &sniffed)
+            .replace_file("src/orders.rs", "rust", &[2u8; 32], &flagged)
             .unwrap();
 
         let (hits, _) = store
             .search_hybrid_scored("frobnicate", None, None, 10)
             .unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(
-            hits[0].path, "src/billing.rs",
-            "the #[cfg(test)]-sniffed chunk must rank below the clean one \
-             despite both living on production paths"
-        );
+        assert_eq!(hits[0].path, "src/billing.rs");
+        assert!(store
+            .is_test_symbol(hits[1].symbol_id.unwrap(), &hits[1].path)
+            .unwrap());
+        assert!(!store
+            .is_test_symbol(hits[0].symbol_id.unwrap(), &hits[0].path)
+            .unwrap());
     }
 
     #[test]
@@ -399,6 +531,39 @@ mod tests {
         assert_eq!(
             hits[0].path, "tests/test_billing.py",
             "a query asking about tests must not have test chunks penalized"
+        );
+    }
+
+    #[test]
+    fn a_sample_copy_ranks_below_the_project_code_it_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        // The copy mentions the keyword more, so relevance alone puts it first.
+        let mut copy = one_fn_file("sample.pipes.parse_int", "frobnicate");
+        copy.chunks[0].content.push_str("frobnicate frobnicate\n");
+        store
+            .replace_file("sample/01/pipes.py", "python", &[1u8; 32], &copy)
+            .unwrap();
+        store
+            .replace_file(
+                "packages/common/pipes.py",
+                "python",
+                &[2u8; 32],
+                &one_fn_file("packages.common.pipes.parse_int", "frobnicate"),
+            )
+            .unwrap();
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(hits[0].path, "packages/common/pipes.py");
+
+        let (hits, _) = store
+            .search_hybrid_scored("sample of frobnicate", None, None, 10)
+            .unwrap();
+        assert_eq!(
+            hits[0].path, "sample/01/pipes.py",
+            "a query asking for samples must not have them penalized"
         );
     }
 
@@ -435,12 +600,14 @@ mod tests {
                 // Module-preamble chunk: owned by the module symbol, and
                 // tiny — an import line. Earns both penalties.
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "from frobnicate import frobnicate\n".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(1),
                     start_line: 10,
                     end_line: 14,
@@ -482,6 +649,7 @@ mod tests {
         };
         let mut symbols = vec![module];
         let mut chunks = vec![NewChunk {
+            is_test: false,
             symbol: Some(0),
             start_line: 1,
             end_line: 5,
@@ -499,6 +667,7 @@ mod tests {
                 arity: Some(0),
             });
             chunks.push(NewChunk {
+                is_test: false,
                 symbol: Some(i as usize + 1),
                 start_line: 10 + i * 5,
                 end_line: 12 + i * 5,
@@ -543,12 +712,272 @@ mod tests {
             test: 1.0,
             preamble: 1.0,
             tiny: 1.0,
+            non_core: 1.0,
             tiny_floor: 32,
         };
         store
             .apply_ranking_priors("frobnicate", &mut scores, &off)
             .unwrap();
         assert_eq!(scores, expected, "all-1.0 coefficients must be a no-op");
+    }
+
+    /// Search-side fixture: one chunk about `words`, plus a far vector, so
+    /// only keyword evidence can make the outcome strong.
+    fn store_with_chunks(chunks: &[&str]) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        for (i, words) in chunks.iter().enumerate() {
+            let path = format!("f{i}.py");
+            let qualname = format!("f{i}.f");
+            let mut idx = one_fn_file(&qualname, words);
+            idx.chunks[0].content = format!("def f():\n    # {words}\n");
+            store
+                .replace_file(&path, "python", &[i as u8; 32], &idx)
+                .unwrap();
+        }
+        (dir, store)
+    }
+
+    fn store_with_file(path: &str, content: &str) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        let mut idx = one_fn_file("m.f", "unused");
+        idx.chunks[0].content = format!("{content}\n");
+        store.replace_file(path, "lua", &[1u8; 32], &idx).unwrap();
+        (dir, store)
+    }
+
+    /// Two lists ranking two chunks in opposite orders fuse to the same score,
+    /// and chunk id only says which file was indexed first.
+    #[test]
+    fn the_vector_list_breaks_a_tie_between_the_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store.set_model("mock", 4).unwrap();
+        let mut keyword_first = one_fn_file("a.handler", "frobnicate");
+        keyword_first.chunks[0]
+            .content
+            .push_str("frobnicate frobnicate\n");
+        store
+            .replace_file("a.py", "python", &[1u8; 32], &keyword_first)
+            .unwrap();
+        store
+            .replace_file(
+                "b.py",
+                "python",
+                &[2u8; 32],
+                &one_fn_file("b.service", "frobnicate"),
+            )
+            .unwrap();
+        for (id, content, _hash) in store.chunks_missing_embedding(10).unwrap() {
+            let v = if content.matches("frobnicate").count() == 2 {
+                vec![1.0, 0.0, 0.0, 0.0]
+            } else {
+                vec![0.5, 0.5, 0.5, 0.5]
+            };
+            store.put_embeddings(&[(id, v)]).unwrap();
+        }
+
+        let (hits, _) = store
+            .search_hybrid_scored("frobnicate", Some(&[1.0, 0.0, 0.0, 0.0]), None, 10)
+            .unwrap();
+
+        assert_eq!(hits[0].score, hits[1].score, "the fixture must tie");
+        assert_eq!(hits[0].path, "b.py", "{hits:?}");
+    }
+
+    #[test]
+    fn stopwords_stay_sorted_for_binary_search() {
+        assert!(super::STOPWORDS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn stopwords_do_not_decide_the_ranking() {
+        let (_d, store) = store_with_chunks(&[
+            "how does this work and what does it do with all of the things",
+            "frobnicate the widget",
+        ]);
+
+        let hits = store
+            .search_keyword("how does frobnicate work", 10)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].path, "f1.py");
+    }
+
+    #[test]
+    fn code_vocabulary_is_not_a_stopword() {
+        let (_d, store) = store_with_chunks(&["class method function value", "other words"]);
+
+        let hits = store.search_keyword("the class", 10).unwrap();
+
+        assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    /// `once` and `from` are also method names, and a query of nothing else
+    /// has told us what it wants.
+    #[test]
+    fn a_query_of_only_stopwords_still_searches_what_was_typed() {
+        let (_d, store) = store_with_chunks(&["emitter once listener"]);
+
+        let hits = store.search_keyword("once", 10).unwrap();
+
+        assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    /// No KNN candidate is near, as with an unrelated question on a real
+    /// embedder, so the outcome rests on keyword evidence alone.
+    fn outcome(store: &Store, query: &str) -> SearchOutcome {
+        store.search_hybrid_scored(query, None, None, 10).unwrap().1
+    }
+
+    #[test]
+    fn stopword_hits_are_not_evidence_of_a_match() {
+        let (_d, store) = store_with_chunks(&["how does this work and what does it do"]);
+
+        assert_eq!(
+            outcome(&store, "how does this work"),
+            SearchOutcome::WeakVectorOnly
+        );
+    }
+
+    /// "how do I configure kubernetes pod autoscaling" on a web framework: a
+    /// generic word matches somewhere, and the subject matches nowhere.
+    #[test]
+    fn one_generic_word_is_not_evidence_for_a_longer_question() {
+        let (_d, store) = store_with_chunks(&["configure the server", "autoscale nothing here"]);
+
+        assert_eq!(
+            outcome(&store, "how do I configure kubernetes pod autoscaling"),
+            SearchOutcome::WeakVectorOnly
+        );
+    }
+
+    #[test]
+    fn evidence_sees_inside_identifiers_and_past_word_endings() {
+        assert!(covers_terms(
+            "export function registerUser(req)",
+            &["user", "registration"]
+        ));
+    }
+
+    #[test]
+    fn a_short_word_is_not_a_root_of_a_longer_one() {
+        assert!(!covers_terms("def f(a, b)", &["autoscaling"]));
+    }
+
+    #[test]
+    fn evidence_stops_short_of_a_shared_prefix() {
+        assert!(!covers_terms("the product catalogue", &["process"]));
+    }
+
+    #[test]
+    fn a_term_in_the_location_is_evidence() {
+        let (_d, store) = store_with_file("gamescripts/loyalty.lua", "function tier_label(points)");
+
+        assert_eq!(
+            outcome(&store, "how is the loyalty tier decided"),
+            SearchOutcome::Strong
+        );
+    }
+
+    #[test]
+    fn a_chunk_holding_half_the_terms_is_evidence() {
+        let (_d, store) = store_with_chunks(&["configure the kubernetes client"]);
+
+        assert_eq!(
+            outcome(&store, "configure kubernetes pod autoscaling"),
+            SearchOutcome::Strong
+        );
+    }
+
+    #[test]
+    fn a_term_split_across_separators_still_counts_as_matched() {
+        let (_d, store) = store_with_chunks(&["alpha_process runs"]);
+
+        assert_eq!(outcome(&store, "alpha process"), SearchOutcome::Strong);
+        assert_eq!(outcome(&store, "alpha_process"), SearchOutcome::Strong);
+    }
+
+    #[test]
+    fn keyword_search_matches_other_forms_of_a_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.py",
+                "python",
+                &[1u8; 32],
+                &one_fn_file("a.work", "validates retries"),
+            )
+            .unwrap();
+
+        for query in ["validating", "validation", "retry"] {
+            let hits = store.search_keyword(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn keyword_search_finds_the_words_inside_camel_case_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[1u8; 32],
+                &one_fn_file("a.work", "res.sendFile HTTPServer parseJSON"),
+            )
+            .unwrap();
+
+        for query in ["send", "sendFile", "http", "server", "json", "parsing"] {
+            let hits = store.search_keyword(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn removing_a_file_removes_its_split_words_from_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[1u8; 32],
+                &one_fn_file("a.work", "sendFile"),
+            )
+            .unwrap();
+        store
+            .replace_file(
+                "a.js",
+                "javascript",
+                &[2u8; 32],
+                &one_fn_file("a.work", "readStream"),
+            )
+            .unwrap();
+
+        assert!(store.search_keyword("send", 10).unwrap().is_empty());
+        assert_eq!(store.search_keyword("stream", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn identifier_parts_split_on_case_changes() {
+        for (text, parts) in [
+            ("sendFile", "send File "),
+            ("HTTPServer", "HTTP Server "),
+            ("parseJSON", "parse JSON "),
+            ("XMLHttpRequest", "XML Http Request "),
+            ("utf8Decode", "utf8 Decode "),
+            ("res.sendFile(aB)", "send File a B "),
+            ("sendFile sendFile", "send File send File "),
+            ("plain snake_case UPPER Title v2", ""),
+            ("überGroßÄnderung", "über Groß Änderung "),
+        ] {
+            assert_eq!(super::identifier_parts(text), parts, "{text}");
+        }
     }
 
     #[test]
@@ -569,6 +998,7 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 3,
@@ -576,6 +1006,7 @@ mod tests {
                         .into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: None,
                     start_line: 5,
                     end_line: 6,
@@ -620,18 +1051,21 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "keyword banana split".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 3,
                     end_line: 3,
                     content: "vector only content".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 5,
                     end_line: 5,
@@ -706,12 +1140,14 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "alpha near".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 3,
                     end_line: 3,
@@ -792,12 +1228,14 @@ mod tests {
             edges: vec![],
             chunks: vec![
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 1,
                     end_line: 1,
                     content: "banana one".into(),
                 },
                 NewChunk {
+                    is_test: false,
                     symbol: Some(0),
                     start_line: 2,
                     end_line: 2,

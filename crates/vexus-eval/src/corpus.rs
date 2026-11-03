@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{ensure, Context, Result};
+use vexus_core::model::CorpusTier;
 use vexus_core::query::Resolution;
 use vexus_core::Store;
 use vexus_embed::Embedder;
@@ -28,7 +29,7 @@ use vexus_mcp::state::AppState;
 use vexus_mcp::tools::explore::explore_text;
 
 use crate::metrics::{self, Accum, EdgeCounts, LabeledEdge};
-use crate::queries;
+use crate::{padding, queries};
 
 /// Raw `SearchHit`s are fetched well past the largest cutoff (`@10`) so that
 /// filtering out `qualname: None` preamble/module-level chunks (the binding
@@ -73,6 +74,7 @@ pub struct CorpusAccum {
     pub ndcg_at_10: Accum,
     pub clean_at_5: Accum,
     pub answer_in_bundle: Accum,
+    pub map_ndcg_at_10: Accum,
     pub bundle_clean: Accum,
     pub edges: EdgeCounts,
 }
@@ -86,8 +88,22 @@ impl CorpusAccum {
             ndcg_at_10: self.ndcg_at_10.combine(other.ndcg_at_10),
             clean_at_5: self.clean_at_5.combine(other.clean_at_5),
             answer_in_bundle: self.answer_in_bundle.combine(other.answer_in_bundle),
+            map_ndcg_at_10: self.map_ndcg_at_10.combine(other.map_ndcg_at_10),
             bundle_clean: self.bundle_clean.combine(other.bundle_clean),
             edges: self.edges.combine(other.edges),
+        }
+    }
+
+    /// The figures that mean something for pending rows, which never feed
+    /// edges, `clean@5` or the other metrics of a [`metrics::MetricSet`].
+    pub fn pending(&self) -> metrics::PendingSet {
+        metrics::PendingSet {
+            search_queries: self.recall_at_5.count,
+            recall_at_5: metrics::round4(self.recall_at_5.mean()),
+            recall_at_10: metrics::round4(self.recall_at_10.mean()),
+            mrr: metrics::round4(self.mrr.mean()),
+            explore_queries: self.answer_in_bundle.count,
+            answer_in_bundle: metrics::round4(self.answer_in_bundle.mean()),
         }
     }
 
@@ -100,6 +116,7 @@ impl CorpusAccum {
             ndcg_at_10: metrics::round4(self.ndcg_at_10.mean()),
             clean_at_5: metrics::round4(self.clean_at_5.mean()),
             answer_in_bundle: metrics::round4(self.answer_in_bundle.mean()),
+            map_ndcg_at_10: metrics::round4(self.map_ndcg_at_10.mean()),
             bundle_clean: metrics::round4(self.bundle_clean.mean()),
             edge_precision: metrics::round4(self.edges.precision()),
             edge_recall: metrics::round4(self.edges.recall()),
@@ -107,15 +124,23 @@ impl CorpusAccum {
     }
 }
 
+/// One corpus's scores, kept apart by whether the gate reads them. `pending`
+/// holds rows marked `pending: true` (see [`queries::Query::pending`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CorpusScores {
+    pub gated: CorpusAccum,
+    pub pending: CorpusAccum,
+}
+
 /// Indexes `eval_root/corpora/{name}` into a fresh `tempfile::tempdir()`
 /// database (never in-place under `eval/` — no `.vexus` artifact is ever
-/// created there), embeds it with `embedder`, then scores every applicable
-/// `queries.yaml`/`edges.yaml` row for that corpus.
+/// created there), embeds it with `embedder` if there is one, then scores
+/// every applicable `queries.yaml`/`edges.yaml` row for that corpus.
 pub fn eval_corpus(
     eval_root: &Path,
     name: &str,
-    embedder: &Arc<dyn Embedder>,
-) -> Result<CorpusAccum> {
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<CorpusScores> {
     let corpus_root = eval_root.join("corpora").join(name);
     ensure!(
         corpus_root.is_dir(),
@@ -130,19 +155,90 @@ pub fn eval_corpus(
     // same hazard) — so it stays bound as `_db_dir` for this whole function,
     // not dropped the moment `index_into_temp_state` returns.
     let (state, _db_dir) = index_into_temp_state(&corpus_root, embedder)?;
+    score_corpus(eval_root, name, &state, embedder)
+}
 
+/// The corpus `eval_corpus_at_medium` runs against: the fixture with the most
+/// labelled queries. One is enough to reach the tier's code paths, and each
+/// one padded costs a re-index on every gate run.
+pub const MEDIUM_CORPUS: &str = "polyglot";
+
+/// `name` padded past the Medium boundary, indexed. Returns the repository's
+/// tempdir too, since the state's `root` points into it.
+fn medium_state(
+    eval_root: &Path,
+    name: &str,
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<(AppState, tempfile::TempDir, tempfile::TempDir)> {
+    let repo = tempfile::tempdir().context("tempdir for the padded corpus")?;
+    copy_tree(&eval_root.join("corpora").join(name), repo.path())?;
+    padding::write_padding(repo.path())?;
+    let (state, db_dir) = index_into_temp_state(repo.path(), embedder)?;
+    Ok((state, repo, db_dir))
+}
+
+/// Scores `name`'s labelled queries and edges with enough filler around them
+/// to put the repository in the Medium tier, the one real repositories hit.
+/// The fixtures themselves are Tiny, so without this no tier-specific
+/// parameter is ever scored. Fails rather than quietly scoring a smaller tier.
+pub fn eval_corpus_at_medium(
+    eval_root: &Path,
+    name: &str,
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<CorpusScores> {
+    let (state, _repo, _db_dir) = medium_state(eval_root, name, embedder)?;
+    let tier = state
+        .lock_store_fresh()
+        .map_err(|msg| anyhow::anyhow!("{msg}"))?
+        .corpus_tier()?;
+    ensure!(
+        tier == CorpusTier::Medium,
+        "padded {name} landed in the {tier:?} tier, so the Medium scope isn't scoring Medium"
+    );
+    score_corpus(eval_root, name, &state, embedder)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create_dir_all {}", target.display()))?;
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)
+                .with_context(|| format!("copy to {}", target.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs `name`'s labelled queries and edges against an already indexed state.
+fn score_corpus(
+    eval_root: &Path,
+    name: &str,
+    state: &AppState,
+    embedder: Option<&Arc<dyn Embedder>>,
+) -> Result<CorpusScores> {
     let queries_path = eval_root.join("queries").join(format!("{name}.yaml"));
     let queries = queries::load_queries(&queries_path)?;
     let edges_path = eval_root.join("edges").join(format!("{name}.yaml"));
     let edges = queries::load_edges(&edges_path)?;
 
-    let mut accum = CorpusAccum::default();
+    let mut scores = CorpusScores::default();
 
-    for query in queries.iter().filter(|q| q.tool == "search") {
-        score_search_query(&state, embedder, query, &mut accum)?;
-    }
-    for query in queries.iter().filter(|q| q.tool == "explore") {
-        score_explore_query(&state, query, &mut accum);
+    for query in &queries {
+        let accum = if query.pending {
+            &mut scores.pending
+        } else {
+            &mut scores.gated
+        };
+        match query.tool.as_str() {
+            "search" => score_search_query(state, embedder, query, accum)?,
+            "explore" => score_explore_query(state, query, accum),
+            _ => {}
+        }
     }
 
     let labeled: Vec<LabeledEdge> = edges
@@ -152,16 +248,22 @@ pub fn eval_corpus(
             callee: e.callee,
         })
         .collect();
-    accum.edges = metrics::edge_counts(&labeled, |caller| depth1_resolved_callees(&state, caller));
+    scores.gated.edges =
+        metrics::edge_counts(&labeled, |caller| depth1_resolved_callees(state, caller));
 
-    Ok(accum)
+    Ok(scores)
 }
 
-/// Builds a fresh, fully indexed + embedded `AppState` over `corpus_root`,
-/// backed by a brand-new temp-directory database — the exact same struct
-/// `vexus serve`'s tool handlers run against (see `vexus_mcp::state`), so
+/// Builds a fresh, fully indexed `AppState` over `corpus_root`, backed by a
+/// brand-new temp-directory database — the exact same struct `vexus serve`'s
+/// tool handlers run against (see `vexus_mcp::state`), so
 /// `explore_text`/`Store::search_hybrid`/`Store::callees_of` below are the
 /// real production code paths, not a reimplementation of them.
+///
+/// With no `embedder` nothing is embedded and every search runs keyword-only,
+/// which is what a machine without the model gets too. The mock embedder's
+/// vectors are hashes that know nothing about the text, so scoring through
+/// it only measures how much noise a full-weight RRF list adds.
 ///
 /// Returns the `tempfile::TempDir` guard alongside the `AppState`: the
 /// caller must keep it alive for as long as `AppState` is in use (see
@@ -170,7 +272,7 @@ pub fn eval_corpus(
 /// need to (re)create `-wal`/`-shm` companion files in.
 pub fn index_into_temp_state(
     corpus_root: &Path,
-    embedder: &Arc<dyn Embedder>,
+    embedder: Option<&Arc<dyn Embedder>>,
 ) -> Result<(AppState, tempfile::TempDir)> {
     let db_dir = tempfile::tempdir().context("tempdir for eval index")?;
     let mut store = Store::open(&db_dir.path().join("index.db"))
@@ -189,12 +291,14 @@ pub fn index_into_temp_state(
         corpus_root.display()
     );
 
-    store.set_model(embedder.id(), embedder.dim())?;
-    vexus_watch::pipeline::embed_pending(&mut store, embedder.as_ref())
-        .with_context(|| format!("embed corpus at {}", corpus_root.display()))?;
+    if let Some(embedder) = embedder {
+        store.set_model(embedder.id(), embedder.dim())?;
+        vexus_watch::pipeline::embed_pending(&mut store, embedder.as_ref())
+            .with_context(|| format!("embed corpus at {}", corpus_root.display()))?;
+    }
 
     let embedder_slot: OnceLock<Option<Arc<dyn Embedder>>> = OnceLock::new();
-    let _ = embedder_slot.set(Some(embedder.clone()));
+    let _ = embedder_slot.set(embedder.cloned());
     let state = AppState {
         store: Mutex::new(Some(store)),
         embedder: embedder_slot,
@@ -206,33 +310,35 @@ pub fn index_into_temp_state(
 }
 
 /// Scores one `tool: search` query: embeds `query.q` directly with
-/// `embedder` (skipping `vexus_mcp::tools::embed_query`'s model-mismatch
-/// guard — that guard exists for a long-lived server process where the
-/// active embedder might not match what's indexed; here we just called
-/// `store.set_model` with this exact embedder a moment ago, so there's
+/// `embedder`, if any (skipping `vexus_mcp::tools::embed_query`'s
+/// model-mismatch guard — that guard exists for a long-lived server process
+/// where the active embedder might not match what's indexed; here we just
+/// called `store.set_model` with this exact embedder a moment ago, so there's
 /// nothing for it to catch), then calls the same `Store::search_hybrid`
 /// `tools::search::search_text` calls internally, and folds the ranked
 /// qualname list into `accum` via `recall_at_k`/`reciprocal_rank`/
 /// `ndcg_at_10`.
 fn score_search_query(
     state: &AppState,
-    embedder: &Arc<dyn Embedder>,
+    embedder: Option<&Arc<dyn Embedder>>,
     query: &queries::Query,
     accum: &mut CorpusAccum,
 ) -> Result<()> {
-    let query_vec = embedder
-        .embed(&[query.q.as_str()])
-        .with_context(|| format!("embed query {:?}", query.q))?
-        .pop();
+    let query_vec = match embedder {
+        Some(embedder) => embedder
+            .embed(&[query.q.as_str()])
+            .with_context(|| format!("embed query {:?}", query.q))?
+            .pop(),
+        None => None,
+    };
 
     let hits = {
         let store = state
             .lock_store_fresh()
             .map_err(|msg| anyhow::anyhow!("{msg}"))?;
         // The embedder's own floor so the real-model eval exercises exactly
-        // what serving does; the mock embedder declares no floor, keeping
-        // the CI baseline untouched.
-        let floor = vexus_embed::effective_distance_floor(embedder.as_ref());
+        // what serving does.
+        let floor = embedder.and_then(|e| vexus_embed::effective_distance_floor(e.as_ref()));
         store
             .search_hybrid_scored(&query.q, query_vec.as_deref(), floor, SEARCH_FETCH_LIMIT)?
             .0
@@ -270,13 +376,21 @@ fn score_search_query(
 /// Scores one `tool: explore` query at the DEFAULT budget (`None` —
 /// `explore_text`'s own default), pushing `1.0`/`0.0` into
 /// `accum.answer_in_bundle`. `explore` returns a map, so a symbol counts as
-/// found when its location is on it.
+/// found when its location is on it. `accum.map_ndcg_at_10` gets the same map
+/// graded by where on it that location is.
 fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut CorpusAccum) {
-    let locations = map_locations(&explore_text(state, &query.q, None));
+    let rows = map_rows(&explore_text(state, &query.q, None));
+    let locations: String = rows.iter().map(|row| format!("{row}\n")).collect();
     let passed = metrics::answer_in_bundle(&locations, &query.expect, |qualname| {
         symbol_location(state, qualname)
     });
     accum.answer_in_bundle.push(if passed { 1.0 } else { 0.0 });
+    accum.map_ndcg_at_10.push(metrics::map_ndcg_at_10(
+        &rows,
+        &query.expect,
+        &query.graded,
+        |qualname| symbol_location(state, qualname).map(|l| l.trim_end().to_string()),
+    ));
     if !query.expect_not.is_empty() {
         accum.bundle_clean.push(metrics::bundle_clean(
             &locations,
@@ -286,20 +400,23 @@ fn score_explore_query(state: &AppState, query: &queries::Query, accum: &mut Cor
     }
 }
 
-/// One `path:start-end` line per row of a rendered `explore` map.
-fn map_locations(map: &str) -> String {
-    let mut locations = String::new();
+/// `path:start-end` for each row of a rendered `explore` map, top to bottom.
+fn map_rows(map: &str) -> Vec<String> {
+    let mut rows = Vec::new();
     let mut path = "";
     for line in map.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             path = header;
         } else if let Some((range, _)) = line.split_once(' ') {
-            if range.split('-').all(|n| n.parse::<u32>().is_ok()) {
-                locations.push_str(&format!("{path}:{range}\n"));
+            let is_range = range
+                .split_once('-')
+                .is_some_and(|(a, b)| a.parse::<u32>().is_ok() && b.parse::<u32>().is_ok());
+            if is_range {
+                rows.push(format!("{path}:{range}"));
             }
         }
     }
-    locations
+    rows
 }
 
 /// A symbol's `path:start-end` line, or `None` if it doesn't resolve to
@@ -374,10 +491,6 @@ mod tests {
             .expect("eval/ must exist at the repo root")
     }
 
-    fn mock_embedder() -> Arc<dyn Embedder> {
-        Arc::new(vexus_embed::MockEmbedder)
-    }
-
     #[test]
     fn discover_corpora_finds_pyapp_and_polyglot() {
         let names = discover_corpora(&eval_root()).unwrap();
@@ -390,8 +503,8 @@ mod tests {
     }
 
     #[test]
-    fn eval_corpus_pyapp_produces_sane_nonzero_metrics_under_mock() {
-        let accum = eval_corpus(&eval_root(), "pyapp", &mock_embedder()).unwrap();
+    fn eval_corpus_pyapp_produces_sane_nonzero_metrics_keyword_only() {
+        let accum = eval_corpus(&eval_root(), "pyapp", None).unwrap().gated;
         let m = accum.metrics();
 
         for (name, value) in [
@@ -410,8 +523,7 @@ mod tests {
         }
         // A hand-authored corpus this small, with an exact-substring search
         // query set, should not score a flat zero on the primary retrieval
-        // metrics under the mock embedder (keyword/FTS half of the hybrid
-        // fusion alone should find plenty) — a hard zero here would mean
+        // metrics from keyword search alone — a hard zero here would mean
         // something upstream (indexing, query loading, or the scoring glue
         // itself) is broken, not that retrieval quality is merely mediocre.
         assert!(m.recall_at_10 > 0.0, "{m:?}");
@@ -420,15 +532,105 @@ mod tests {
         assert_eq!(accum.edges.labeled, 57, "eval/edges/pyapp.yaml row count");
     }
 
+    /// Worthless if the padding fell short of the tier or shadowed a label:
+    /// the scope would quietly go back to scoring the tier it's there to
+    /// escape, or score misses that are really unresolved names.
+    #[test]
+    fn the_medium_scope_reaches_the_tier_with_every_label_intact() {
+        let root = eval_root();
+        let (state, _repo, _db_dir) = medium_state(&root, MEDIUM_CORPUS, None).unwrap();
+        assert_eq!(
+            state.lock_store_fresh().unwrap().corpus_tier().unwrap(),
+            CorpusTier::Medium
+        );
+
+        let queries =
+            queries::load_queries(&root.join("queries").join(format!("{MEDIUM_CORPUS}.yaml")))
+                .unwrap();
+        let answerable = queries
+            .iter()
+            .filter(|q| q.tool != "callers" && q.tool != "callees");
+        for qualname in answerable.flat_map(|q| &q.expect) {
+            assert!(
+                symbol_location(&state, qualname).is_some(),
+                "{qualname} no longer resolves once padded"
+            );
+        }
+
+        let padded = score_corpus(&root, MEDIUM_CORPUS, &state, None)
+            .unwrap()
+            .gated;
+        let plain = eval_corpus(&root, MEDIUM_CORPUS, None).unwrap().gated;
+        assert_eq!(padded.recall_at_5.count, plain.recall_at_5.count);
+        assert_eq!(padded.answer_in_bundle.count, plain.answer_in_bundle.count);
+        assert_eq!(padded.edges.labeled, plain.edges.labeled);
+    }
+
+    /// A throwaway eval root with one corpus, so a test can pick the rows.
+    fn mini_eval_root(queries_yaml: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for sub in ["corpora/mini", "queries", "edges"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(
+            root.join("corpora/mini/lookup.py"),
+            "def find_widget():\n    \"\"\"Find a widget by name.\"\"\"\n    return 1\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("queries/mini.yaml"), queries_yaml).unwrap();
+        std::fs::write(root.join("edges/mini.yaml"), "[]\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn pending_rows_are_scored_apart_from_the_gated_metrics() {
+        let gated = "- q: widget\n  expect: [lookup.find_widget]\n";
+        let pending = "- q: nothing here matches\n  pending: true\n  expect: [lookup.find_widget]\n\
+                       - q: widget\n  tool: explore\n  pending: true\n  expect: [lookup.find_widget]\n";
+
+        let alone = eval_corpus(mini_eval_root(gated).path(), "mini", None).unwrap();
+        let root = mini_eval_root(&format!("{gated}{pending}"));
+        let both = eval_corpus(root.path(), "mini", None).unwrap();
+
+        assert_eq!(both.gated.metrics(), alone.gated.metrics());
+        assert_eq!(both.gated.recall_at_5.count, 1);
+        assert_eq!(both.pending.recall_at_5.count, 1);
+        assert_eq!(both.pending.recall_at_5.mean(), 0.0);
+        assert_eq!(both.pending.answer_in_bundle.count, 1);
+        assert_eq!(both.pending.answer_in_bundle.mean(), 1.0);
+    }
+
+    #[test]
+    fn map_rows_follow_the_rendered_order_and_skip_everything_else() {
+        let map = "explore: \"q\"\n\nBest match first.\n\n\
+                   ## b.py\n10-20 def b():\n  calls: x  called by: y\n30-35 def c():\n\
+                   ## a.py\n1-2 def a():\n3 more not shown.\n";
+        assert_eq!(map_rows(map), ["b.py:10-20", "b.py:30-35", "a.py:1-2"]);
+    }
+
+    /// The gate's whole point: with no embedder, nothing can reach the
+    /// ranking except what the index itself knows. A vector anywhere here
+    /// would put content-blind noise back into the fusion.
+    #[test]
+    fn a_blind_index_has_no_embedder_and_no_vectors() {
+        let (state, _db_dir) =
+            index_into_temp_state(&eval_root().join("corpora/pyapp"), None).unwrap();
+        assert!(state.embedder().is_none());
+        let store = state.lock_store_fresh().unwrap();
+        assert!(store.counts().unwrap().chunks > 0);
+        assert_eq!(store.embedded_count().unwrap(), 0);
+    }
+
     #[test]
     fn eval_corpus_unknown_name_errors() {
-        let err = eval_corpus(&eval_root(), "does-not-exist", &mock_embedder()).unwrap_err();
+        let err = eval_corpus(&eval_root(), "does-not-exist", None).unwrap_err();
         assert!(format!("{err:#}").contains("no such corpus"));
     }
 
     #[test]
     fn eval_corpus_never_leaves_a_vexus_dir_under_eval() {
-        let _ = eval_corpus(&eval_root(), "pyapp", &mock_embedder()).unwrap();
+        let _ = eval_corpus(&eval_root(), "pyapp", None).unwrap();
         let vexus_dir = eval_root().join("corpora/pyapp/.vexus");
         assert!(
             !vexus_dir.exists(),

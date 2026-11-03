@@ -95,9 +95,14 @@ esac
 
 version="${VEXUS_VERSION:-}"
 if [ -z "$version" ]; then
-  version="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" |
-    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
-  [ -n "$version" ] || die "could not determine the latest release (rate limited? set VEXUS_VERSION)"
+  # The redirect, not the API: anonymous API calls run out at 60 an hour per IP.
+  latest="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")" ||
+    die "could not determine the latest release (set VEXUS_VERSION)"
+  version="${latest##*/}"
+  case "$version" in
+    v[0-9]*) ;;
+    *) die "could not determine the latest release (set VEXUS_VERSION)" ;;
+  esac
 fi
 version="${version#v}"
 
@@ -139,6 +144,4 @@ esac
 echo
 echo "next, inside the repo you want indexed:"
 echo "  vexus index .                    # build the index (first run downloads a ~160 MB model; large repos take minutes)"
-echo "  vexus init --agent claude-code   # install the steering pack + register the MCP server in .mcp.json"
-echo
-echo "no need to run 'vexus serve' yourself — your agent launches it via .mcp.json"
+echo "  vexus init --agent claude-code   # add the prompt hook to .claude/settings.json"

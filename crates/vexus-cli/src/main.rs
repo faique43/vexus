@@ -1,3 +1,5 @@
+mod hooks;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -11,7 +13,7 @@ use vexus_watch::pipeline;
 /// worth comparing between their old and new build.
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    "\nindex schema: 4",
+    "\nindex schema: 5",
     "\nembedding model: jina-code-v2-q",
 );
 
@@ -19,7 +21,7 @@ const LONG_VERSION: &str = concat!(
 // written out rather than interpolated — which would let it drift silently
 // the next time the schema changes. This fails the build instead.
 const _: () = assert!(
-    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'4' && vexus_core::SCHEMA_VERSION.len() == 1,
+    vexus_core::SCHEMA_VERSION.as_bytes()[0] == b'5' && vexus_core::SCHEMA_VERSION.len() == 1,
     "LONG_VERSION's hardcoded schema version no longer matches vexus_core::SCHEMA_VERSION"
 );
 
@@ -57,18 +59,19 @@ enum Cmd {
     },
     /// Run the MCP server over stdio (builds the index first if none exists)
     Serve { path: Option<PathBuf> },
-    /// Initialize steering packs for an agent (claude-code, cursor, or generic)
+    /// Set up an agent: hooks for claude-code, rules for cursor, a snippet for generic
     Init {
         #[arg(long)]
         agent: String,
         #[arg(long)]
         force: bool,
+        /// Claude Code only: also register the MCP server. Its tool
+        /// definitions cost every session, used or not.
+        #[arg(long)]
+        mcp: bool,
         path: Option<PathBuf>,
     },
-    /// Agent-hook helpers invoked by installed steering packs — not for
-    /// interactive use. `vexus hook nudge-grep` is what the Claude Code
-    /// pack's hooks.json runs; it replaced a bash script so the pack works
-    /// identically on Windows/cmd/PowerShell.
+    /// What installed agent hooks run — not for interactive use.
     #[command(hide = true)]
     Hook { name: String },
 }
@@ -93,19 +96,6 @@ fn write_pack_file(path: &Path, content: &str, force: bool) -> Result<bool> {
     std::fs::write(path, content)?;
     println!("{}", path.display());
     Ok(true)
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o755);
-    std::fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 /// The MCP server entry `init --agent claude-code` registers — the same
@@ -196,91 +186,97 @@ fn register_mcp_server(root: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// The one-line JSON payload the nudge hook prints — additionalContext
-/// steering the agent toward the vexus tools instead of grep. Byte-for-byte
-/// what the old nudge-grep.sh emitted.
-const NUDGE_GREP_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"This repo has a vexus code index. To find or understand code, `explore` returns a ranked map of locations and call links, and `open` reads exact ranges. Keep grep for exact strings."}}"#;
+/// A vector for `text` and the distance floor to use with it, both `None` when
+/// the embedder from `build` isn't the one this index was built with: its
+/// vector wouldn't fit `vec_chunks`, which sqlite-vec rejects as a hard error.
+///
+/// Reads the indexed model from `meta` BEFORE building an embedder, because
+/// the default path loads a full ONNX session, which is wasted work when
+/// `meta.model_id` already says it can't match. `VEXUS_EMBEDDER=mock`/`none`
+/// stay cheap either way.
+fn embed_for_query(
+    store: &vexus_core::Store,
+    text: &str,
+    build: impl FnOnce() -> Option<Box<dyn vexus_embed::Embedder>>,
+) -> (Option<Vec<f32>>, Option<f64>) {
+    let indexed_id = store.meta("model_id").ok().flatten();
+    let indexed_dim = store.meta("model_dim").ok().flatten();
+    let worth_building = match std::env::var("VEXUS_EMBEDDER").ok().as_deref() {
+        Some("mock") | Some("none") => true,
+        _ => indexed_id.is_none() || indexed_id.as_deref() == Some(vexus_embed::JINA_CODE_V2.id),
+    };
+    if !worth_building {
+        return (None, None);
+    }
+    let Some(embedder) = build() else {
+        return (None, None);
+    };
+    let same_model = indexed_id.as_deref() == Some(embedder.id())
+        && indexed_dim.as_deref() == Some(embedder.dim().to_string().as_str());
+    if !same_model {
+        return (None, None);
+    }
+    let vector = embedder.embed(&[text]).ok().and_then(|mut v| v.pop());
+    (
+        vector,
+        vexus_embed::effective_distance_floor(embedder.as_ref()),
+    )
+}
 
-/// `vexus hook nudge-grep`: nudge once per agent session toward the vexus
-/// tools; never block, never fail. Session identity comes from the hook
-/// payload's `session_id` (Claude Code writes it to stdin), falling back to
-/// the `CLAUDE_SESSION_ID` env var, then to a constant — a lost marker only
-/// means one extra nudge line, never an error. Pure over its inputs so the
-/// once-per-session behavior is unit-testable without real hook plumbing.
-fn hook_nudge_grep(stdin_payload: &str, marker_dir: &Path) -> Option<&'static str> {
-    let session = serde_json::from_str::<serde_json::Value>(stdin_payload)
-        .ok()
-        .and_then(|v| v.get("session_id")?.as_str().map(String::from))
-        .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
-        .unwrap_or_else(|| "session".to_string());
-    let safe: String = session
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let marker = marker_dir.join(format!("vexus-nudge-{safe}"));
-    if marker.exists() {
+/// How much of a prompt gets embedded. A report's opening says what's wrong,
+/// and the model only reads 512 tokens anyway.
+const EMBEDDED_PROMPT_CHARS: usize = 1200;
+/// Enough to fill the shown hints after dropping any whose file is gone.
+const LOCATED_HINTS: usize = 8;
+
+/// `vexus hook prompt`: locations for a prompt, as Claude Code hook output.
+/// Everything that can rule a prompt out comes before the model loads, which
+/// costs 0.3 s and 380 MB.
+fn prompt_hook(payload: &str) -> Option<String> {
+    let (prompt, cwd) = hooks::parse_prompt_payload(payload)?;
+    let root = hooks::find_root(Path::new(&cwd))?;
+    hooks::refresh_index(&root);
+    let store = vexus_core::Store::open_read_only(&db_path(&root)).ok()?;
+    if !hooks::worth_locating(&prompt, store.names_code(&prompt).ok()?) {
         return None;
     }
-    let _ = std::fs::write(&marker, b"");
-    Some(NUDGE_GREP_JSON)
+    let opening: String = prompt.chars().take(EMBEDDED_PROMPT_CHARS).collect();
+    let (vector, floor) = embed_for_query(&store, &opening, vexus_embed::select::cached_embedder);
+    let located = store
+        .locate(&prompt, vector.as_deref(), floor, LOCATED_HINTS)
+        .ok()?;
+    let context = hooks::prompt_context(&root, &store, &located)?;
+    Some(hooks::context_json("UserPromptSubmit", &context))
 }
 
 fn run_hook(name: &str) -> Result<()> {
-    match name {
-        "nudge-grep" => {
-            let mut payload = String::new();
-            use std::io::Read;
-            let _ = std::io::stdin().read_to_string(&mut payload);
-            if let Some(json) = hook_nudge_grep(&payload, &std::env::temp_dir()) {
-                println!("{json}");
-            }
-            Ok(())
+    // Unknown names exit 0 silently: settings written by a newer vexus running
+    // against an older binary must not break the agent's session.
+    if name == "prompt" {
+        let mut payload = String::new();
+        use std::io::Read;
+        let _ = std::io::stdin().read_to_string(&mut payload);
+        if let Some(json) = prompt_hook(&payload) {
+            println!("{json}");
         }
-        // Unknown hook names exit 0 silently: a pack from a newer vexus
-        // running against an older binary must degrade to "no nudge", not
-        // break the agent's tool call.
-        _ => Ok(()),
     }
+    Ok(())
 }
 
-fn init_steering_packs(agent: &str, root: &Path, force: bool) -> Result<()> {
+fn init_steering_packs(agent: &str, root: &Path, force: bool, mcp: bool) -> Result<()> {
     match agent {
         "claude-code" => {
-            // `.claude/plugins/vexus` is never scanned by Claude Code — only
-            // `.claude/skills/<name>/SKILL.md` is auto-discovered per session,
-            // so SKILL.md sits at the root of the directory. A nested
-            // `skills/vexus/SKILL.md` is silently never loaded.
-            let plugin_root = root.join(".claude/skills/vexus");
-
-            let plugin_json_content =
-                include_str!("../../../packs/claude-code/.claude-plugin/plugin.json");
-            let hooks_json_content = include_str!("../../../packs/claude-code/hooks/hooks.json");
-            let nudge_sh_content = include_str!("../../../packs/claude-code/hooks/nudge-grep.sh");
-            let skill_md_content = include_str!("../../../packs/claude-code/skills/vexus/SKILL.md");
-
-            write_pack_file(
-                &plugin_root.join(".claude-plugin/plugin.json"),
-                plugin_json_content,
-                force,
-            )?;
-            write_pack_file(
-                &plugin_root.join("hooks/hooks.json"),
-                hooks_json_content,
-                force,
-            )?;
-            let nudge_script = plugin_root.join("hooks/nudge-grep.sh");
-            write_pack_file(&nudge_script, nudge_sh_content, force)?;
-            set_executable(&nudge_script)?;
-            write_pack_file(&plugin_root.join("SKILL.md"), skill_md_content, force)?;
-
-            register_mcp_server(root, force)?;
-
+            hooks::install(root, force)?;
+            if mcp {
+                register_mcp_server(root, force)?;
+            }
+            if !db_path(root).exists() {
+                hooks::index_in_background(root);
+                println!("\nIndexing in the background. Hints start when it finishes.");
+            }
             println!(
-                "\nClaude Code loads this from the LAUNCH directory's .claude/skills — start \
-                 Claude Code from {} (or a directory it's later trusted from) for it to be \
-                 picked up. The first session that finds it will show a workspace-trust \
-                 dialog (it bundles a hook); accept it to enable the nudge + skill. The MCP \
-                 server is registered in .mcp.json; Claude Code will ask once to approve it.",
+                "\nStart Claude Code from {}. The hooks point it at relevant code on each \
+                 prompt, with no tools added. Claude Code may ask you to approve them.",
                 root.display()
             );
         }
@@ -325,8 +321,8 @@ fn main() -> Result<()> {
                 Some(lock) => lock,
                 None => {
                     eprintln!(
-                        "error: a vexus serve owns this index — indexing skipped \
-                         (stop it or let its watcher handle changes)"
+                        "error: another vexus process owns this index — indexing skipped \
+                         (a running serve or index; let it finish or stop it)"
                     );
                     std::process::exit(1);
                 }
@@ -431,49 +427,8 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let store = vexus_core::Store::open(&db_path(&root))?;
-            // Only embed the query if the selected embedder is the same one
-            // the index was built with — a mismatch (different model, or a
-            // different dimension) would otherwise feed a vector into
-            // `search_hybrid`'s KNN lookup that doesn't match `vec_chunks`'
-            // declared width, which sqlite-vec rejects as a hard error.
-            // Falling back to keyword-only search here is exactly the
-            // "degrade, never die" behavior a query-embed failure gets below.
-            //
-            // Read the indexed model from `meta` BEFORE constructing an
-            // embedder: `make_embedder()`'s default path builds the full
-            // ONNX embedder (sha256 over a ~150MB file plus an ONNX Runtime
-            // session load), which is wasted work whenever `meta.model_id`
-            // already tells us it can't match. `VEXUS_EMBEDDER=mock`/`none`
-            // stay cheap either way, so only the default path needs gating.
-            let indexed_model = (
-                store.meta("model_id").ok().flatten(),
-                store.meta("model_dim").ok().flatten(),
-            );
-            let embedder_env = std::env::var("VEXUS_EMBEDDER").ok();
-            let worth_building = match embedder_env.as_deref() {
-                Some("mock") | Some("none") => true,
-                _ => {
-                    indexed_model.0.is_none()
-                        || indexed_model.0.as_deref() == Some(vexus_embed::JINA_CODE_V2.id)
-                }
-            };
-            let mut knn_floor = None;
-            let query_vec = if worth_building {
-                vexus_embed::select::make_embedder().and_then(|embedder| {
-                    let same_model = indexed_model.0.as_deref() == Some(embedder.id())
-                        && indexed_model.1.as_deref() == Some(embedder.dim().to_string().as_str());
-                    if !same_model {
-                        return None;
-                    }
-                    knn_floor = vexus_embed::effective_distance_floor(embedder.as_ref());
-                    embedder
-                        .embed(&[query.as_str()])
-                        .ok()
-                        .and_then(|mut v| v.pop())
-                })
-            } else {
-                None
-            };
+            let (query_vec, knn_floor) =
+                embed_for_query(&store, &query, vexus_embed::select::make_embedder);
             let (hits, outcome) =
                 store.search_hybrid_scored(&query, query_vec.as_deref(), knn_floor, limit)?;
             if outcome == vexus_core::search::SearchOutcome::WeakVectorOnly {
@@ -491,9 +446,14 @@ fn main() -> Result<()> {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             vexus_mcp::serve(root)?;
         }
-        Cmd::Init { agent, force, path } => {
+        Cmd::Init {
+            agent,
+            force,
+            mcp,
+            path,
+        } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            init_steering_packs(&agent, &root, force)?;
+            init_steering_packs(&agent, &root, force, mcp)?;
         }
         Cmd::Hook { name } => {
             run_hook(&name)?;
@@ -505,39 +465,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hook_nudge_grep_fires_once_per_session_and_stays_valid_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let payload = r#"{"session_id":"abc-123","tool_name":"Grep"}"#;
-
-        let first = hook_nudge_grep(payload, dir.path());
-        let json = first.expect("first call in a session must nudge");
-        let v: serde_json::Value = serde_json::from_str(json).expect("nudge must be valid JSON");
-        assert_eq!(
-            v["hookSpecificOutput"]["hookEventName"], "PreToolUse",
-            "shape Claude Code expects"
-        );
-
-        assert!(
-            hook_nudge_grep(payload, dir.path()).is_none(),
-            "second call in the same session must stay silent"
-        );
-
-        let other = r#"{"session_id":"other-999"}"#;
-        assert!(
-            hook_nudge_grep(other, dir.path()).is_some(),
-            "a different session gets its own nudge"
-        );
-    }
-
-    #[test]
-    fn hook_nudge_grep_tolerates_garbage_stdin() {
-        let dir = tempfile::tempdir().unwrap();
-        // No JSON at all: falls back to env/constant session identity and
-        // still nudges rather than erroring.
-        assert!(hook_nudge_grep("", dir.path()).is_some());
-    }
 
     fn parsed(m: &McpMerge) -> serde_json::Value {
         match m {

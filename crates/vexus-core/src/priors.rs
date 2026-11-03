@@ -1,7 +1,8 @@
 //! Structural ranking priors: multiplicative penalties applied to the fused
 //! RRF score in `search_hybrid_scored`, so that chunks which are rarely the
-//! answer — test code, module import preambles, near-empty fragments — rank
-//! below production code that matched equally well.
+//! answer — test code, samples and examples, module import preambles,
+//! near-empty fragments — rank below production code that matched equally
+//! well.
 //!
 //! Why multiplicative, and why these magnitudes: adjacent RRF ranks differ
 //! by ~1.6% (`1/(60+r)` steps), and appearing in both candidate lists vs one
@@ -32,18 +33,21 @@
 //!   `answer_in_bundle`, so the penalty earns its keep too; 0.8 is the best
 //!   value that holds `answer_in_bundle` at 1.0000.
 //!
-//! `preamble: 0.6, tiny: 0.8` was measured and deliberately NOT taken: on
-//! the real embedder it buys recall@5 0.9061 -> 0.9152 and ndcg@10 0.7191
-//! -> 0.7239 with mrr flat, but it costs the mock gate 0.0345 of
-//! `answer_in_bundle`. Trading a real regression in the blind-mode ratchet
-//! that guards every future change for a fractional gain here is a bad
-//! bargain, so the values stay where the sweep says they are safest.
+//! - `non_core`: the eval corpora have no such directories, so this was swept
+//!   on Express and NestJS. 0.15 and 0.3 score the same; at 0.5 sample files
+//!   return to NestJS maps, and at 0.7 a sample ranks first and the prompt
+//!   hook's file@3 falls 25 -> 23 of 48. 0.3 is the least aggressive value
+//!   that holds all of it.
+//!
+//! `preamble: 0.6, tiny: 0.8` was measured again on the keyword gate and the
+//! real embedder and isn't taken: recall@5 and MRR come out level, and it costs
+//! `map_ndcg@10` .7629 -> .7550 on the real embedder.
 
 /// Multiplicative penalty coefficients. Constructed via [`Priors::from_env`]
 /// in production; tests build custom values directly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Priors {
-    /// Applied when the chunk is test code (path pattern or content sniff).
+    /// Applied when the chunk is test code (path pattern or index-time flag).
     pub test: f64,
     /// Applied when the chunk belongs to a module symbol — i.e. it is
     /// module-level preamble (imports, constants between definitions), not
@@ -52,6 +56,10 @@ pub struct Priors {
     /// Applied when the chunk is below [`Priors::tiny_floor`] tokens — a
     /// 1-line import or fragment whose match can't carry much meaning.
     pub tiny: f64,
+    /// Applied when the chunk sits in a non-core directory (samples, examples,
+    /// integration apps): they repeat the project's names, so they match as
+    /// well as the code they copy.
+    pub non_core: f64,
     /// Token threshold for the tiny penalty.
     pub tiny_floor: u32,
 }
@@ -62,6 +70,7 @@ impl Default for Priors {
             test: 0.4,
             preamble: 0.5,
             tiny: 0.7,
+            non_core: 0.3,
             tiny_floor: 32,
         }
     }
@@ -69,8 +78,9 @@ impl Default for Priors {
 
 impl Priors {
     /// Defaults, each overridable for tuning sweeps:
-    /// `VEXUS_PRIOR_TEST`, `VEXUS_PRIOR_PREAMBLE`, `VEXUS_PRIOR_TINY`
-    /// (factors, `1.0` disables), `VEXUS_PRIOR_TINY_FLOOR` (tokens).
+    /// `VEXUS_PRIOR_TEST`, `VEXUS_PRIOR_PREAMBLE`, `VEXUS_PRIOR_TINY`,
+    /// `VEXUS_PRIOR_NON_CORE` (factors, `1.0` disables),
+    /// `VEXUS_PRIOR_TINY_FLOOR` (tokens).
     pub fn from_env() -> Self {
         fn env_f64(name: &str, default: f64) -> f64 {
             std::env::var(name)
@@ -83,6 +93,7 @@ impl Priors {
             test: env_f64("VEXUS_PRIOR_TEST", d.test),
             preamble: env_f64("VEXUS_PRIOR_PREAMBLE", d.preamble),
             tiny: env_f64("VEXUS_PRIOR_TINY", d.tiny),
+            non_core: env_f64("VEXUS_PRIOR_NON_CORE", d.non_core),
             tiny_floor: std::env::var("VEXUS_PRIOR_TINY_FLOOR")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -94,8 +105,8 @@ impl Priors {
 /// Whether `path` (repo-relative, `/`-separated) is test code by naming
 /// convention: a test directory component or a test-suffixed/prefixed
 /// filename. Deliberately conservative — a false positive penalizes real
-/// code, a false negative just leaves one test chunk unpenalized (the
-/// content sniff still catches Rust's in-file `#[cfg(test)]` case).
+/// code, a false negative just leaves one test chunk unpenalized (Rust's
+/// in-file tests are flagged at index time instead).
 pub fn is_test_path(path: &str) -> bool {
     for component in path.split('/') {
         let c = component.to_ascii_lowercase();
@@ -131,6 +142,53 @@ pub fn query_seeks_tests(query: &str) -> bool {
             t.to_ascii_lowercase().as_str(),
             "test" | "tests" | "spec" | "specs" | "testing"
         )
+    })
+}
+
+/// Directories of code that illustrates or exercises the project rather than
+/// being the project.
+const NON_CORE_DIRS: &[&str] = &[
+    "benchmark",
+    "benchmarks",
+    "demo",
+    "demos",
+    "doc",
+    "docs",
+    "e2e",
+    "example",
+    "examples",
+    "fixture",
+    "fixtures",
+    "integration",
+    "sample",
+    "samples",
+    "third_party",
+    "vendor",
+];
+
+/// Whether `word`, in any case, is the name of a non-core directory.
+pub fn is_non_core_word(word: &str) -> bool {
+    NON_CORE_DIRS.contains(&word.to_ascii_lowercase().as_str())
+}
+
+/// Whether `path` sits in a non-core directory. By directory component, so
+/// `src/examples.ts` is real code.
+pub fn is_non_core_path(path: &str) -> bool {
+    let mut components: Vec<&str> = path.split('/').collect();
+    components.pop();
+    components.into_iter().any(is_non_core_word)
+}
+
+/// Whether the query itself asks about non-core code, in which case the
+/// non-core penalty must not apply. "For example" is prose, not such a request.
+pub fn query_seeks_non_core(query: &str) -> bool {
+    let words: Vec<String> = query
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words.iter().enumerate().any(|(i, word)| {
+        is_non_core_word(word) && !(word == "example" && i > 0 && words[i - 1] == "for")
     })
 }
 
@@ -175,12 +233,38 @@ mod tests {
     }
 
     #[test]
+    fn non_core_goes_by_directory_not_file_name() {
+        assert!(is_non_core_path("sample/01-cats/cats.ts"));
+        assert!(is_non_core_path("packages/x/examples/demo.py"));
+        assert!(is_non_core_path("integration/app.ts"));
+        assert!(!is_non_core_path("packages/core/router.ts"));
+        assert!(!is_non_core_path("src/examples.ts"));
+    }
+
+    #[test]
     fn test_seeking_queries_bypass() {
         assert!(query_seeks_tests("unit tests for invoice creation"));
         assert!(query_seeks_tests("integration test coverage"));
         assert!(query_seeks_tests("where are the specs for checkout"));
         assert!(!query_seeks_tests("how does an invoice get created"));
         assert!(!query_seeks_tests("attestation flow")); // substring, not a token
+    }
+
+    #[test]
+    fn non_core_seeking_queries_bypass() {
+        assert!(query_seeks_non_core("show me an example of a guard"));
+        assert!(query_seeks_non_core("which samples use websockets"));
+        assert!(query_seeks_non_core("the e2e setup for kafka"));
+        assert!(!query_seeks_non_core("how does a request reach a handler"));
+        assert!(!query_seeks_non_core("sampled traffic")); // substring, not a token
+    }
+
+    /// Reports say "for example" all the time and don't mean the directory.
+    #[test]
+    fn for_example_is_prose() {
+        assert!(!query_seeks_non_core("errors, for example a timeout"));
+        assert!(!query_seeks_non_core("For example, the broker refuses"));
+        assert!(query_seeks_non_core("what is the example for routing"));
     }
 
     #[test]

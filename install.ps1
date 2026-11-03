@@ -25,11 +25,17 @@ $target = switch ($env:PROCESSOR_ARCHITECTURE) {
 
 $version = $env:VEXUS_VERSION
 if (-not $version) {
+    # The redirect, not the API: anonymous API calls run out at 60 an hour per IP.
     try {
-        $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-        $version = $release.tag_name
+        $request = [System.Net.WebRequest]::Create("https://github.com/$repo/releases/latest")
+        $response = $request.GetResponse()
+        $version = $response.ResponseUri.Segments[-1]
+        $response.Close()
     } catch {
-        Fail "could not determine the latest release (rate limited? set `$env:VEXUS_VERSION)"
+        Fail "could not determine the latest release (set `$env:VEXUS_VERSION)"
+    }
+    if ($version -notmatch '^v[0-9]') {
+        Fail "could not determine the latest release (set `$env:VEXUS_VERSION)"
     }
 }
 $version = $version.TrimStart("v")
@@ -72,9 +78,7 @@ try {
     Write-Host ""
     Write-Host "next, inside the repo you want indexed:"
     Write-Host "  vexus index .                    # build the index (first run downloads a ~160 MB model; large repos take minutes)"
-    Write-Host "  vexus init --agent claude-code   # install the steering pack + register the MCP server in .mcp.json"
-    Write-Host ""
-    Write-Host "no need to run 'vexus serve' yourself - your agent launches it via .mcp.json"
+    Write-Host "  vexus init --agent claude-code   # add the prompt hook to .claude/settings.json"
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

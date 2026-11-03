@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use rusqlite::{Connection, OpenFlags};
 
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 const SCHEMA: &str = include_str!("schema.sql");
 
 static VEC_INIT: std::sync::Once = std::sync::Once::new();
@@ -603,11 +603,12 @@ impl Store {
             };
             let content_hash = blake3::hash(c.content.as_bytes());
             tx.execute(
-                "INSERT INTO chunks (file_id, symbol_id, start_line, end_line, content, content_hash, token_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO chunks (file_id, symbol_id, start_line, end_line, content, content_hash, token_count, is_test, terms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     file_id, symbol_id, c.start_line, c.end_line,
-                    c.content, content_hash.as_bytes().as_slice(), estimate_tokens(&c.content)
+                    c.content, content_hash.as_bytes().as_slice(), estimate_tokens(&c.content), c.is_test,
+                    crate::search::identifier_parts(&c.content)
                 ],
             )?;
         }
@@ -845,6 +846,7 @@ mod tests {
                 dst_arity: Some(1),
             }],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(1),
                 start_line: 3,
                 end_line: 5,
@@ -1050,6 +1052,7 @@ mod tests {
             }],
             edges: vec![],
             chunks: vec![NewChunk {
+                is_test: false,
                 symbol: Some(99),
                 start_line: 1,
                 end_line: 5,
