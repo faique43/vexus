@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — a prompt hook instead of tools
 
 Re-run `vexus init --agent claude-code` to get the hook. Older installs can
 delete `.claude/skills/vexus`, which never ran.
