@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vexus: tells Claude Code where to look</title>
+<meta name="description" content="vexus tells Claude Code where to look in your repo before it starts grepping. A local prompt hook adds a few likely code locations to each prompt.">
+<meta property="og:title" content="vexus: tells Claude Code where to look">
+<meta property="og:description" content="A local prompt hook adds a few likely code locations to each prompt. 10% cheaper on change requests across 288 live sessions, same pass rate.">
+<meta property="og:image" content="https://faique43.github.io/vexus/og.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:url" content="https://faique43.github.io/vexus/">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://faique43.github.io/vexus/og.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0d12'/%3E%3Cpath d='M8 10l8 13 8-13' stroke='%238b7bff' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0a0d12; --panel: #121722; --line: #232b3b; --text: #e9edf4; --muted: #8f99ad;
+    --accent: #8b7bff; --green: #43e0a0;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); line-height: 1.5;
+    background-image: radial-gradient(900px 600px at 15% -5%, rgba(139,123,255,.16), transparent 60%),
+                      radial-gradient(800px 500px at 100% 100%, rgba(67,224,160,.07), transparent 60%); min-height: 100vh; }
+  main { max-width: 980px; margin: 0 auto; padding: 56px 16px 72px; }
+  header { text-align: center; }
+  .word { font-size: clamp(56px, 12vw, 112px); font-weight: 800; letter-spacing: -0.05em; line-height: 1; margin: 0; }
+  .lede { font-size: clamp(20px, 3.4vw, 30px); font-weight: 650; letter-spacing: -0.01em; margin: 18px auto 0; max-width: 760px; }
+  .lede em { font-style: normal; color: var(--accent); }
+  video { display: block; width: 100%; margin: 40px 0 0; border-radius: 18px; border: 1px solid var(--line);
+    box-shadow: 0 30px 90px rgba(0,0,0,.5); background: #000; aspect-ratio: 16 / 9; }
+  .note { text-align: center; color: var(--muted); font-size: 14px; margin-top: 10px; }
+  h2 { font-size: 22px; margin: 52px 0 14px; letter-spacing: -0.01em; }
+  .cmd { display: flex; gap: 10px; align-items: stretch; }
+  pre { flex: 1; margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
+    font-family: var(--mono); font-size: 14.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  button { font: 600 15px var(--sans); color: var(--text); background: #1b2233; border: 1px solid var(--line); border-radius: 14px;
+    padding: 0 18px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  p { color: #c8cfdb; margin: 10px 0; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px 22px; }
+  .num { font-size: 40px; font-weight: 800; letter-spacing: -0.03em; color: var(--accent); }
+  .num.green { color: var(--green); }
+  .lab { color: var(--muted); font-size: 15px; }
+  a { color: var(--accent); }
+  .links { display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: center; margin-top: 48px; font-weight: 600; }
+  @media (max-width: 640px) {
+    main { padding-top: 36px; }
+    .stats { grid-template-columns: 1fr; }
+    .cmd { flex-direction: column; }
+    button { padding: 12px 18px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 class="word">vexus</h1>
+    <p class="lede">Tells Claude Code <em>where to look</em> in your repo before it starts grepping.</p>
+  </header>
+
+  <video controls playsinline preload="metadata" poster="poster.jpg">
+    <source src="vexus-demo.mp4" type="video/mp4">
+    <a href="vexus-demo.mp4">Download the demo (mp4)</a>
+  </video>
+  <p class="note">21 seconds, with sound. The hint lines are real vexus 0.5.0 output on Express.</p>
+
+  <h2>Try it on your repo</h2>
+  <div class="cmd">
+    <pre id="cmd">curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | VEXUS_INIT=claude-code sh</pre>
+    <button id="copy" type="button">Copy</button>
+  </div>
+  <p>Run it inside your repo on macOS or Linux. It installs the binary, adds a prompt hook to <code>.claude/settings.json</code>, and indexes in the background. Windows and other setups are in the <a href="https://github.com/faique43/vexus#install">install guide</a>.</p>
+
+  <h2>What it does</h2>
+  <p>A hook runs on each prompt, finds the likely code locally with a semantic and call-graph index, and adds a few locations to what the agent sees, about 100 tokens. No tools to learn and no tool definitions billed every session. Indexing and search run on your machine and spend no agent tokens.</p>
+
+  <h2>Measured, not claimed</h2>
+  <div class="stats">
+    <div class="stat"><div class="num">10%</div><div class="lab">cheaper on change requests (95% interval 4 to 17)</div></div>
+    <div class="stat"><div class="num">21%</div><div class="lab">cheaper on short change requests</div></div>
+    <div class="stat"><div class="num green">Same</div><div class="lab">pass rate, 96 vs 96 of 144</div></div>
+  </div>
+  <p>288 live Claude Code sessions on Express and NestJS, Sonnet 5.5, with and without the hook in the same window. Savings are smallest when the request already names the code, so the hook stays quiet on those. <a href="https://github.com/faique43/vexus#benchmarks">Full results and caveats</a>.</p>
+
+  <nav class="links">
+    <a href="https://github.com/faique43/vexus">GitHub</a>
+    <a href="https://github.com/faique43/vexus/releases/latest">Latest release</a>
+    <a href="https://github.com/faique43/vexus/blob/main/CONTRIBUTING.md">Contributing</a>
+    <a href="https://github.com/faique43/vexus/discussions">Discussions</a>
+  </nav>
+</main>
+<script>
+  document.getElementById("copy").addEventListener("click", async (e) => {
+    const text = document.getElementById("cmd").textContent;
+    try { await navigator.clipboard.writeText(text); e.target.textContent = "Copied"; }
+    catch (_) { e.target.textContent = "Select and copy"; }
+    setTimeout(() => { e.target.textContent = "Copy"; }, 1600);
+  });
+</script>
+</body>
+</html>
