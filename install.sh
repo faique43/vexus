@@ -7,6 +7,11 @@
 # release's SHA256SUMS, and installs the binary to ~/.local/bin (override
 # with VEXUS_INSTALL_DIR). Set VEXUS_VERSION to pin a version instead of
 # taking the latest.
+#
+# Run from inside a repo with VEXUS_INIT=claude-code to set that repo up too,
+# so the whole install is one command:
+#
+#   curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | VEXUS_INIT=claude-code sh
 
 set -eu
 
@@ -27,6 +32,21 @@ need() {
 
 need curl
 need tar
+
+# Checked before downloading, so a refusal leaves nothing half done. From the
+# home directory, setup would put the hook in ~/.claude/settings.json, where it
+# fires in every session of every project.
+init_root=""
+if [ -n "${VEXUS_INIT:-}" ]; then
+  [ "$PWD" != "${HOME:-}" ] ||
+    die "VEXUS_INIT: run this from inside your repo, not your home directory"
+  if command -v git >/dev/null 2>&1; then
+    init_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
+      die "VEXUS_INIT: $PWD is not inside a git repository; cd into your repo first"
+  else
+    init_root="$PWD"
+  fi
+fi
 
 # Prefer sha256sum (Linux), fall back to shasum (macOS). Verification is not
 # optional: an unverified binary is worse than no binary.
@@ -142,6 +162,10 @@ case ":$PATH:" in
 esac
 
 echo
-echo "next, inside the repo you want indexed:"
-echo "  vexus index .                    # build the index (first run downloads a ~160 MB model; large repos take minutes)"
-echo "  vexus init --agent claude-code   # add the prompt hook to .claude/settings.json"
+if [ -n "$init_root" ]; then
+  "$install_dir/vexus" init --agent "$VEXUS_INIT" "$init_root" ||
+    die "installed, but vexus init failed in $init_root"
+else
+  echo "next, inside the repo you want indexed:"
+  echo "  vexus init --agent claude-code   # add the prompt hook and index in the background"
+fi

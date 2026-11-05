@@ -6,6 +6,11 @@
 # release's SHA256SUMS, and installs vexus.exe to %LOCALAPPDATA%\vexus\bin
 # (override with $env:VEXUS_INSTALL_DIR). Set $env:VEXUS_VERSION to pin a
 # version instead of taking the latest.
+#
+# Run from inside a repo with $env:VEXUS_INIT = "claude-code" to set that repo
+# up too, so the whole install is one command:
+#
+#   $env:VEXUS_INIT = "claude-code"; irm https://raw.githubusercontent.com/faique43/vexus/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
@@ -15,6 +20,21 @@ $installDir = if ($env:VEXUS_INSTALL_DIR) { $env:VEXUS_INSTALL_DIR } else { Join
 function Fail($msg) {
     Write-Error "install.ps1: $msg"
     exit 1
+}
+
+# Checked before downloading, so a refusal leaves nothing half done. From the
+# home directory, setup would put the hook in ~\.claude\settings.json, where it
+# fires in every session of every project.
+$initRoot = $null
+if ($env:VEXUS_INIT) {
+    $here = (Get-Location).Path
+    if ($here -eq $HOME) { Fail "VEXUS_INIT: run this from inside your repo, not your home directory" }
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $initRoot = (git rev-parse --show-toplevel 2>$null)
+        if (-not $initRoot) { Fail "VEXUS_INIT: $here is not inside a git repository; cd into your repo first" }
+    } else {
+        $initRoot = $here
+    }
 }
 
 $target = switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -76,9 +96,13 @@ try {
     }
 
     Write-Host ""
-    Write-Host "next, inside the repo you want indexed:"
-    Write-Host "  vexus index .                    # build the index (first run downloads a ~160 MB model; large repos take minutes)"
-    Write-Host "  vexus init --agent claude-code   # add the prompt hook to .claude/settings.json"
+    if ($initRoot) {
+        & (Join-Path $installDir "vexus.exe") init --agent $env:VEXUS_INIT $initRoot
+        if ($LASTEXITCODE -ne 0) { Fail "installed, but vexus init failed in $initRoot" }
+    } else {
+        Write-Host "next, inside the repo you want indexed:"
+        Write-Host "  vexus init --agent claude-code   # add the prompt hook and index in the background"
+    }
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

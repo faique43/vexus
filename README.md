@@ -2,23 +2,30 @@
 
 # vexus
 
-**Stop letting your coding agent grep its way around your codebase.**
-
-Vexus indexes your repo into a semantic + call-graph index, then tells Claude Code
-where to look before it starts searching: a few locations with each prompt, no
-tools to learn and no tool definitions to pay for.
-
-Runs entirely on your machine. Indexing and embedding cost zero agent tokens.
+**Tells Claude Code where to look in your repo before it starts grepping.**
 
 <img src="docs/media/vexus-demo.gif" width="820" alt="Claude Code greps around Express until the vexus prompt hook lists the likely code, and the agent opens those lines in two tool calls">
 
+Run this inside your repo (macOS and Linux; [Windows](#install)):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | VEXUS_INIT=claude-code sh
+```
+
+[**Watch the full demo**](https://faique43.github.io/vexus/) · [How it works](#how-it-works) · [Benchmarks](#benchmarks) · [Limitations](#limitations) · [Contributing](CONTRIBUTING.md)
+
 [![CI](https://github.com/faique43/vexus/actions/workflows/ci.yml/badge.svg)](https://github.com/faique43/vexus/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/faique43/vexus)](https://github.com/faique43/vexus/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
-[Install](#install) · [Quickstart](#quickstart) · [Benchmarks](#benchmarks) · [How it works](#how-it-works) · [Limitations](#limitations)
-
 </div>
+
+A hook runs on each prompt, finds the likely code locally, and adds a few
+locations to what the agent sees, about 100 tokens. No tools to learn and no
+tool definitions to pay for. Across 288 live Claude Code sessions on change
+requests it cost 10% less (95% interval 4 to 17) with the same pass rate.
+Indexing and search run entirely on your machine and spend no agent tokens.
 
 ---
 
@@ -114,17 +121,22 @@ because every wrong guess costs a whole function.
 
 ## Install
 
+From inside the repo you want vexus in:
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | VEXUS_INIT=claude-code sh
 ```
 
 Downloads the release binary for your platform, verifies it against the
-release checksums, and installs to `~/.local/bin`.
+release checksums, installs it to `~/.local/bin`, then sets up the repo: the
+prompt hook goes in `.claude/settings.json` and indexing starts in the
+background. It refuses to set up your home directory or anything outside a git
+repo. Leave out `VEXUS_INIT=claude-code` to install the binary only.
 
 On Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/faique43/vexus/main/install.ps1 | iex
+$env:VEXUS_INIT = "claude-code"; irm https://raw.githubusercontent.com/faique43/vexus/main/install.ps1 | iex
 ```
 
 <details>
@@ -160,16 +172,14 @@ dependency does not build against musl. See [Limitations](#limitations).
 
 ## Quickstart
 
-```sh
-cd your-repo
-vexus index .     # first run also fetches the embedding model (~160 MB, once)
-```
-
-Then hook it into **Claude Code**:
+The install command above does this for you. With the binary already
+installed, from inside your repo:
 
 ```sh
-vexus init --agent claude-code   # adds a prompt hook to .claude/settings.json
+vexus init --agent claude-code   # adds a prompt hook to .claude/settings.json and indexes in the background
 ```
+
+The first index also fetches the embedding model (~160 MB, once).
 
 Each prompt now arrives with a few likely locations, about 100 tokens:
 
