@@ -3,6 +3,17 @@
 Thanks for looking. vexus is young and the gaps are real, so bug reports that
 say "this returned garbage for my repo" are as useful as patches.
 
+## Where to start
+
+- **[Good first issues](https://github.com/faique43/vexus/labels/good%20first%20issue)**
+  are scoped so you can finish one without knowing the whole codebase. Each
+  says what to change, where, and how to know it's done.
+- **[Discussions](https://github.com/faique43/vexus/discussions)** for
+  questions, results on your own repo, and ideas you want to sanity-check
+  before writing code.
+- **Adding a language** (below) needs no parser code and is the most
+  self-contained change in the repo.
+
 ## Before you start
 
 - **Bugs and small fixes:** open a PR directly.
@@ -32,16 +43,38 @@ export VEXUS_EMBEDDER=mock
 
 ## The checks CI runs
 
-Run these before pushing. They are the same three jobs that gate a PR:
+Run these before pushing. They are what gates a PR:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --workspace                          # ~380 tests
+cargo test --workspace
 cargo run --release -p vexus-eval -- check      # retrieval-metric ratchet
 ```
 
 Clippy runs with `-D warnings`, so a warning fails the build.
+
+## Trying a change in Claude Code
+
+The hook is what most people run, so check yours end to end. `init` records the
+binary it was run with, so a local build wires itself in:
+
+```sh
+cargo build --release -p vexus-cli
+cd /some/test/repo
+/path/to/vexus/target/release/vexus init --agent claude-code
+```
+
+To see exactly what a prompt gets without starting Claude Code, feed the hook
+the payload Claude Code sends it:
+
+```sh
+echo '{"prompt":"why do retries wait so long","cwd":"'"$PWD"'","session_id":"t"}' \
+  | /path/to/vexus/target/release/vexus hook prompt
+```
+
+It prints nothing when it has nothing worth saying. That silence is deliberate:
+replies, and long reports that already name the code, get no hints.
 
 ## The eval gate
 
@@ -168,7 +201,7 @@ docs: report real-model speed, not the mock harness's numbers
 
 Explain *why* in the body, not just what. The diff already says what.
 
-`main` is protected: every change lands through a pull request with the three
+`main` is protected: every change lands through a pull request with the
 gating checks green. Keep PRs focused on one thing.
 
 ## Reporting bugs

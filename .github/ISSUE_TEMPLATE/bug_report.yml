@@ -54,9 +54,23 @@ body:
       label: Platform
       options:
         - macOS (Apple Silicon)
+        - macOS (Intel, structural-only build)
         - Linux x64
         - Linux arm64
-        - Other (unsupported)
+        - Windows x64
+        - Windows arm64
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: setup
+    attributes:
+      label: How you use vexus
+      options:
+        - Claude Code prompt hook (vexus init --agent claude-code)
+        - MCP server (vexus serve)
+        - CLI only (index, search, status)
     validations:
       required: true
 

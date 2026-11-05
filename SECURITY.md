@@ -6,8 +6,8 @@ vexus is pre-1.0. Only the latest release receives fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | yes |
-| < 0.1 | no |
+| 0.5.x | yes |
+| < 0.5 | no |
 
 ## Reporting a vulnerability
 
@@ -23,8 +23,11 @@ smallest reproduction you have. You will get an acknowledgement within a week.
 ## What is in scope
 
 vexus reads a repository, writes an index under `.vexus/`, downloads a model
-over HTTPS on first run, and speaks MCP over stdio to a local client. Things
-worth reporting:
+over HTTPS on first run, reads each prompt locally through a Claude Code hook,
+and speaks MCP over stdio to a local client. Things worth reporting:
+
+- Anything that sends prompt text or repository content off the machine. The
+  hook and the index are meant to stay entirely local.
 
 - Path traversal that lets a tool read files outside the indexed repository.
   `open` is meant to refuse this; a bypass is a real bug.

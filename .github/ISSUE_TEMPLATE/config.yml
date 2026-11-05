@@ -1,10 +1,13 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/faique43/vexus/discussions
+    about: Ask how something works, share results on your repo, or float an idea before filing it.
   - name: Security vulnerability
     url: https://github.com/faique43/vexus/security/advisories/new
     about: Report privately, not in a public issue. See SECURITY.md for scope.
   - name: Known limitations
     url: https://github.com/faique43/vexus#limitations
     about: >-
-      Windows and Intel macOS are unsupported, call edges are heuristic, and
-      small repos cost more than grep. Check here before filing.
+      Intel macOS and older glibc get a keyword-only build, musl is
+      unsupported, and call edges are heuristic. Check here before filing.
