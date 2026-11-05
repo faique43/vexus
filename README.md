@@ -10,6 +10,8 @@ tools to learn and no tool definitions to pay for.
 
 Runs entirely on your machine. Indexing and embedding cost zero agent tokens.
 
+<img src="docs/media/vexus-demo.gif" width="820" alt="Claude Code greps around Express until the vexus prompt hook lists the likely code, and the agent opens those lines in two tool calls">
+
 [![CI](https://github.com/faique43/vexus/actions/workflows/ci.yml/badge.svg)](https://github.com/faique43/vexus/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
