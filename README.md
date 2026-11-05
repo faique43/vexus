@@ -405,3 +405,5 @@ quote a `perf --real` run instead.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Built by [Faique Ahmad Khan](https://faique.dev).
