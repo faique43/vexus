@@ -1,0 +1,53 @@
+# Flags issues and PRs from people that have waited 20 hours for a maintainer
+# reply: they get the `needs-reply` label and the maintainer is assigned, which
+# sends a GitHub notification. The label comes off once the maintainer replies.
+# Bots, including Dependabot, are left alone.
+name: needs-reply
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  flag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const maintainer = owner;
+            const label = "needs-reply";
+            const afterHours = 20;
+            const now = Date.now();
+            const isBot = (user) => user.type === "Bot" || user.login.endsWith("[bot]");
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            for (const item of open) {
+              if (isBot(item.user)) continue;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: item.number, per_page: 100,
+              });
+              const people = comments.filter((c) => !isBot(c.user));
+              const last = people.length ? people[people.length - 1] : null;
+              const lastAuthor = last ? last.user.login : item.user.login;
+              const since = new Date(last ? last.created_at : item.created_at).getTime();
+              const waiting = lastAuthor !== maintainer && (now - since) / 36e5 >= afterHours;
+              const flagged = item.labels.some((l) => (l.name || l) === label);
+
+              if (waiting && !flagged) {
+                await github.rest.issues.addLabels({ owner, repo, issue_number: item.number, labels: [label] });
+                await github.rest.issues.addAssignees({ owner, repo, issue_number: item.number, assignees: [maintainer] });
+                core.info(`#${item.number} waiting since ${new Date(since).toISOString()}: flagged`);
+              } else if (!waiting && flagged) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: item.number, name: label });
+                core.info(`#${item.number} answered: unflagged`);
+              }
+            }
