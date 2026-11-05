@@ -48,6 +48,41 @@ jobs:
         run: |
           .\install.ps1
           & "$env:VEXUS_INSTALL_DIR\vexus.exe" --version
+      - name: One-command setup from inside a repo (Unix)
+        if: runner.os != 'Windows'
+        env:
+          VEXUS_INSTALL_DIR: ${{ runner.temp }}/vexus-bin-init
+          VEXUS_INIT: claude-code
+          VEXUS_EMBEDDER: none
+        run: |
+          repo="$RUNNER_TEMP/demo-repo"
+          mkdir -p "$repo/src"
+          git -C "$repo" init -q
+          # From a subdirectory: setup goes to the repo root, where Claude Code starts.
+          (cd "$repo/src" && sh "$GITHUB_WORKSPACE/install.sh")
+          grep -q 'hook prompt' "$repo/.claude/settings.json"
+          # Outside a repo it refuses rather than write to the wrong settings file.
+          mkdir -p "$RUNNER_TEMP/not-a-repo"
+          if (cd "$RUNNER_TEMP/not-a-repo" && sh "$GITHUB_WORKSPACE/install.sh"); then
+            echo "install.sh set up a directory that isn't a repo" >&2
+            exit 1
+          fi
+      - name: One-command setup from inside a repo (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VEXUS_INSTALL_DIR: ${{ runner.temp }}\vexus-bin-init
+          VEXUS_INIT: claude-code
+          VEXUS_EMBEDDER: none
+        run: |
+          $repo = Join-Path $env:RUNNER_TEMP "demo-repo"
+          New-Item -ItemType Directory -Force -Path (Join-Path $repo "src") | Out-Null
+          git -C $repo init -q
+          Set-Location (Join-Path $repo "src")
+          & "$env:GITHUB_WORKSPACE\install.ps1"
+          if (-not (Select-String -Path (Join-Path $repo ".claude\settings.json") -Pattern "hook prompt" -Quiet)) {
+            throw "install.ps1 did not add the prompt hook"
+          }
 
   structural:
     # The structural-only build (`--no-default-features`, ONNX compiled
