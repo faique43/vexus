@@ -49,6 +49,14 @@
   .num.green { color: var(--green); }
   .lab { color: var(--muted); font-size: 15px; }
   a { color: var(--accent); }
+  .ctas { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 22px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 12px; font-weight: 650;
+    text-decoration: none; border: 1px solid var(--line); color: var(--text); background: #161c29; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #0a0d12; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .by { text-align: center; color: var(--muted); font-size: 14px; margin-top: 28px; }
+  .by a { color: var(--text); }
   .links { display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: center; margin-top: 48px; font-weight: 600; }
   @media (max-width: 640px) {
     main { padding-top: 36px; }
@@ -70,8 +78,12 @@
     <a href="vexus-demo.mp4">Download the demo (mp4)</a>
   </video>
   <p class="note">21 seconds, with sound. The hint lines are real vexus 0.5.0 output on Express.</p>
+  <div class="ctas">
+    <a class="btn primary" href="https://github.com/faique43/vexus">&#9733; Star on GitHub</a>
+    <a class="btn" href="#install">Install in one command</a>
+  </div>
 
-  <h2>Try it on your repo</h2>
+  <h2 id="install">Try it on your repo</h2>
   <div class="cmd">
     <pre id="cmd">curl -fsSL https://raw.githubusercontent.com/faique43/vexus/main/install.sh | VEXUS_INIT=claude-code sh</pre>
     <button id="copy" type="button">Copy</button>
@@ -95,6 +107,7 @@
     <a href="https://github.com/faique43/vexus/blob/main/CONTRIBUTING.md">Contributing</a>
     <a href="https://github.com/faique43/vexus/discussions">Discussions</a>
   </nav>
+  <p class="by">Built by <a href="https://faique.dev">Faique Ahmad Khan</a></p>
 </main>
 <script>
   document.getElementById("copy").addEventListener("click", async (e) => {
