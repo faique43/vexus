@@ -1,9 +1,9 @@
 //! The writer thread wiring `serve_async` uses when this process wins the
 //! advisory `.vexus/lock`: opens a dedicated writer `Store`, spawns a thread
-//! that builds the index if there is none yet and then runs
-//! `vexus_watch::spawn_writer` (holding the `WriterLock` for that thread's
-//! whole life), and hands back a [`WriterHandle`] whose `Drop` signals
-//! shutdown and joins the thread.
+//! that builds the index if there is none yet, loads the embedder and then
+//! runs `vexus_watch::spawn_writer` (holding the `WriterLock` for that
+//! thread's whole life), and hands back a [`WriterHandle`] whose `Drop`
+//! signals shutdown and joins the thread.
 //!
 //! Pulled out of `serve_async` into its own testable unit after a real bug:
 //! an earlier version's shutdown-channel sender was scoped to end *inside*
@@ -84,10 +84,15 @@ impl Drop for WriterHandle {
 /// MCP `initialize` handshake, and clients give up on a server that takes
 /// too long to (Claude Code waits 30s). Only the `Indexing` mark happens
 /// here, so a `status` call can never see a new, empty index as `fresh`.
+///
+/// The embedder is loaded on that thread too, by `load_embedder`, after any
+/// structural build: on a machine that has never run vexus, loading it
+/// downloads the ~160 MB model first. The index is queryable keyword-only
+/// in the meantime, and the watcher embeds the backlog once it has loaded.
 pub(crate) fn start_writer(
     root: PathBuf,
     db_path: &Path,
-    embedder: Option<Arc<dyn Embedder>>,
+    load_embedder: impl FnOnce() -> Option<Arc<dyn Embedder>> + Send + 'static,
     lock: WriterLock,
 ) -> Result<WriterHandle> {
     let mut writer_store = Store::open(db_path)
@@ -104,6 +109,7 @@ pub(crate) fn start_writer(
         if first_build {
             build_structural_index(&root, &mut writer_store);
         }
+        let embedder = load_embedder();
         let inner_handle = vexus_watch::spawn_writer(root, writer_store, embedder, shutdown_rx);
         let _ = inner_handle.join();
     });
@@ -173,7 +179,7 @@ mod tests {
         let lock = WriterLock::try_acquire(&root)
             .unwrap()
             .expect("nothing else holds the lock in this fresh tempdir");
-        let handle = start_writer(root.clone(), &db_path, None, lock).unwrap();
+        let handle = start_writer(root.clone(), &db_path, || None, lock).unwrap();
 
         // No filesystem events at all during this window — the bug this
         // guards against would have exited the thread within its very
@@ -216,7 +222,7 @@ mod tests {
         let handle = start_writer(
             root.clone(),
             &db_path,
-            Some(Arc::new(vexus_embed::MockEmbedder)),
+            || Some(Arc::new(vexus_embed::MockEmbedder)),
             lock,
         )
         .unwrap();

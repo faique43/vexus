@@ -57,7 +57,7 @@ pub fn serve(root: PathBuf) -> Result<()> {
 fn serve_on<T, E, A>(
     root: PathBuf,
     transport: T,
-    make_embedder: impl FnOnce() -> Option<Arc<dyn vexus_embed::Embedder>>,
+    make_embedder: impl FnOnce() -> Option<Arc<dyn vexus_embed::Embedder>> + Send + 'static,
 ) -> Result<()>
 where
     T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
@@ -72,7 +72,7 @@ where
 async fn serve_async<T, E, A>(
     root: PathBuf,
     transport: T,
-    make_embedder: impl FnOnce() -> Option<Arc<dyn vexus_embed::Embedder>>,
+    make_embedder: impl FnOnce() -> Option<Arc<dyn vexus_embed::Embedder>> + Send + 'static,
 ) -> Result<()>
 where
     T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
@@ -103,15 +103,10 @@ where
     // shutdown. Whatever it learns is picked up by the next invocation.
     std::thread::spawn(update::refresh_if_stale);
 
-    // The writer always needs an embedder (for `start_writer` below), so it's
-    // built exactly once here and later seeded into `AppState`'s `OnceLock`
-    // rather than `state.embedder()` loading the ~160 MB model a second time.
-    //
     // Opening the store here creates `index.db` (or recreates it, if a schema
-    // bump wiped it) for the reader connection below. Building a missing
-    // index does not happen here: it belongs to the writer thread, after the
-    // handshake (see `start_writer`).
-    let mut prebuilt_embedder: Option<Option<Arc<dyn vexus_embed::Embedder>>> = None;
+    // bump wiped it) for the reader connection below. Neither building a
+    // missing index nor loading the embedder happens here: both belong to
+    // the writer thread, after the handshake (see `start_writer`).
     if is_writer {
         vexus_core::Store::open(&db_path)
             .with_context(|| format!("failed to open index at {}", db_path.display()))?;
@@ -119,7 +114,6 @@ where
         // `open_store`. Best-effort: a stray `.gitignore` we can't write (e.g.
         // read-only checkout) is a nuisance, not a reason to refuse to serve.
         let _ = std::fs::write(root.join(".vexus/.gitignore"), "*\n");
-        prebuilt_embedder = Some(make_embedder());
     }
 
     // Tool handlers only ever read; opening read-only keeps concurrent
@@ -187,14 +181,6 @@ where
         last_generation: AtomicU64::new(0),
         is_writer,
     });
-    // Seed the writer's already-built embedder so `state.embedder()` (tool
-    // handlers, `start_writer` below) reuses it instead of building a second
-    // one. Readers keep the lazy path — they only pay for an embedder if a
-    // tool actually needs a query vector.
-    if let Some(embedder) = prebuilt_embedder {
-        let _ = state.embedder.set(embedder);
-    }
-
     // Only reachable via the reader path's None arm above (the writer
     // branch always populates `initial_store`: it created `index.db` itself).
     if state.lock_store().is_none() {
@@ -210,8 +196,13 @@ where
     // shutdown) long before `serve` itself was actually done.
     let mut writer_handle: Option<WriterHandle> = None;
     if let Some(lock) = writer_lock {
-        let embedder = state.embedder();
-        writer_handle = Some(start_writer(root.clone(), &db_path, embedder, lock)?);
+        // Loaded into `AppState`'s `OnceLock`, so tools use the same
+        // embedder the watcher does rather than loading the ~160 MB model a
+        // second time. Readers keep the lazy path — they only pay for an
+        // embedder if a tool actually needs a query vector.
+        let shared = Arc::clone(&state);
+        let load_embedder = move || shared.embedder.get_or_init(make_embedder).clone();
+        writer_handle = Some(start_writer(root.clone(), &db_path, load_embedder, lock)?);
     }
 
     let server = server::VexusServer::new(state);
@@ -740,5 +731,59 @@ mod tests {
             store.set_meta("schema_version", "0").unwrap();
         }
         serve_answers_at_once_and_builds_in_the_background(root).await;
+    }
+
+    /// On a machine that has never run vexus, building the embedder first
+    /// downloads the ~160 MB model, which can take longer than a client waits
+    /// for `initialize`. The handshake must not wait for it, tools must answer
+    /// (keyword-only) while it loads, and the embeddings must still get done
+    /// once it has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_answers_while_the_embedder_is_still_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("app.py"),
+            "def alpha_process():\n    return unique_marker_beta()\n\n\n\
+             def unique_marker_beta():\n    return 42\n",
+        )
+        .unwrap();
+        {
+            let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+            vexus_watch::pipeline::index_repo(root, &mut store).unwrap();
+        }
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server_root = root.to_path_buf();
+        let server = std::thread::spawn(move || {
+            serve_on(server_root, server_io, || {
+                std::thread::sleep(Duration::from_secs(6));
+                Some(Arc::new(vexus_embed::MockEmbedder))
+            })
+        });
+
+        let client = tokio::time::timeout(Duration::from_secs(2), ().serve(client_io))
+            .await
+            .expect("initialize must be answered within 2s, without waiting for the embedder")
+            .expect("initialize handshake failed");
+        let explore = tokio::time::timeout(
+            Duration::from_secs(2),
+            call_tool(
+                &client,
+                "explore",
+                Some(rmcp::serde_json::json!({ "question": "unique_marker_beta" })),
+            ),
+        )
+        .await
+        .expect("explore must answer within 2s, without waiting for the embedder");
+        assert!(explore.contains("app.py"), "{explore:?}");
+
+        wait_for_status(&client, Duration::from_secs(30), |s| embed_backlog(s) == 0).await;
+
+        client.cancel().await.expect("clean MCP shutdown failed");
+        server
+            .join()
+            .expect("serve panicked")
+            .expect("serve returned an error");
     }
 }

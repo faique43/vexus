@@ -70,12 +70,20 @@ impl std::ops::Deref for StoreGuard<'_> {
 }
 
 impl AppState {
-    /// Lazily builds the embedder on first use (via the same
-    /// `VEXUS_EMBEDDER`-driven selection the CLI uses), then reuses it for
-    /// the rest of the process — never rebuilt per call. A build failure
-    /// degrades to `None` (structural-only search); `make_embedder` already
-    /// prints the reason to stderr.
+    /// The process's embedder, built once and reused — never rebuilt per
+    /// call. A build failure degrades to `None` (structural-only search);
+    /// `make_embedder` already prints the reason to stderr.
+    ///
+    /// A reader builds it lazily on first use (via the same
+    /// `VEXUS_EMBEDDER`-driven selection the CLI uses). A writer never does:
+    /// its writer thread loads it after the handshake (see
+    /// `writer::start_writer`), since that can mean downloading the model,
+    /// and until then this returns `None` so tools search keyword-only
+    /// instead of blocking on that load.
     pub fn embedder(&self) -> Option<Arc<dyn Embedder>> {
+        if self.is_writer {
+            return self.embedder.get().cloned().flatten();
+        }
         self.embedder
             .get_or_init(|| vexus_embed::select::make_embedder().map(Arc::from))
             .clone()
@@ -559,12 +567,42 @@ mod tests {
         );
     }
 
+    /// In a writer process the writer thread loads the embedder, after the
+    /// handshake, since that can mean downloading the model. Until it has,
+    /// tools get none and search keyword-only, rather than blocking on that
+    /// load or starting a second one.
     #[test]
-    fn embedder_is_built_once_and_reused() {
+    fn a_writers_tools_never_build_the_embedder_themselves() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::env::set_var("VEXUS_EMBEDDER", "mock");
         let state = indexed_state(root);
+        assert!(state.is_writer);
+
+        assert!(state.embedder().is_none());
+        assert!(
+            state.embedder.get().is_none(),
+            "a tool call must not start building the embedder"
+        );
+
+        let loaded: Arc<dyn Embedder> = Arc::new(vexus_embed::MockEmbedder);
+        state
+            .embedder
+            .set(Some(Arc::clone(&loaded)))
+            .unwrap_or_else(|_| panic!("nothing else may have filled the OnceLock"));
+        let got = state
+            .embedder()
+            .expect("the loaded embedder must come back");
+        assert!(Arc::ptr_eq(&loaded, &got));
+    }
+
+    #[test]
+    fn a_readers_embedder_is_built_once_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::env::set_var("VEXUS_EMBEDDER", "mock");
+        let mut state = indexed_state(root);
+        state.is_writer = false;
         let first = state.embedder().expect("mock embedder always builds");
         let second = state.embedder().expect("second call reuses the OnceLock");
         assert_eq!(first.id(), "mock");
@@ -574,10 +612,10 @@ mod tests {
         );
     }
 
-    /// The writer path in `serve_async` builds its embedder before the
-    /// startup index and seeds it via `embedder.set(..)`; `embedder()` must
-    /// then hand back that exact Arc rather than building a second one —
-    /// the double cold-start ORT session load this seeding exists to kill.
+    /// The writer thread loads the embedder into the same `OnceLock` it
+    /// hands to the watcher; `embedder()` must then hand back that exact Arc
+    /// rather than building a second one, the double cold-start ORT session
+    /// load sharing it exists to kill.
     #[test]
     fn embedder_seeded_before_first_use_is_reused_not_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
