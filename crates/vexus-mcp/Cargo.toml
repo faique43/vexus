@@ -27,3 +27,6 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+# The client half of a handshake test that runs `serve` in-process.
+rmcp = { version = "3.0.0-beta.2", features = ["client"] }
+tokio = { version = "1", features = ["io-util", "time"] }

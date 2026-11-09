@@ -144,6 +144,33 @@ fn index_refuses_when_a_writer_lock_is_already_held() {
     assert!(!root.join(".vexus/index.db").exists());
 }
 
+/// A `vexus serve` stopped while it builds a missing index leaves it marked
+/// `indexing`, and MCP tools won't answer from an index in that state. A
+/// full `vexus index` builds all of it, so it clears the mark.
+#[test]
+fn index_clears_the_mark_a_serve_stopped_mid_build_leaves() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app.py", "def f():\n    return 1\n");
+    {
+        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+        vexus_watch::set_freshness(&mut store, vexus_watch::Freshness::Indexing).unwrap();
+    }
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["index", root.to_str().unwrap()])
+        .assert()
+        .success();
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .args(["status", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("freshness: fresh"));
+}
+
 #[test]
 fn status_without_index_is_calm() {
     let dir = tempfile::tempdir().unwrap();

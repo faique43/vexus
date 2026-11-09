@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 use vexus_embed::Embedder;
-use vexus_watch::{effective_freshness, role_line, Freshness};
+use vexus_watch::{effective_freshness, get_freshness, role_line, Freshness};
 #[cfg(test)]
 use vexus_watch::{pipeline, set_freshness};
 
@@ -29,9 +29,15 @@ use vexus_watch::{pipeline, set_freshness};
 /// while this process's store isn't populated yet — a transient condition
 /// (the winner of the advisory writer lock is still building the index for
 /// the first time), not a real failure, so the message tells a caller to
-/// just retry rather than to give up.
+/// just retry rather than to give up. A reader also returns it while the
+/// winner's first build is still `Indexing`.
 pub const INDEX_NOT_READY: &str =
     "index not ready — another vexus serve is building it; retry shortly";
+
+/// [`INDEX_NOT_READY`] for the writer itself, while it builds a missing
+/// index after the handshake (see `writer::start_writer`).
+pub const INDEX_BUILDING: &str =
+    "index not ready — this vexus serve is still building it; retry shortly";
 
 pub struct AppState {
     pub store: Mutex<Option<vexus_core::Store>>,
@@ -100,8 +106,28 @@ impl AppState {
     /// blocking; every tool call site already matches on this `Result` and
     /// returns the message straight through.
     ///
+    /// The same goes for an index still being built from nothing (`Indexing`,
+    /// set only by `serve`'s first build): an empty or half-linked index
+    /// answers "no such code" for code that exists, so tools say it isn't
+    /// ready instead, until the structural pass is done.
+    ///
     /// All tool call sites should use this instead of the raw `lock_store`.
     pub fn lock_store_fresh(&self) -> Result<StoreGuard<'_>, String> {
+        let store = self.lock_store_synced()?;
+        if get_freshness(&store).is_ok_and(|f| f == Freshness::Indexing) {
+            let msg = if self.is_writer {
+                INDEX_BUILDING
+            } else {
+                INDEX_NOT_READY
+            };
+            return Err(msg.to_string());
+        }
+        Ok(store)
+    }
+
+    /// [`Self::lock_store_fresh`] minus the first-build check: `status`
+    /// reports that build rather than refusing to answer during it.
+    fn lock_store_synced(&self) -> Result<StoreGuard<'_>, String> {
         let guard = self.lock_store();
         if guard.is_none() {
             return Err(INDEX_NOT_READY.to_string());
@@ -125,9 +151,10 @@ impl AppState {
     /// tools, `status` treats "not ready yet" (finding C3) as its own
     /// complete (successful) answer rather than an error — a caller asking
     /// "what's the state of the index" gets exactly that, even when the
-    /// answer is "not built yet".
+    /// answer is "not built yet". During a first build it renders the real
+    /// counts and `freshness: indexing`.
     pub fn status_text(&self) -> Result<String> {
-        let store = match self.lock_store_fresh() {
+        let store = match self.lock_store_synced() {
             Ok(store) => store,
             Err(msg) => return Ok(msg),
         };
@@ -188,7 +215,9 @@ pub fn status_text(store: &vexus_core::Store, role: Option<bool>) -> Result<Stri
     if let Some(since) = since {
         freshness_line.push_str(&format!(" (since {})", epoch_to_rfc3339(since)));
     }
-    if freshness != Freshness::Fresh {
+    if freshness == Freshness::Indexing {
+        freshness_line.push_str(" — the index is still being built; tools answer once it's done");
+    } else if freshness != Freshness::Fresh {
         freshness_line
             .push_str(" — results may miss recent changes; re-run 'vexus index' after big changes if this persists");
     }
@@ -607,6 +636,65 @@ mod tests {
         };
 
         assert_eq!(state.status_text().unwrap(), INDEX_NOT_READY);
+    }
+
+    /// While `serve` builds a missing index after the handshake, the index
+    /// is empty or half-linked: tools must say it isn't ready rather than
+    /// answer "no such code". The writer says it's building; a reader keeps
+    /// the message it gives with no index at all.
+    #[test]
+    fn tools_say_the_index_is_not_ready_while_its_first_build_is_indexing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def helper():\n    return 1\n");
+
+        let mut state = indexed_state(root);
+        {
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Indexing).unwrap();
+        }
+        let explore = crate::tools::explore::explore_text(&state, "helper", None);
+        assert_eq!(explore, INDEX_BUILDING);
+        assert_eq!(state.lock_store_fresh().err().unwrap(), INDEX_BUILDING);
+
+        state.is_writer = false;
+        assert_eq!(state.lock_store_fresh().err().unwrap(), INDEX_NOT_READY);
+
+        // The structural pass is done once the startup reconcile takes over.
+        {
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Reconciling).unwrap();
+        }
+        let explore = crate::tools::explore::explore_text(&state, "helper", None);
+        assert!(explore.contains("a.py"), "{explore:?}");
+    }
+
+    /// `status` is how a caller finds out about a first build, so it answers
+    /// during one, with the real counts.
+    #[test]
+    fn status_text_reports_a_first_build_instead_of_refusing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def f():\n    return 1\n");
+
+        let state = indexed_state(root);
+        {
+            let mut guard = state.store.lock().unwrap();
+            set_freshness(guard.as_mut().unwrap(), Freshness::Indexing).unwrap();
+        }
+
+        let text = state.status_text().unwrap();
+        assert!(text.starts_with("index: 1 files"), "{text:?}");
+        let freshness_line = text.lines().nth(2).unwrap();
+        assert!(
+            freshness_line.starts_with("freshness: indexing (since "),
+            "{freshness_line:?}"
+        );
+        assert!(
+            freshness_line
+                .ends_with("— the index is still being built; tools answer once it's done"),
+            "{freshness_line:?}"
+        );
     }
 
     #[test]
