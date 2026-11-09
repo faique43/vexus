@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
-use vexus_watch::{pipeline, Freshness, WriterLock};
+use vexus_watch::WriterLock;
 
 use crate::state::AppState;
 use crate::writer::{start_writer, WriterHandle};
@@ -46,13 +46,38 @@ const READER_BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// stdio MCP session (until the client disconnects); builds its own tokio
 /// runtime internally so callers don't need to be async.
 pub fn serve(root: PathBuf) -> Result<()> {
+    serve_on(root, rmcp::transport::stdio(), || {
+        vexus_embed::select::make_embedder().map(Arc::from)
+    })
+}
+
+/// [`serve`] over any transport, with the writer's embedder supplied by the
+/// caller, so a test can run a real handshake in-process with an embedder of
+/// its choosing.
+fn serve_on<T, E, A>(
+    root: PathBuf,
+    transport: T,
+    make_embedder: impl FnOnce() -> Option<Arc<dyn vexus_embed::Embedder>>,
+) -> Result<()>
+where
+    T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(serve_async(root))
+    rt.block_on(serve_async(root, transport, make_embedder))
 }
 
-async fn serve_async(root: PathBuf) -> Result<()> {
+async fn serve_async<T, E, A>(
+    root: PathBuf,
+    transport: T,
+    make_embedder: impl FnOnce() -> Option<Arc<dyn vexus_embed::Embedder>>,
+) -> Result<()>
+where
+    T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     let db_path = root.join(".vexus/index.db");
 
     // Try to acquire the advisory writer lock. If another process holds it,
@@ -78,26 +103,23 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     // shutdown. Whatever it learns is picked up by the next invocation.
     std::thread::spawn(update::refresh_if_stale);
 
-    // Only the writer does startup indexing. The writer also always needs an
-    // embedder (for `start_writer` below), so it's built exactly once here
-    // and later seeded into `AppState`'s `OnceLock` — previously the startup
-    // index build and `state.embedder()` each constructed their own ORT
-    // session, paying the ~160 MB model load twice on a cold first run.
+    // The writer always needs an embedder (for `start_writer` below), so it's
+    // built exactly once here and later seeded into `AppState`'s `OnceLock`
+    // rather than `state.embedder()` loading the ~160 MB model a second time.
+    //
+    // Opening the store here creates `index.db` (or recreates it, if a schema
+    // bump wiped it) for the reader connection below. Building a missing
+    // index does not happen here: it belongs to the writer thread, after the
+    // handshake (see `start_writer`).
     let mut prebuilt_embedder: Option<Option<Arc<dyn vexus_embed::Embedder>>> = None;
     if is_writer {
-        let mut store = vexus_core::Store::open(&db_path)
+        vexus_core::Store::open(&db_path)
             .with_context(|| format!("failed to open index at {}", db_path.display()))?;
         // Self-ignoring dir, like target/ — same convention as the CLI's
         // `open_store`. Best-effort: a stray `.gitignore` we can't write (e.g.
         // read-only checkout) is a nuisance, not a reason to refuse to serve.
         let _ = std::fs::write(root.join(".vexus/.gitignore"), "*\n");
-
-        let embedder: Option<Arc<dyn vexus_embed::Embedder>> =
-            vexus_embed::select::make_embedder().map(Arc::from);
-        if store.counts()?.files == 0 {
-            build_startup_index_if_empty(&root, &mut store, embedder.as_deref())?;
-        }
-        prebuilt_embedder = Some(embedder);
+        prebuilt_embedder = Some(make_embedder());
     }
 
     // Tool handlers only ever read; opening read-only keeps concurrent
@@ -174,8 +196,7 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     }
 
     // Only reachable via the reader path's None arm above (the writer
-    // branch always populates `initial_store`, and the writer's own eager
-    // startup index build means it never races anything to begin with).
+    // branch always populates `initial_store`: it created `index.db` itself).
     if state.lock_store().is_none() {
         spawn_background_reader_retry(Arc::clone(&state), db_path.clone(), root.clone());
     }
@@ -194,79 +215,13 @@ async fn serve_async(root: PathBuf) -> Result<()> {
     }
 
     let server = server::VexusServer::new(state);
-    server
-        .serve(rmcp::transport::stdio())
-        .await?
-        .waiting()
-        .await?;
+    server.serve(transport).await?.waiting().await?;
     // Explicit, even though it would happen anyway when `writer_handle`
     // goes out of scope at the end of the function: this is the actual
     // "tell the writer thread to shut down, then wait for it" step, and it
     // belongs right here — once serving is genuinely done — not any
     // earlier.
     drop(writer_handle);
-    Ok(())
-}
-
-/// Builds the very first index for a freshly-created (or still-empty)
-/// `.vexus/index.db` — only reachable, per `serve_async`, when this process
-/// won the writer lock *and* `store.counts()?.files == 0`. A failed initial
-/// index degrades to serving an empty/partial index rather than refusing to
-/// start at all — `status` still reports the truth, and tools simply have
-/// less to work with until the caller re-runs `vexus index`.
-///
-/// Marks the index `Indexing` before any of this
-/// runs, and deliberately does **not** transition it to `Fresh`/`Degraded`
-/// itself once done — that's left to the writer thread's own reconcile pass
-/// (`spawn_writer`'s `do_reconcile: true`, started later in `serve_async`),
-/// which already goes `Reconciling` -> `Fresh`/`Degraded` on its own. Without
-/// this, a `status` call made while this (potentially slow, on a large repo)
-/// initial build is still running would see the default `Fresh` reading
-/// (absent `meta('freshness')` reads as `Fresh` — see
-/// `freshness::get_freshness`), falsely claiming the index is caught up
-/// while it's still being built from scratch.
-fn build_startup_index_if_empty(
-    root: &Path,
-    store: &mut vexus_core::Store,
-    embedder: Option<&dyn vexus_embed::Embedder>,
-) -> Result<()> {
-    let _ = vexus_watch::set_freshness(store, Freshness::Indexing);
-
-    eprintln!("vexus: no index found for {root:?} — building one now...");
-    match pipeline::index_repo(root, store)
-        .with_context(|| format!("failed to index repo at {}", root.display()))
-    {
-        Ok(report) => {
-            eprintln!(
-                "vexus: indexed {} files ({} failed)",
-                report.indexed,
-                report.failed.len()
-            );
-            if store.vec_available() {
-                match embedder {
-                    Some(embedder) => {
-                        store.set_model(embedder.id(), embedder.dim())?;
-                        match pipeline::embed_pending(store, embedder) {
-                            Ok(er) => eprintln!("vexus: embedded {} chunks", er.embedded),
-                            Err(e) => {
-                                eprintln!(
-                                    "vexus: embedding failed ({e:#}); serving structural-only"
-                                )
-                            }
-                        }
-                    }
-                    None => eprintln!("vexus: embeddings unavailable; serving structural-only"),
-                }
-            } else {
-                eprintln!(
-                    "vexus: embeddings skipped (sqlite-vec unavailable); serving structural-only"
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("vexus: initial indexing failed ({e:#}); serving with an empty index");
-        }
-    }
     Ok(())
 }
 
@@ -632,36 +587,158 @@ mod tests {
         );
     }
 
-    /// `build_startup_index_if_empty` must mark the
-    /// index `Indexing` before it starts, and — this is the property that
-    /// actually matters here — must NOT itself transition it onward once
-    /// the build finishes; only the writer thread's later reconcile pass
-    /// (started separately, after this function returns, back in
-    /// `serve_async`) owns that `Reconciling` -> `Fresh`/`Degraded` step. A
-    /// `status` read taken anywhere between "the initial build just
-    /// finished" and "the writer thread's reconcile pass has run" must see
-    /// `Indexing`, not a stale-looking `Fresh`.
-    #[test]
-    fn build_startup_index_if_empty_marks_indexing_and_leaves_the_transition_to_the_writer() {
+    /// Embeds like `MockEmbedder`, but every batch takes `self.0`: a real
+    /// model's first pass over a repo takes minutes.
+    struct SlowEmbedder(Duration);
+
+    impl vexus_embed::Embedder for SlowEmbedder {
+        fn id(&self) -> &str {
+            "slow-mock"
+        }
+        fn dim(&self) -> usize {
+            vexus_embed::Embedder::dim(&vexus_embed::MockEmbedder)
+        }
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            std::thread::sleep(self.0);
+            vexus_embed::Embedder::embed(&vexus_embed::MockEmbedder, texts)
+        }
+    }
+
+    async fn call_tool(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        name: &'static str,
+        arguments: Option<rmcp::serde_json::Value>,
+    ) -> String {
+        let mut params = rmcp::model::CallToolRequestParams::new(name);
+        if let Some(arguments) = arguments {
+            params = params.with_arguments(rmcp::model::object(arguments));
+        }
+        let result = client
+            .call_tool(params)
+            .await
+            .unwrap_or_else(|e| panic!("{name} failed: {e}"));
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text())
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Calls `status` until `done` holds, returning that status text, or
+    /// panics with the last one seen once `within` runs out.
+    async fn wait_for_status(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        within: Duration,
+        done: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let status = call_tool(client, "status", None).await;
+            if done(&status) {
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "status never got there within {within:?}: {status:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn embed_backlog(status: &str) -> i64 {
+        status
+            .split("embed backlog: ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no embed backlog in status: {status:?}"))
+    }
+
+    /// Runs `serve` in-process against `root`, whose index is missing or
+    /// unusable, with an embedder that takes seconds per batch. Claude Code
+    /// gives up on a server that hasn't answered `initialize` within 30s, and
+    /// `serve` used to build the whole index, embeddings included, before
+    /// answering it. The handshake must not wait for that build, and the
+    /// build must still finish: structure first, so tools work while the
+    /// embeddings are still running.
+    async fn serve_answers_at_once_and_builds_in_the_background(root: &Path) {
+        std::fs::write(
+            root.join("app.py"),
+            "def alpha_process():\n    return unique_marker_beta()\n\n\n\
+             def unique_marker_beta():\n    return 42\n",
+        )
+        .unwrap();
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server_root = root.to_path_buf();
+        let server = std::thread::spawn(move || {
+            serve_on(server_root, server_io, || {
+                Some(Arc::new(SlowEmbedder(Duration::from_secs(4))))
+            })
+        });
+
+        let client = tokio::time::timeout(Duration::from_secs(2), ().serve(client_io))
+            .await
+            .expect("initialize must be answered within 2s, without waiting for the index")
+            .expect("initialize handshake failed");
+        let tools = tokio::time::timeout(Duration::from_secs(2), client.list_all_tools())
+            .await
+            .expect("tools/list must be answered within 2s")
+            .expect("tools/list failed");
+        assert!(tools.iter().any(|t| t.name == "explore"), "{tools:?}");
+
+        // Structure lands first: the index is queryable while the slow
+        // embedder is still on its first batch.
+        let status = wait_for_status(&client, Duration::from_secs(20), |s| {
+            s.contains("freshness: fresh") && !s.contains("index: 0 files")
+        })
+        .await;
+        assert!(
+            embed_backlog(&status) > 0,
+            "the structural index must not wait for embeddings: {status:?}"
+        );
+        let callees = call_tool(
+            &client,
+            "trace",
+            Some(rmcp::serde_json::json!({
+                "symbol": "app.alpha_process",
+                "direction": "callees",
+            })),
+        )
+        .await;
+        assert!(callees.contains("unique_marker_beta"), "{callees:?}");
+
+        // Then the embeddings finish on their own.
+        wait_for_status(&client, Duration::from_secs(30), |s| embed_backlog(s) == 0).await;
+
+        client.cancel().await.expect("clean MCP shutdown failed");
+        server
+            .join()
+            .expect("serve panicked")
+            .expect("serve returned an error");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_answers_initialize_before_building_a_missing_index() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        std::fs::write(root.join("a.py"), "def helper():\n    return 1\n").unwrap();
+        assert!(!dir.path().join(".vexus").exists());
+        serve_answers_at_once_and_builds_in_the_background(dir.path()).await;
+    }
 
-        let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
-        assert_eq!(store.counts().unwrap().files, 0);
-
-        build_startup_index_if_empty(&root, &mut store, Some(&vexus_embed::MockEmbedder)).unwrap();
-
-        assert_eq!(
-            store.counts().unwrap().files,
-            1,
-            "the startup index itself must still actually run"
-        );
-        assert_eq!(
-            vexus_watch::get_freshness(&store).unwrap(),
-            Freshness::Indexing,
-            "must be left at Indexing — only the later writer-thread reconcile pass \
-             transitions it onward to Fresh/Degraded (item 4)"
-        );
+    /// A schema bump wipes the old index on open, which lands on the same
+    /// cold path as a repo that was never indexed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_answers_initialize_before_rebuilding_an_outdated_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("old.py"), "def old():\n    return 1\n").unwrap();
+        {
+            let mut store = vexus_core::Store::open(&root.join(".vexus/index.db")).unwrap();
+            vexus_watch::pipeline::index_repo(root, &mut store).unwrap();
+            store.set_meta("schema_version", "0").unwrap();
+        }
+        serve_answers_at_once_and_builds_in_the_background(root).await;
     }
 }

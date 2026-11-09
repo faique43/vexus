@@ -1,8 +1,9 @@
 //! The writer thread wiring `serve_async` uses when this process wins the
-//! advisory `.vexus/lock`: opens a dedicated writer `Store`, spawns
-//! `vexus_watch::spawn_writer` on its own thread (holding the `WriterLock`
-//! for that thread's whole life), and hands back a [`WriterHandle`] whose
-//! `Drop` signals shutdown and joins the thread.
+//! advisory `.vexus/lock`: opens a dedicated writer `Store`, spawns a thread
+//! that builds the index if there is none yet and then runs
+//! `vexus_watch::spawn_writer` (holding the `WriterLock` for that thread's
+//! whole life), and hands back a [`WriterHandle`] whose `Drop` signals
+//! shutdown and joins the thread.
 //!
 //! Pulled out of `serve_async` into its own testable unit after a real bug:
 //! an earlier version's shutdown-channel sender was scoped to end *inside*
@@ -18,14 +19,16 @@
 //! thread stops" an invariant of the type itself, rather than something
 //! every future caller has to get right by eye.
 
-use std::path::Path;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
+use vexus_core::Store;
 use vexus_embed::Embedder;
-use vexus_watch::WriterLock;
+use vexus_watch::{pipeline, set_freshness, Freshness, WriterLock};
 
 /// Owns the writer thread's lifetime. While a `WriterHandle` is alive, the
 /// writer thread (reconcile + filesystem watch, per
@@ -75,18 +78,32 @@ impl Drop for WriterHandle {
 /// [`WriterHandle`] for it. Callers must hold the returned handle for as
 /// long as the writer should keep running — dropping it early stops the
 /// writer immediately, however soon that is.
+///
+/// An empty index (a first run, or a schema bump that wiped the old one) is
+/// built on that thread, not here: `serve` calls this before it answers the
+/// MCP `initialize` handshake, and clients give up on a server that takes
+/// too long to (Claude Code waits 30s). Only the `Indexing` mark happens
+/// here, so a `status` call can never see a new, empty index as `fresh`.
 pub(crate) fn start_writer(
-    root: std::path::PathBuf,
+    root: PathBuf,
     db_path: &Path,
     embedder: Option<Arc<dyn Embedder>>,
     lock: WriterLock,
 ) -> Result<WriterHandle> {
-    let writer_store = vexus_core::Store::open(db_path)
+    let mut writer_store = Store::open(db_path)
         .with_context(|| format!("failed to open writer index at {}", db_path.display()))?;
+    let first_build = writer_store.counts()?.files == 0;
+    if first_build {
+        let _ = set_freshness(&mut writer_store, Freshness::Indexing);
+        eprintln!("vexus: no index found for {root:?} — building one in the background...");
+    }
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
     let join = std::thread::spawn(move || {
         // Hold the WriterLock for the duration of this thread.
         let _lock = lock;
+        if first_build {
+            build_structural_index(&root, &mut writer_store);
+        }
         let inner_handle = vexus_watch::spawn_writer(root, writer_store, embedder, shutdown_rx);
         let _ = inner_handle.join();
     });
@@ -94,6 +111,30 @@ pub(crate) fn start_writer(
         shutdown_tx: Some(shutdown_tx),
         join: Some(join),
     })
+}
+
+/// The first half of building an index from nothing: every file parsed and
+/// its calls linked, without embeddings, so tools can answer as soon as this
+/// returns rather than after minutes of embedding. What follows on the same
+/// thread finishes the job: `spawn_writer`'s startup reconcile moves the
+/// index from `Indexing` to `Fresh` (or `Degraded`), then its backlog drain
+/// embeds every chunk, resumably.
+///
+/// A failure, or a panic, leaves whatever was indexed in place: the
+/// reconcile that follows goes over every file anyway. Left to unwind, a
+/// panic would end this thread before the watcher started, with the index
+/// stuck at `Indexing` and every tool refusing to answer.
+fn build_structural_index(root: &Path, store: &mut Store) {
+    let built = std::panic::catch_unwind(AssertUnwindSafe(|| pipeline::index_repo(root, store)));
+    match built {
+        Ok(Ok(report)) => eprintln!(
+            "vexus: indexed {} files ({} failed)",
+            report.indexed,
+            report.failed.len()
+        ),
+        Ok(Err(e)) => eprintln!("vexus: initial indexing failed ({e:#}); reconciling instead"),
+        Err(_) => eprintln!("vexus: initial indexing panicked; reconciling instead"),
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +192,62 @@ mod tests {
         // `drop(handle)` above returns, the thread is already gone — this
         // is really just double-checking `Drop`'s own join succeeded rather
         // than e.g. panicking or hanging.
+    }
+
+    /// `serve` calls `start_writer` before answering the MCP handshake, so an
+    /// empty index must already be marked `Indexing` when this returns — a
+    /// new database has no freshness yet, which reads as `fresh` — and then
+    /// get built on the thread: structure, the startup reconcile, and every
+    /// chunk embedded.
+    #[test]
+    fn start_writer_marks_an_empty_index_indexing_then_builds_it_on_the_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        write(&root, "a.py", "def helper():\n    return 1\n");
+
+        let db_path = root.join(".vexus/index.db");
+        drop(Store::open(&db_path).unwrap());
+        let reader = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(reader.meta("freshness").unwrap(), None);
+
+        let lock = WriterLock::try_acquire(&root)
+            .unwrap()
+            .expect("nothing else holds the lock in this fresh tempdir");
+        let handle = start_writer(
+            root.clone(),
+            &db_path,
+            Some(Arc::new(vexus_embed::MockEmbedder)),
+            lock,
+        )
+        .unwrap();
+
+        assert!(
+            reader.meta("freshness").unwrap().is_some(),
+            "the empty index must be marked before start_writer returns"
+        );
+        let freshness = vexus_watch::get_freshness(&reader).unwrap();
+        let files = reader.counts().unwrap().files;
+        assert!(
+            !(freshness == Freshness::Fresh && files == 0),
+            "an empty index must never read as fresh"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let freshness = vexus_watch::get_freshness(&reader).unwrap();
+            let files = reader.counts().unwrap().files;
+            let backlog = reader.embed_backlog().unwrap();
+            if freshness == Freshness::Fresh && files == 1 && backlog == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never built: {freshness:?}, {files} files, {backlog} chunks unembedded"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(reader.meta("model_id").unwrap().as_deref(), Some("mock"));
+
+        drop(handle);
     }
 }

@@ -57,7 +57,7 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: u32,
     },
-    /// Run the MCP server over stdio (builds the index first if none exists)
+    /// Run the MCP server over stdio (builds the index in the background if none exists)
     Serve { path: Option<PathBuf> },
     /// Set up an agent: hooks for claude-code, rules for cursor, a snippet for generic
     Init {
@@ -329,6 +329,13 @@ fn main() -> Result<()> {
             };
             let mut store = open_store(&root)?;
             let r = pipeline::index_repo(&root, &mut store)?;
+            // `Indexing` is only ever set by a `vexus serve` building a
+            // missing index, under the lock this run now holds, so one found
+            // here was left by a serve that stopped part way. MCP tools won't
+            // answer while it stands, and the index is now built in full.
+            if vexus_watch::get_freshness(&store)? == vexus_watch::Freshness::Indexing {
+                vexus_watch::set_freshness(&mut store, vexus_watch::Freshness::Fresh)?;
+            }
             println!(
                 "indexed: {}  unchanged: {}  skipped: {}  removed: {}  failed: {}",
                 r.indexed,
