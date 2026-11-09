@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.1 — connects on the first run
+
+### Fixed
+
+- **`vexus serve` answers the agent straight away, even with no index.** It
+  used to build the whole index, embeddings included, before answering the MCP
+  handshake. On a 160-file repo that took about two minutes, and Claude Code
+  gives up after 30 s, so vexus failed to connect on a fresh clone and on the
+  first session after any upgrade that changes the index schema, 0.4 to 0.5
+  included. The index now builds in the background: structure first, in
+  seconds, then embeddings. Until the structure is in, tools say the index is
+  still being built and `status` shows `freshness: indexing`.
+- **A first run no longer waits for the model download.** On a machine that
+  had never run vexus, `serve` downloaded the ~160 MB model before answering,
+  which took 42 s here. The model now loads in the background too, and tools
+  search by keyword until it's ready.
+- **`vexus index` clears the mark a `serve` stopped mid-build leaves behind,**
+  so other sessions don't keep saying the index is still being built.
+
 ## v0.5.0 — a prompt hook instead of tools
 
 Re-run `vexus init --agent claude-code` to get the hook. Older installs can
