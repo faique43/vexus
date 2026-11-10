@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.5.2 — hints find the right file more often
+
+Upgrading embeds each index again, once, in the background. On a large repo
+that takes a few minutes, and searches use the old vectors until it's done.
+
+### Changed
+
+- **Code is embedded under its file's path and symbol name.** A question names
+  the component, "the NATS client", more often than anything inside it. On the
+  eval's graded queries with the real model, MRR went from .776 to .812 and
+  nDCG@10 from .768 to .835. On 31 real prompts, the prompt hook put the fix's
+  file in its top three on 24 instead of 21. A full index takes about a quarter
+  longer: NestJS went from 185 s to 237 s.
+
+### Fixed
+
+- **The first prompt after `vexus index` no longer re-indexes the repo.** Only
+  the hook's own background refresh recorded that the index was current, so
+  the next prompt after a manual index, or after `vexus init` on an indexed
+  repo, started indexing an unchanged repo again.
+
 ## v0.5.1 — connects on the first run
 
 ### Fixed
