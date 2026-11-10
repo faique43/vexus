@@ -11,7 +11,16 @@ python3 setup.py repos && python3 setup.py real && python3 setup.py index
 python3 run.py tasks --sets small,named,vague --arms plain,hook --rounds 3 --tag final
 python3 run.py long --arms plain,hook --rounds 6 --tag long
 python3 run.py questions --arms plain,hook,mcp --rounds 3 --tag questions
-python3 summary.py final
+python3 summary.py final            # summary.py TAG plain-default for -default arms
+python3 attribute.py final
+```
+
+Before a live run, `locate_report.py` scores the hook's hints against the
+files each fix changed, in under a minute and for free:
+
+```sh
+python3 locate_report.py --tag main
+python3 locate_report.py --tag branch --baseline main   # with VEXUS_BIN set to the branch's build
 ```
 
 Needs `claude`, `gh`, `git`, `bun` and `node`. A full run costs about $30 of
@@ -36,9 +45,23 @@ later or a cold cache moves costs by more than most effects here. Compare arms
 from the same run, never across runs.
 
 An arm with `-tests` may also run the project's test command, and nothing else.
+An arm with `-default` gets Claude Code's own tool set, minus the web. That's
+what people run: on macOS and Linux it has no Grep or Glob, so searches go
+through Bash, and the agent can start Explore subagents. The fixed tool set
+the other arms use makes their numbers easier to compare with each other, but
+it's not a session anyone has. The `plain` arms find no `vexus` on PATH, so
+an agent with Bash can't reach it.
 Prompts in `named` come from public issue text, so an agent there doesn't get
 an open shell.
 
 A saving also needs a control that does the same thing without Vexus. Steering
 text once looked like a 21% saving, and the same advice with plain tools saved
 as much.
+
+The hook stays silent on every `named` prompt: a filed issue is long and names
+its code. So `hook` against `plain` there is two runs of the same thing, and
+its spread shows how far noise alone moves a result.
+
+`attribute.py` splits each arm's cost into the prefix every turn re-reads,
+each tool's results, output and subagents. It fits the per-token prices from
+the sessions' own reported costs.

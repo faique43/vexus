@@ -129,7 +129,7 @@ def large():
     if not os.path.isdir(clone):
         sh(f"git clone -q --filter=blob:none --no-checkout https://github.com/{repo} {clone}", timeout=1800)
     fields = "number,title,files,mergeCommit,closingIssuesReferences,mergedAt"
-    prs = json.loads(sh(f"gh pr list -R {repo} --state merged --limit 600 --search 'fix in:title' --json {fields}").stdout)
+    prs = json.loads(sh(f"gh pr list -R {repo} --state merged --limit 200 --search 'fix in:title' --json {fields}").stdout)
     keep = []
     for pr in prs:
         src = [f["path"] for f in pr["files"] if f["path"].endswith(".ts") and f["path"].startswith("src/") and ".test." not in f["path"] and "/test/" not in f["path"]]
