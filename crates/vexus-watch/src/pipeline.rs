@@ -276,8 +276,8 @@ pub fn embed_pending(store: &mut Store, embedder: &dyn Embedder) -> Result<Embed
         if missing.is_empty() {
             break;
         }
-        // The store returns identical chunks side by side, so each set is
-        // embedded once and shares the vector. 16% of NestJS's chunks repeat.
+        // The store returns identical texts side by side, so each set is
+        // embedded once and shares the vector.
         let unique: Vec<_> = missing.chunk_by(|a, b| a.2 == b.2).collect();
         let texts: Vec<&str> = unique.iter().map(|same| same[0].1.as_str()).collect();
         let vecs = embedder.embed(&texts)?;
@@ -655,8 +655,11 @@ mod tests {
         }
     }
 
+    /// A chunk copied into two files is embedded once in each, under each
+    /// one's path: a question about one component shouldn't match its copy
+    /// elsewhere just as well.
     #[test]
-    fn embed_pending_embeds_identical_chunks_once() {
+    fn embed_pending_embeds_a_copied_chunk_under_each_path() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let same = "def same():\n    return 'the same body everywhere'\n";
@@ -671,7 +674,10 @@ mod tests {
         let report = embed_pending(&mut store, &embedder).unwrap();
 
         let sent = embedder.batches.lock().unwrap().concat();
-        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        let copies: Vec<&String> = sent.iter().filter(|t| t.contains("def same")).collect();
+        assert!(copies.iter().any(|t| t.starts_with("a.py\n")), "{copies:?}");
+        assert!(copies.iter().any(|t| t.starts_with("b.py\n")), "{copies:?}");
         assert_eq!(report.embedded, 3);
         assert_eq!(store.embed_backlog().unwrap(), 0);
     }
