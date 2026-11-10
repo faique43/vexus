@@ -578,22 +578,47 @@ mod tests {
         );
     }
 
-    /// Embeds like `MockEmbedder`, but every batch takes `self.0`: a real
-    /// model's first pass over a repo takes minutes.
-    struct SlowEmbedder(Duration);
+    /// Shut until the test opens it. Whatever waits on it can't finish before
+    /// the test says so, however fast or slow the machine is.
+    #[derive(Clone, Default)]
+    struct Gate(Arc<(Mutex<bool>, std::sync::Condvar)>);
 
-    impl vexus_embed::Embedder for SlowEmbedder {
+    impl Gate {
+        fn open(&self) {
+            *self.0 .0.lock().unwrap() = true;
+            self.0 .1.notify_all();
+        }
+        fn wait(&self) {
+            let (open, cvar) = &*self.0;
+            let _open = cvar
+                .wait_while(open.lock().unwrap(), |open| !*open)
+                .unwrap();
+        }
+    }
+
+    /// Embeds like `MockEmbedder`, once its gate opens: a real model's first
+    /// pass over a repo takes minutes.
+    struct GatedEmbedder(Gate);
+
+    impl vexus_embed::Embedder for GatedEmbedder {
         fn id(&self) -> &str {
-            "slow-mock"
+            "gated-mock"
         }
         fn dim(&self) -> usize {
             vexus_embed::Embedder::dim(&vexus_embed::MockEmbedder)
         }
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-            std::thread::sleep(self.0);
+            self.0.wait();
             vexus_embed::Embedder::embed(&vexus_embed::MockEmbedder, texts)
         }
     }
+
+    /// How long a test waits for `initialize` and the first tool answers.
+    /// What these tests guard against is waiting on a gate the test holds
+    /// shut, which never ends, so this only has to beat a slow CI machine:
+    /// a fixed 2s bound against a sleeping embedder failed on Windows. It
+    /// stays under the 30s Claude Code gives a server to connect.
+    const ANSWER_WITHIN: Duration = Duration::from_secs(20);
 
     async fn call_tool(
         client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
@@ -648,7 +673,7 @@ mod tests {
     }
 
     /// Runs `serve` in-process against `root`, whose index is missing or
-    /// unusable, with an embedder that takes seconds per batch. Claude Code
+    /// unusable, with an embedder held shut until the end. Claude Code
     /// gives up on a server that hasn't answered `initialize` within 30s, and
     /// `serve` used to build the whole index, embeddings included, before
     /// answering it. The handshake must not wait for that build, and the
@@ -664,24 +689,26 @@ mod tests {
 
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let server_root = root.to_path_buf();
+        let gate = Gate::default();
+        let embedder_gate = gate.clone();
         let server = std::thread::spawn(move || {
-            serve_on(server_root, server_io, || {
-                Some(Arc::new(SlowEmbedder(Duration::from_secs(4))))
+            serve_on(server_root, server_io, move || {
+                Some(Arc::new(GatedEmbedder(embedder_gate)))
             })
         });
 
-        let client = tokio::time::timeout(Duration::from_secs(2), ().serve(client_io))
+        let client = tokio::time::timeout(ANSWER_WITHIN, ().serve(client_io))
             .await
-            .expect("initialize must be answered within 2s, without waiting for the index")
+            .expect("initialize must be answered without waiting for the index")
             .expect("initialize handshake failed");
-        let tools = tokio::time::timeout(Duration::from_secs(2), client.list_all_tools())
+        let tools = tokio::time::timeout(ANSWER_WITHIN, client.list_all_tools())
             .await
-            .expect("tools/list must be answered within 2s")
+            .expect("tools/list must be answered without waiting for the index")
             .expect("tools/list failed");
         assert!(tools.iter().any(|t| t.name == "explore"), "{tools:?}");
 
-        // Structure lands first: the index is queryable while the slow
-        // embedder is still on its first batch.
+        // Structure lands first: the index is queryable while the embedder
+        // can't have finished a single batch.
         let status = wait_for_status(&client, Duration::from_secs(20), |s| {
             s.contains("freshness: fresh") && !s.contains("index: 0 files")
         })
@@ -702,6 +729,7 @@ mod tests {
         assert!(callees.contains("unique_marker_beta"), "{callees:?}");
 
         // Then the embeddings finish on their own.
+        gate.open();
         wait_for_status(&client, Duration::from_secs(30), |s| embed_backlog(s) == 0).await;
 
         client.cancel().await.expect("clean MCP shutdown failed");
@@ -755,19 +783,21 @@ mod tests {
 
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let server_root = root.to_path_buf();
+        let gate = Gate::default();
+        let loading = gate.clone();
         let server = std::thread::spawn(move || {
-            serve_on(server_root, server_io, || {
-                std::thread::sleep(Duration::from_secs(6));
+            serve_on(server_root, server_io, move || {
+                loading.wait();
                 Some(Arc::new(vexus_embed::MockEmbedder))
             })
         });
 
-        let client = tokio::time::timeout(Duration::from_secs(2), ().serve(client_io))
+        let client = tokio::time::timeout(ANSWER_WITHIN, ().serve(client_io))
             .await
-            .expect("initialize must be answered within 2s, without waiting for the embedder")
+            .expect("initialize must be answered without waiting for the embedder")
             .expect("initialize handshake failed");
         let explore = tokio::time::timeout(
-            Duration::from_secs(2),
+            ANSWER_WITHIN,
             call_tool(
                 &client,
                 "explore",
@@ -775,9 +805,10 @@ mod tests {
             ),
         )
         .await
-        .expect("explore must answer within 2s, without waiting for the embedder");
+        .expect("explore must answer without waiting for the embedder");
         assert!(explore.contains("app.py"), "{explore:?}");
 
+        gate.open();
         wait_for_status(&client, Duration::from_secs(30), |s| embed_backlog(s) == 0).await;
 
         client.cancel().await.expect("clean MCP shutdown failed");
