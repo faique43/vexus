@@ -16,10 +16,13 @@ import collections
 import glob
 import json
 import os
+import re
 import sys
 
 WORK = os.environ.get("VEXUS_EVAL_WORK", os.path.expanduser("~/.cache/vexus-eval"))
 COLUMNS = ("input", "write5m", "write1h", "read", "output")
+SEARCH = {"grep", "rg", "find", "ls", "tree", "fd"}
+READ = {"cat", "head", "tail", "sed", "awk", "wc", "nl", "less"}
 
 
 def load(path):
@@ -70,8 +73,12 @@ def tool_kind(name, args):
     if name == "Read":
         return "Read (range)" if args.get("offset") or args.get("limit") else "Read (whole file)"
     if name == "Bash":
-        word = (args.get("command") or "").strip().split(" ")[0]
-        return "Bash grep/find" if word in ("grep", "rg", "find", "ls", "cat", "head", "tail", "sed", "wc") else "Bash other"
+        # The first word of each command in a chain, past any `cd`.
+        words = {seg.split()[0] for seg in re.split(r"&&|\|\||;|\||\n", args.get("command") or "") if seg.split()}
+        words |= {"grep" for w in words if w == "git" and re.search(r"git (grep|ls-files)", args.get("command") or "")}
+        if words & SEARCH:
+            return "Bash search"
+        return "Bash read" if words & READ else "Bash other"
     if name.startswith("mcp__vexus__"):
         return "vexus " + name.split("__")[-1]
     return name
@@ -150,8 +157,12 @@ def main():
     for arm in sorted(sessions):
         done = [x for x in (attribute(s, price) for s in sessions[arm]) if x]
         total = sum(x["cost"] for x in done)
-        parts = sum((x["parts"] for x in done), collections.Counter())
-        calls = sum((x["calls"] for x in done), collections.Counter())
+        # Counter's + drops zeros and negatives, which would hide a part.
+        parts, calls = collections.defaultdict(float), collections.Counter()
+        for x in done:
+            calls.update(x["calls"])
+            for k, v in x["parts"].items():
+                parts[k] += v
         n = len(done)
         print(f"\n{arm}: {n} sessions, ${total / n:.4f} a session, {sum(x['turns'] for x in done) / n:.1f} turns, "
               f"prefix {sum(x['prefix'] for x in done) / n / 1000:.1f}k tokens")
