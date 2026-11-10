@@ -5,7 +5,7 @@
   run.py long --arms plain,hook --rounds 6 --tag final
   run.py questions --rounds 3 --tag final
 
-Arms: plain (no vexus), hook (what `vexus init` installs), mcp (`--mcp`), and any
+Arms: plain (no vexus), hook (the prompt hook), mcp (the MCP server), both, and any
 of those with -tests, where the agent may also run the project's test command.
 Every arm in a run shares one time window, in random order, with caches warmed
 first. Costs real tokens: about $0.05 a short session.
@@ -39,10 +39,10 @@ VEXUS_MCP = json.dumps({"mcpServers": {"vexus": {"command": "vexus", "args": ["s
 
 def command(prompt, arm, tools, session=None, first=True):
     name, _, extra = arm.partition("-")
-    c = ["claude", "-p", prompt, "--setting-sources", "project", "--strict-mcp-config", "--mcp-config", VEXUS_MCP if name == "mcp" else NO_MCP,
+    c = ["claude", "-p", prompt, "--setting-sources", "project", "--strict-mcp-config", "--mcp-config", VEXUS_MCP if name in ("mcp", "both") else NO_MCP,
          "--disable-slash-commands", "--tools", tools + (",Bash" if extra == "tests" else ""), "--permission-mode", "acceptEdits",
-         "--model", MODEL, "--max-budget-usd", "4", "--output-format", "stream-json", "--verbose"]
-    allowed = ["mcp__vexus__*"] if name == "mcp" else []
+         "--model", MODEL, "--max-budget-usd", "4", "--output-format", "stream-json", "--verbose", "--include-hook-events"]
+    allowed = ["mcp__vexus__*"] if name in ("mcp", "both") else []
     allowed += [TEST_COMMAND] if extra == "tests" else []
     if allowed:
         c += ["--allowedTools", ",".join(allowed)]
@@ -56,7 +56,7 @@ def copy_repo(source, dest, arm):
     name = arm.partition("-")[0]
     if name == "plain":
         shutil.rmtree(f"{dest}/.vexus", ignore_errors=True)
-    if name == "hook":
+    if name in ("hook", "both"):
         subprocess.run(["vexus", "init", "--agent", "claude-code", "."], cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
