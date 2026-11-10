@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pools several runs. Each arm is compared with plain inside its own run, since
-costs drift between runs, and intervals resample tasks across all of them.
+costs drift between runs, and intervals resample tasks across all of them. An
+arm with a suffix, like hook-default, is compared with plain with the same one.
 Usage: pool.py TAG [TAG ...]"""
 import collections
 import json
@@ -25,14 +26,15 @@ def mean(v, f):
 
 def pairs(arm, sets):
     """(plain cost, arm cost, plain passed, arm passed) per run and task."""
+    control = "plain" + arm[len(arm.split("-")[0]):]
     out = []
     for by in runs.values():
-        if arm not in by:
+        if arm not in by or control not in by:
             continue
-        for k in by["plain"]:
+        for k in by[control]:
             if k in by[arm] and (sets is None or k[0] in sets):
-                out.append((mean(by["plain"][k], "cost"), mean(by[arm][k], "cost"),
-                            mean(by["plain"][k], "passed"), mean(by[arm][k], "passed"), k))
+                out.append((mean(by[control][k], "cost"), mean(by[arm][k], "cost"),
+                            mean(by[control][k], "passed"), mean(by[arm][k], "passed"), k))
     return out
 
 
@@ -52,10 +54,10 @@ def report(arm, sets, label):
         d.append((sum(p[1] for p in pick) / sum(p[0] for p in pick) - 1) * 100)
     d.sort()
     passed = (sum(p[3] for p in ps) - sum(p[2] for p in ps)) / len(ps) * 100
-    print(f"  {label:10} {arm:6} {change:+5.1f}% [{d[100]:+.0f},{d[3899]:+.0f}]  n={len(ps):3}  pass {passed:+.1f} pts")
+    print(f"  {label:10} {arm:13} {change:+5.1f}% [{d[100]:+.0f},{d[3899]:+.0f}]  n={len(ps):3}  pass {passed:+.1f} pts")
 
 
-arms = sorted({a for by in runs.values() for a in by if a != "plain"})
+arms = sorted({a for by in runs.values() for a in by if a.split("-")[0] != "plain"})
 for label, sets in (("changes", {"small", "named", "vague"}), ("small", {"small"}), ("named", {"named"}), ("vague", {"vague"}), ("questions", {"questions"})):
     for arm in arms:
         report(arm, sets, label)

@@ -6,7 +6,8 @@
   run.py questions --rounds 3 --tag final
 
 Arms: plain (no vexus), hook (the prompt hook), mcp (the MCP server), both, and any
-of those with -tests, where the agent may also run the project's test command.
+of those with -tests, where the agent may also run the project's test command,
+or -default, with Claude Code's own tool set instead of a fixed one.
 Every arm in a run shares one time window, in random order, with caches warmed
 first. Costs real tokens: about $0.05 a short session.
 """
@@ -35,20 +36,38 @@ LOCK = threading.Lock()
 TEST_COMMAND = "Bash(./node_modules/.bin/vitest:*)"
 NO_MCP = '{"mcpServers":{}}'
 VEXUS_MCP = json.dumps({"mcpServers": {"vexus": {"command": "vexus", "args": ["serve", "."]}}})
+# First on a plain arm's PATH, a `vexus` that isn't there. Once an agent has
+# Bash, deleting .vexus doesn't keep vexus out of the control.
+NO_VEXUS = tempfile.mkdtemp(prefix="no-vexus-")
+open(f"{NO_VEXUS}/vexus", "w").write("#!/bin/sh\necho 'vexus: command not found' >&2\nexit 127\n")
+os.chmod(f"{NO_VEXUS}/vexus", 0o755)
 
 
 def command(prompt, arm, tools, session=None, first=True):
-    name, _, extra = arm.partition("-")
+    name, *extras = arm.split("-")
     c = ["claude", "-p", prompt, "--setting-sources", "project", "--strict-mcp-config", "--mcp-config", VEXUS_MCP if name in ("mcp", "both") else NO_MCP,
-         "--disable-slash-commands", "--tools", tools + (",Bash" if extra == "tests" else ""), "--permission-mode", "acceptEdits",
+         "--disable-slash-commands", "--permission-mode", "acceptEdits",
          "--model", MODEL, "--max-budget-usd", "4", "--output-format", "stream-json", "--verbose", "--include-hook-events"]
+    if "default" in extras:
+        # What people run: on macOS and Linux that has no Grep or Glob, so the
+        # agent searches through Bash, and it can start Explore subagents. The
+        # web stays off, since a filed issue's fix is one search away.
+        c += ["--disallowedTools", "WebFetch,WebSearch" + ("" if "Edit" in tools else ",Edit,Write,NotebookEdit")]
+    else:
+        c += ["--tools", tools + (",Bash" if "tests" in extras else "")]
     allowed = ["mcp__vexus__*"] if name in ("mcp", "both") else []
-    allowed += [TEST_COMMAND] if extra == "tests" else []
+    allowed += [TEST_COMMAND] if "tests" in extras else []
     if allowed:
         c += ["--allowedTools", ",".join(allowed)]
     if session is None:
         return c + ["--no-session-persistence"]
     return c + (["--session-id", session] if first else ["--resume", session])
+
+
+def env(arm):
+    if arm.partition("-")[0] == "plain":
+        return dict(os.environ, PATH=NO_VEXUS + os.pathsep + os.environ["PATH"])
+    return None
 
 
 def copy_repo(source, dest, arm):
@@ -58,6 +77,9 @@ def copy_repo(source, dest, arm):
         shutil.rmtree(f"{dest}/.vexus", ignore_errors=True)
     if name in ("hook", "both"):
         subprocess.run(["vexus", "init", "--agent", "claude-code", "."], cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        # The index came in current. Without this the hook's five-minute refresh
+        # re-indexes an unchanged repo in the background, in every session at once.
+        open(f"{dest}/.vexus/refreshed", "w").close()
 
 
 def measure(path):
@@ -109,8 +131,8 @@ def pool(jobs, workers, work):
 
 def warm(arms, tools):
     d = tempfile.mkdtemp()
-    for arm in {a.partition("-")[0] for a in arms}:
-        subprocess.run(command("reply ok", arm, tools), cwd=d, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    for arm in {a.replace("-tests", "") for a in arms}:
+        subprocess.run(command("reply ok", arm, tools), cwd=d, env=env(arm), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
 
 
 def real_spec_passes(path, t):
@@ -158,7 +180,7 @@ def run_task(rnd, t, arm, tag):
     timed_out = False
     with open(f"{path}.jsonl", "w") as f:
         try:
-            subprocess.run(command(prompt, arm, "Read,Grep,Glob,Edit,Write"), cwd=path, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, timeout=600)
+            subprocess.run(command(prompt, arm, "Read,Grep,Glob,Edit,Write"), cwd=path, env=env(arm), stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, timeout=600)
         except subprocess.TimeoutExpired:
             timed_out = True
     row = measure(f"{path}.jsonl")
@@ -191,7 +213,7 @@ def run_long(rnd, repo, prompts, arm, tag):
     started = time.time()
     for i, task in enumerate(order):
         with open(f"{path}-{i}.jsonl", "w") as f:
-            subprocess.run(command(prompts[task], arm, "Read,Grep,Glob,Edit,Write", session, i == 0), cwd=path, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, timeout=600)
+            subprocess.run(command(prompts[task], arm, "Read,Grep,Glob,Edit,Write", session, i == 0), cwd=path, env=env(arm), stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, timeout=600)
         m = measure(f"{path}-{i}.jsonl")
         # total_cost_usd is cumulative across --resume, so the last one is the session's.
         cost = m.get("cost") or cost
@@ -207,7 +229,7 @@ def run_question(rnd, repo, task, question, names, arm, tag):
     path = f"{OUT}/{tag}/r{rnd}-{task}-{arm}"
     copy_repo(f"{WORK}/base/{repo}", path, arm)
     with open(f"{path}.jsonl", "w") as f:
-        subprocess.run(command(question, arm, "Read,Grep,Glob"), cwd=path, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, timeout=300)
+        subprocess.run(command(question, arm, "Read,Grep,Glob"), cwd=path, env=env(arm), stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, timeout=300)
     row = measure(f"{path}.jsonl")
     answer = (row.get("answer") or "").lower()
     row.update(round=rnd, set="questions", task=task, arm=arm, covered=sum(n.lower() in answer for n in names), of=len(names), passed=sum(n.lower() in answer for n in names))
