@@ -41,6 +41,28 @@ SEEDS = {
 }
 
 
+# The existing files a fix changes, for scoring the hook's hints offline. Taken
+# from passing sessions: every file that more than half of them changed. A task
+# that adds a file lists only what it edits, since a hint can't point at a file
+# that doesn't exist yet.
+FILES = {
+    "E1": ["lib/response.js"],
+    "E2": ["lib/request.js"],
+    "E3": ["lib/response.js"],
+    "E4": ["lib/response.js"],
+    "E5": ["lib/response.js"],
+    "E6": ["lib/response.js"],
+    "E7": ["lib/request.js"],
+    "N1": ["packages/common/pipes/index.ts"],
+    "N2": ["packages/common/decorators/http/route-params.decorator.ts"],
+    "N3": ["packages/common/services/console-logger.service.ts"],
+    "N4": ["packages/core/errors/messages.ts"],
+    "N5": ["packages/core/router/router-explorer.ts"],
+    "N6": ["packages/microservices/client/client-tcp.ts", "packages/microservices/interfaces/client-metadata.interface.ts"],
+    "N7": ["packages/common/pipes/parse-int.pipe.ts"],
+}
+
+
 def changed_files(work_dir):
     out = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=work_dir, capture_output=True, text=True).stdout
     return [line[3:].strip().strip('"') for line in out.splitlines()]
