@@ -383,6 +383,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            hooks::mark_refreshed(&root);
             // A network round-trip is acceptable here — indexing already
             // took orders of magnitude longer, and the result only surfaces
             // on the NEXT invocation (status/serve read the cache, never
