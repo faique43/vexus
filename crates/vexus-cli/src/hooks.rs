@@ -270,13 +270,18 @@ pub fn refresh_index(root: &Path) {
     }
 }
 
+/// Records that the index was just brought up to date, so the next prompt
+/// doesn't start a refresh of its own. Whether the marker could be written.
+pub fn mark_refreshed(root: &Path) -> bool {
+    let vexus_dir = root.join(".vexus");
+    std::fs::create_dir_all(&vexus_dir).is_ok()
+        && std::fs::write(vexus_dir.join("refreshed"), b"").is_ok()
+}
+
 /// Starts `vexus index` and leaves it running. A second one exits at once, on
 /// the writer lock.
 pub fn index_in_background(root: &Path) {
-    let vexus_dir = root.join(".vexus");
-    if std::fs::create_dir_all(&vexus_dir).is_err()
-        || std::fs::write(vexus_dir.join("refreshed"), b"").is_err()
-    {
+    if !mark_refreshed(root) {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {

@@ -171,6 +171,33 @@ fn index_clears_the_mark_a_serve_stopped_mid_build_leaves() {
         .stdout(predicate::str::contains("freshness: fresh"));
 }
 
+/// The prompt hook re-indexes in the background once its marker is five
+/// minutes old. A `vexus index` has just done that work, so it sets the marker
+/// too, and the next prompt doesn't start a second run over an unchanged repo.
+#[test]
+fn index_counts_as_the_hooks_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app.py", "def f():\n    return 1\n");
+
+    Command::cargo_bin("vexus")
+        .unwrap()
+        .env("VEXUS_EMBEDDER", "none")
+        .args(["index", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let age = std::fs::metadata(root.join(".vexus/refreshed"))
+        .and_then(|m| m.modified())
+        .expect("index must leave the refresh marker")
+        .elapsed()
+        .unwrap();
+    assert!(
+        age < std::time::Duration::from_secs(60),
+        "marker is {age:?} old"
+    );
+}
+
 #[test]
 fn status_without_index_is_calm() {
     let dir = tempfile::tempdir().unwrap();
@@ -464,7 +491,6 @@ fn keyword_repo(root: &std::path::Path) {
         .args(["index", root.to_str().unwrap()])
         .assert()
         .success();
-    write(root, ".vexus/refreshed", "");
 }
 
 #[test]
